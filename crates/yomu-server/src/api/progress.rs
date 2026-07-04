@@ -4,9 +4,7 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
-use yomu_domain::{
-    EventsResponse, Position, ProgressEvent, PushEventsRequest, SetPositionRequest,
-};
+use yomu_domain::{EventsResponse, Position, ProgressEvent, PushEventsRequest, SetPositionRequest};
 
 use super::ApiError;
 use crate::state::AppState;

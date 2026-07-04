@@ -85,7 +85,10 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
 }
 
 /// Downloaded page files for a chapter, in reading order.
-pub async fn page_files(state: &AppState, chapter: &Chapter) -> std::io::Result<Vec<std::path::PathBuf>> {
+pub async fn page_files(
+    state: &AppState,
+    chapter: &Chapter,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
     let dir = state.chapter_dir(chapter.manga_id, chapter.id);
     let mut entries = Vec::new();
     let mut reader = tokio::fs::read_dir(&dir).await?;

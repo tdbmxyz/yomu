@@ -6,7 +6,6 @@ mod library;
 mod progress;
 mod sources;
 
-use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use tower_http::cors::CorsLayer;
@@ -32,7 +31,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/manga/{id}/refresh", axum::routing::post(library::refresh))
         .route("/manga/{id}/cover", get(library::cover))
-        .route("/manga/{id}/position", axum::routing::put(progress::set_position))
+        .route(
+            "/manga/{id}/position",
+            axum::routing::put(progress::set_position),
+        )
         .route(
             "/chapters/{id}/download",
             axum::routing::post(chapters::download),

@@ -18,8 +18,9 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::load().context("loading configuration")?;
 
-    let sources = Registry::load(&config.sources_dir)
-        .map_err(|e| anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display()))?;
+    let sources = Registry::load(&config.sources_dir).map_err(|e| {
+        anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display())
+    })?;
     if sources.is_empty() {
         tracing::warn!(
             dir = %config.sources_dir.display(),
