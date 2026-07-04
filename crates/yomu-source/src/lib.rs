@@ -1,0 +1,51 @@
+//! Source abstraction for yomu.
+//!
+//! A [`Source`] knows how to search a site, list a manga's chapters and
+//! resolve a chapter's page images. yomu deliberately has no extension
+//! system: sources are either declarative [`selector::SelectorSource`]s
+//! (a TOML file with CSS selectors — enough for most scan sites) or, later,
+//! native Rust implementations for API-based sites.
+
+pub mod registry;
+pub mod selector;
+
+use bytes::Bytes;
+use url::Url;
+use yomu_domain::{MangaDetails, MangaSummary};
+
+#[derive(Debug, thiserror::Error)]
+pub enum SourceError {
+    #[error("request failed: {0}")]
+    Http(String),
+    #[error("unexpected page structure: {0}")]
+    Parse(String),
+    #[error("invalid source definition: {0}")]
+    Definition(String),
+}
+
+pub type Result<T> = std::result::Result<T, SourceError>;
+
+/// A fetched page image with its content type.
+#[derive(Debug, Clone)]
+pub struct ImageData {
+    pub bytes: Bytes,
+    pub content_type: String,
+}
+
+#[async_trait::async_trait]
+pub trait Source: Send + Sync {
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn base_url(&self) -> &Url;
+
+    async fn search(&self, query: &str) -> Result<Vec<MangaSummary>>;
+
+    /// Details + chapter list for a manga key returned by `search`.
+    async fn manga(&self, key: &str) -> Result<MangaDetails>;
+
+    /// Image URLs of a chapter, in reading order.
+    async fn pages(&self, chapter_key: &str) -> Result<Vec<Url>>;
+
+    /// Fetch one image (page or cover). Sources may add referer headers etc.
+    async fn image(&self, url: &Url) -> Result<ImageData>;
+}

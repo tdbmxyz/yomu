@@ -1,0 +1,12 @@
+# Example yomu server configuration.
+# Copy to yomu.toml (or point YOMU_CONFIG at it) and adjust.
+
+listen = "0.0.0.0:4700"
+# static_dir = "/var/lib/yomu/www"
+db_path = "yomu.db"
+data_dir = "data"          # downloaded chapters + cover cache
+sources_dir = "sources.d"  # one *.toml per scan site
+
+[updater]
+enabled = true
+interval_secs = 21600      # check every 6 hours

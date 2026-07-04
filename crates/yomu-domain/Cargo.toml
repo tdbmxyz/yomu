@@ -1,0 +1,11 @@
+[package]
+name = "yomu-domain"
+description = "Shared domain types and API contract for yomu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+url.workspace = true

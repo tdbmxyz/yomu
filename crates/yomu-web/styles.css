@@ -1,0 +1,288 @@
+/* yomu — same dark base as chaos, plus library/reader specifics. */
+:root {
+  --bg: #14161c;
+  --surface: #1c1f27;
+  --border: #2a2e39;
+  --text: #d6d9e0;
+  --muted: #8a90a0;
+  --accent: #f0708a;
+  --down: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.topbar a[aria-current] {
+  color: var(--text);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-right: 1rem;
+}
+
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--down);
+}
+
+.status {
+  color: var(--accent);
+}
+
+.grow {
+  flex: 1;
+}
+
+input,
+select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  color: var(--text);
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button,
+.button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  color: var(--text);
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+button:hover,
+.button:hover {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary,
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #10121a;
+  font-weight: 600;
+}
+
+button.danger:hover {
+  border-color: var(--down);
+  color: var(--down);
+}
+
+/* library */
+
+.manga-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 1rem;
+}
+
+.manga-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.manga-cover {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.manga-cover.large {
+  width: 12rem;
+  flex-shrink: 0;
+}
+
+.manga-title {
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.manga-meta {
+  font-size: 0.8rem;
+}
+
+/* search */
+
+.search-form {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.result-list,
+.chapter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.result-item,
+.chapter-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.6rem 1rem;
+}
+
+.result-title {
+  font-weight: 600;
+}
+
+/* manga page */
+
+.manga-head {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.manga-head-body h2 {
+  margin-top: 0;
+}
+
+.manga-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.chapter-item.current {
+  border-color: var(--accent);
+}
+
+.chapter-title {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.chapter-title:hover {
+  color: var(--accent);
+}
+
+/* reader */
+
+.reader {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+.reader-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.25rem 0 0.75rem;
+}
+
+.reader-bar a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.reader-title {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-stage {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  background: #000;
+  border-radius: 0.5rem;
+  min-height: 20rem;
+}
+
+.reader-page {
+  max-width: 100%;
+  max-height: calc(100vh - 10rem);
+  object-fit: contain;
+}
+
+.page-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 35%;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.page-zone.left {
+  left: 0;
+}
+
+.page-zone.right {
+  right: 0;
+}
+
+.reader-nav {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}

@@ -1,0 +1,7 @@
+/target
+/crates/yomu-web/dist
+/result
+.direnv/
+*.db
+*.db-*
+/data
