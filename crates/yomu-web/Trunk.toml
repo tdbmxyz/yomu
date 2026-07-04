@@ -1,0 +1,11 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8081
+
+# Proxy API calls to a locally running yomu-server.
+[[proxy]]
+backend = "http://127.0.0.1:4700/api"

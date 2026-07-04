@@ -1,0 +1,19 @@
+[package]
+name = "yomu-source"
+description = "Scan-site source abstraction: trait + selector-driven implementation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+yomu-domain.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true

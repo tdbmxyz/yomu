@@ -1,0 +1,12 @@
+[package]
+name = "yomu-web"
+description = "Web entrypoint: mounts yomu-ui in the browser (built by trunk)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+yomu-ui.workspace = true
+console_error_panic_hook.workspace = true
+leptos.workspace = true
+url.workspace = true
+web-sys = { workspace = true, features = ["Window", "Location"] }

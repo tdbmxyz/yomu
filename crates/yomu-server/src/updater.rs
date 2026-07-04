@@ -1,0 +1,38 @@
+//! Periodic new-chapter checker: walks the whole library on an interval,
+//! re-syncing each manga against its source (which auto-queues downloads
+//! for manga that want them — see `sync::refresh_manga`).
+
+use std::time::Duration;
+
+use crate::state::AppState;
+use crate::sync;
+
+pub fn spawn(state: AppState) {
+    if state.config.updater.enabled {
+        tokio::spawn(run(state));
+    }
+}
+
+async fn run(state: AppState) {
+    let interval = Duration::from_secs(state.config.updater.interval_secs);
+    loop {
+        // Sleep first: startup should not hammer every source at once,
+        // and a fresh library was just synced by its add flow anyway.
+        tokio::time::sleep(interval).await;
+
+        let manga = match state.db.list_manga().await {
+            Ok(manga) => manga,
+            Err(err) => {
+                tracing::error!(%err, "listing library for update check");
+                continue;
+            }
+        };
+        tracing::info!(count = manga.len(), "checking library for new chapters");
+        for entry in manga {
+            if let Err(err) = sync::refresh_manga(&state, &entry).await {
+                // One broken source must not stop the sweep.
+                tracing::warn!(manga = %entry.title, %err, "update check failed");
+            }
+        }
+    }
+}

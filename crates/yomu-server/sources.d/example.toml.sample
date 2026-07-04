@@ -1,0 +1,31 @@
+# A scan site described entirely by CSS selectors — no code needed.
+# Rename to <site>.toml to activate. Selector syntax: `css selector[@attr]`;
+# without @attr the element text is used, `@href` alone reads the attribute
+# off the matched item itself. Relative URLs resolve against the page.
+#
+# This example matches the common Madara WordPress theme layout used by
+# many scan sites; adjust selectors per site (inspect with browser devtools).
+
+id = "example-scans"
+name = "Example Scans"
+base_url = "https://example-scans.com"
+min_delay_ms = 800            # politeness delay between requests
+# referer = "https://example-scans.com/"   # some sites require it for images
+
+[search]
+url = "{base}/?s={query}&post_type=wp-manga"
+item = ".c-tabs-item__content"
+title = ".post-title a"
+link = ".post-title a@href"
+cover = "img@data-src"
+
+[manga]
+title = ".post-title h1"
+description = ".description-summary p"
+cover = ".summary_image img@data-src"
+chapter_item = "li.wp-manga-chapter"
+chapter_link = "a@href"
+# chapter_number_regex = "(?i)ch(?:apter)?\\.?\\s*(\\d+(?:\\.\\d+)?)"  # default
+
+[pages]
+image = ".reading-content img@data-src"

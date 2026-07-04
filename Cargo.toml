@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/yomu-domain",
+    "crates/yomu-source",
+    "crates/yomu-server",
+    "crates/yomu-client",
+    "crates/yomu-ui",
+    "crates/yomu-web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Tibo <thibaudbalem@gmail.com>"]
+
+[workspace.dependencies]
+# internal crates
+yomu-domain = { path = "crates/yomu-domain" }
+yomu-source = { path = "crates/yomu-source" }
+yomu-client = { path = "crates/yomu-client" }
+yomu-ui = { path = "crates/yomu-ui" }
+
+# shared
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["serde"] }
+url = { version = "2", features = ["serde"] }
+thiserror = "2"
+
+# source scraping
+async-trait = "0.1"
+regex = "1"
+scraper = "0.27"
+toml = "0.8"
+
+# server
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+futures = "0.3"
+figment = { version = "0.10", features = ["toml", "env"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "derive", "macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# http client (native + wasm)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# frontend
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+console_error_panic_hook = "0.1"
+web-sys = "0.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
