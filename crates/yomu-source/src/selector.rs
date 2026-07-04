@@ -381,7 +381,9 @@ impl SelectorSource {
             .map_err(|_| SourceError::Parse(format!("invalid key {key:?}")))?;
         // Keys are URLs produced by this source; never follow one elsewhere.
         if url.host() != self.spec.base_url.host() {
-            return Err(SourceError::Parse(format!("key {key:?} not on this source")));
+            return Err(SourceError::Parse(format!(
+                "key {key:?} not on this source"
+            )));
         }
         Ok(url)
     }

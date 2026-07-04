@@ -32,8 +32,11 @@ fn fixture_source() -> SelectorSource {
 }
 
 fn fixture(name: &str) -> String {
-    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")))
-        .unwrap()
+    std::fs::read_to_string(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 #[test]
