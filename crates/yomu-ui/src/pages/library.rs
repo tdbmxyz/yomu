@@ -58,7 +58,12 @@ pub fn Library() -> impl IntoView {
                                                 })}
                                             <span class="manga-title">{entry.manga.title.clone()}</span>
                                             <span class="muted manga-meta">
-                                                {entry.chapter_count} " chapters · " {read_state}
+                                                {format!(
+                                                    "{} chapter{} · {}",
+                                                    entry.chapter_count,
+                                                    if entry.chapter_count == 1 { "" } else { "s" },
+                                                    read_state,
+                                                )}
                                             </span>
                                         </a>
                                     }

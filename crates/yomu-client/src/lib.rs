@@ -131,7 +131,10 @@ impl YomuClient {
 
     /// Journal sync for offline clients.
     pub async fn push_events(&self, req: &PushEventsRequest) -> Result<()> {
-        let req = self.http.post(self.url("api/v1/progress/events")?).json(req);
+        let req = self
+            .http
+            .post(self.url("api/v1/progress/events")?)
+            .json(req);
         self.send_no_content(req).await
     }
 

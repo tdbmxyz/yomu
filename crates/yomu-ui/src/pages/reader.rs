@@ -1,7 +1,6 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
-use uuid::Uuid;
 use yomu_domain::SetPositionRequest;
 
 use super::{NotFound, param_uuid};
@@ -82,11 +81,12 @@ pub fn Reader() -> impl IntoView {
 
     // Arrow keys turn pages.
     let key_turn = turn.clone();
-    let key_handle = window_event_listener(leptos::ev::keydown, move |ev| match ev.key().as_str() {
-        "ArrowLeft" => key_turn(-1),
-        "ArrowRight" => key_turn(1),
-        _ => {}
-    });
+    let key_handle =
+        window_event_listener(leptos::ev::keydown, move |ev| match ev.key().as_str() {
+            "ArrowLeft" => key_turn(-1),
+            "ArrowRight" => key_turn(1),
+            _ => {}
+        });
     on_cleanup(move || key_handle.remove());
 
     // Neighbouring chapters in reading order.
@@ -119,33 +119,37 @@ pub fn Reader() -> impl IntoView {
                     {move || format!("{} / {}", page.get() + 1, page_count().max(1))}
                 </span>
             </div>
-            {move || match pages.get() {
-                None => view! { <p class="muted">"Loading pages…"</p> }.into_any(),
-                Some(Err(err)) => {
-                    view! { <p class="error">"Cannot load chapter: " {err.to_string()}</p> }
-                        .into_any()
-                }
-                Some(Ok(_)) => {
-                    let src = client_pages
-                        .page_url(chapter_id, page.get())
-                        .map(|u| u.to_string())
-                        .unwrap_or_default();
-                    view! {
-                        <div class="reader-stage">
-                            <button
-                                class="page-zone left"
-                                aria-label="previous page"
-                                on:click=move |_| turn_click_prev(-1)
-                            ></button>
-                            <img class="reader-page" src=src alt=""/>
-                            <button
-                                class="page-zone right"
-                                aria-label="next page"
-                                on:click=move |_| turn_click_next(1)
-                            ></button>
-                        </div>
+            {move || {
+                let prev = turn_click_prev.clone();
+                let next = turn_click_next.clone();
+                match pages.get() {
+                    None => view! { <p class="muted">"Loading pages…"</p> }.into_any(),
+                    Some(Err(err)) => {
+                        view! { <p class="error">"Cannot load chapter: " {err.to_string()}</p> }
+                            .into_any()
                     }
-                        .into_any()
+                    Some(Ok(_)) => {
+                        let src = client_pages
+                            .page_url(chapter_id, page.get())
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                        view! {
+                            <div class="reader-stage">
+                                <button
+                                    class="page-zone left"
+                                    aria-label="previous page"
+                                    on:click=move |_| prev(-1)
+                                ></button>
+                                <img class="reader-page" src=src alt=""/>
+                                <button
+                                    class="page-zone right"
+                                    aria-label="next page"
+                                    on:click=move |_| next(1)
+                                ></button>
+                            </div>
+                        }
+                            .into_any()
+                    }
                 }
             }}
             <div class="reader-nav">
