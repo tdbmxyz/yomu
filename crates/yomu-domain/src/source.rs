@@ -24,7 +24,7 @@ pub struct MangaSummary {
 }
 
 /// Full details as scraped from the source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MangaDetails {
     pub summary: MangaSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]

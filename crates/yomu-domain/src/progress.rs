@@ -41,9 +41,9 @@ pub fn merge_position<'a, I>(events: I) -> Option<&'a ProgressEvent>
 where
     I: IntoIterator<Item = &'a ProgressEvent>,
 {
-    events.into_iter().max_by(|a, b| {
-        a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id))
-    })
+    events
+        .into_iter()
+        .max_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)))
 }
 
 #[cfg(test)]
