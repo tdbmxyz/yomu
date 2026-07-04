@@ -16,10 +16,9 @@ pub async fn add(
     State(state): State<AppState>,
     Json(req): Json<AddMangaRequest>,
 ) -> Result<(StatusCode, Json<Manga>), ApiError> {
-    let source = state
-        .sources
-        .get(&req.source_id)
-        .ok_or_else(|| ApiError::Unprocessable(format!("source {:?} is not configured", req.source_id)))?;
+    let source = state.sources.get(&req.source_id).ok_or_else(|| {
+        ApiError::Unprocessable(format!("source {:?} is not configured", req.source_id))
+    })?;
     let details = source.manga(&req.source_key).await?;
     let manga = state
         .db
@@ -35,9 +34,7 @@ pub async fn add(
     Ok((StatusCode::CREATED, Json(manga)))
 }
 
-pub async fn list(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<MangaWithPosition>>, ApiError> {
+pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<MangaWithPosition>>, ApiError> {
     let mut out = Vec::new();
     for manga in state.db.list_manga().await? {
         let position = state.db.latest_position(manga.id).await?;
@@ -70,7 +67,9 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMangaRequest>,
 ) -> Result<Json<Manga>, ApiError> {
-    Ok(Json(state.db.set_auto_download(id, req.auto_download).await?))
+    Ok(Json(
+        state.db.set_auto_download(id, req.auto_download).await?,
+    ))
 }
 
 pub async fn delete(
@@ -107,7 +106,10 @@ pub async fn cover(
     for ext in ["jpg", "png", "webp", "gif", "avif"] {
         let path = covers_dir.join(format!("{id}.{ext}"));
         if let Ok(bytes) = tokio::fs::read(&path).await {
-            return Ok(cover_response(bytes, crate::downloader::content_type_for(&path)));
+            return Ok(cover_response(
+                bytes,
+                crate::downloader::content_type_for(&path),
+            ));
         }
     }
 

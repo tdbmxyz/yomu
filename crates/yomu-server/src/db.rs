@@ -62,9 +62,11 @@ impl Db {
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         // Recover from a crash mid-download: those chapters are re-queued.
-        sqlx::query("UPDATE chapters SET download_state = 'pending' WHERE download_state = 'downloading'")
-            .execute(&pool)
-            .await?;
+        sqlx::query(
+            "UPDATE chapters SET download_state = 'pending' WHERE download_state = 'downloading'",
+        )
+        .execute(&pool)
+        .await?;
         Ok(Self { pool })
     }
 
@@ -116,9 +118,10 @@ impl Db {
     }
 
     pub async fn list_manga(&self) -> Result<Vec<Manga>> {
-        let rows = sqlx::query_as::<_, MangaRow>("SELECT * FROM manga ORDER BY title COLLATE NOCASE")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query_as::<_, MangaRow>("SELECT * FROM manga ORDER BY title COLLATE NOCASE")
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(Manga::try_from).collect()
     }
 
@@ -374,9 +377,11 @@ impl Db {
                 .await?
             }
             None => {
-                sqlx::query_as::<_, EventRow>("SELECT * FROM progress_events ORDER BY id LIMIT 1000")
-                    .fetch_all(&self.pool)
-                    .await?
+                sqlx::query_as::<_, EventRow>(
+                    "SELECT * FROM progress_events ORDER BY id LIMIT 1000",
+                )
+                .fetch_all(&self.pool)
+                .await?
             }
         };
         rows.into_iter().map(ProgressEvent::try_from).collect()
@@ -564,7 +569,11 @@ mod tests {
         let db = Db::in_memory().await.unwrap();
 
         let manga = db
-            .insert_manga("fixture", &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]), false)
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(db.count_chapters(manga.id).await.unwrap(), 2);
@@ -582,7 +591,11 @@ mod tests {
         let new = db
             .sync_chapters(
                 manga.id,
-                &details("m1", &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))]).chapters,
+                &details(
+                    "m1",
+                    &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))],
+                )
+                .chapters,
             )
             .await
             .unwrap();
@@ -611,7 +624,10 @@ mod tests {
         assert_eq!(done.page_count, Some(12));
 
         db.delete_manga(manga.id).await.unwrap();
-        assert!(matches!(db.get_manga(manga.id).await, Err(DbError::NotFound)));
+        assert!(matches!(
+            db.get_manga(manga.id).await,
+            Err(DbError::NotFound)
+        ));
         assert_eq!(db.count_chapters(manga.id).await.unwrap(), 0);
     }
 
