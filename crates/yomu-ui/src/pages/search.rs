@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use yomu_domain::{AddMangaRequest, MangaSummary, SourceInfo};
+use yomu_domain::{AddMangaRequest, MangaSummary};
 
 use crate::use_client;
 
@@ -121,7 +121,11 @@ pub fn Search() -> impl IntoView {
 }
 
 #[component]
-fn ResultItem(hit: MangaSummary, source: String, status: RwSignal<Option<String>>) -> impl IntoView {
+fn ResultItem(
+    hit: MangaSummary,
+    source: String,
+    status: RwSignal<Option<String>>,
+) -> impl IntoView {
     let client = use_client();
 
     let add = move |auto_download: bool| {
@@ -133,9 +137,7 @@ fn ResultItem(hit: MangaSummary, source: String, status: RwSignal<Option<String>
         };
         spawn_local(async move {
             match client.add_manga(&req).await {
-                Ok(manga) => {
-                    status.set(Some(format!("Added \"{}\" to the library", manga.title)))
-                }
+                Ok(manga) => status.set(Some(format!("Added \"{}\" to the library", manga.title))),
                 Err(err) => status.set(Some(format!("Add failed: {err}"))),
             }
         });
