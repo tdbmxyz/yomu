@@ -9,4 +9,11 @@ sources_dir = "sources.d"  # one *.toml per scan site
 
 [updater]
 enabled = true
-interval_secs = 21600      # check every 6 hours
+interval_secs = 21600      # check every 6 hours (minimum 60)
+
+# Built-in "local" source: series already on this machine, no site involved.
+# Layout: <dir>/<Series>/<Chapter>/*.png  or  <dir>/<Series>/<Chapter>.cbz
+# (optional per series: cover.jpg, details.json {"title", "description"})
+[local]
+enabled = true
+dir = "local"

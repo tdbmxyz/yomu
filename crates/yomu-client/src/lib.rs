@@ -6,7 +6,8 @@ use uuid::Uuid;
 use yomu_domain::{
     AddMangaRequest, ApiErrorBody, Chapter, EventsResponse, HealthResponse, Manga,
     MangaDetailResponse, MangaSummary, MangaWithPosition, PagesResponse, Position,
-    PushEventsRequest, RefreshResponse, SetPositionRequest, SourceInfo, UpdateMangaRequest,
+    PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
+    UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -28,8 +29,14 @@ pub struct YomuClient {
 }
 
 impl YomuClient {
-    /// `base` is the server origin (no `/api/v1` suffix).
-    pub fn new(base: Url) -> Self {
+    /// `base` is the server origin (no `/api/v1` suffix). A non-root path
+    /// (subpath deployment) is kept, but needs a trailing slash for
+    /// `Url::join` not to drop its last segment — normalize here so callers
+    /// can't get it subtly wrong.
+    pub fn new(mut base: Url) -> Self {
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
+        }
         Self {
             base,
             http: reqwest::Client::new(),
@@ -138,16 +145,20 @@ impl YomuClient {
         self.send(req).await
     }
 
-    /// Journal sync for offline clients.
-    pub async fn push_events(&self, req: &PushEventsRequest) -> Result<()> {
+    /// Journal sync for offline clients. Events for manga the server no
+    /// longer knows are consumed (`skipped`), not errors — see
+    /// [`PushEventsResponse`].
+    pub async fn push_events(&self, req: &PushEventsRequest) -> Result<PushEventsResponse> {
         let req = self
             .http
             .post(self.url("api/v1/progress/events")?)
             .json(req);
-        self.send_no_content(req).await
+        self.send(req).await
     }
 
-    pub async fn events_since(&self, since: Option<Uuid>) -> Result<EventsResponse> {
+    /// `since` is the `next_since` cursor of the previous page (server
+    /// arrival order), not an event id.
+    pub async fn events_since(&self, since: Option<i64>) -> Result<EventsResponse> {
         let mut req = self.http.get(self.url("api/v1/progress/events")?);
         if let Some(since) = since {
             req = req.query(&[("since", since.to_string())]);

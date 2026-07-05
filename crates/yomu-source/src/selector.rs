@@ -75,6 +75,20 @@ pub struct MangaSpec {
     /// chapter title (fallback: from the chapter URL).
     #[serde(default = "default_number_regex")]
     pub chapter_number_regex: String,
+    /// Which end of the site's chapter list is the latest chapter. Only
+    /// matters for chapters whose number can't be parsed: it decides their
+    /// fallback reading order.
+    #[serde(default)]
+    pub chapter_order: ChapterOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChapterOrder {
+    /// The common scan-site layout: latest chapter on top.
+    #[default]
+    NewestFirst,
+    OldestFirst,
 }
 
 fn default_number_regex() -> String {
@@ -101,6 +115,11 @@ impl Rule {
             Some((css, attr)) if !attr.contains(']') => (css.trim(), Some(attr.to_string())),
             _ => (raw.trim(), None),
         };
+        if attr.as_deref().is_some_and(|a| a.trim().is_empty()) {
+            return Err(SourceError::Definition(format!(
+                "rule {raw:?}: empty attribute after '@'"
+            )));
+        }
         let selector = if css.is_empty() {
             None
         } else {
@@ -183,6 +202,24 @@ impl SelectorSource {
                 .map_err(|e| SourceError::Definition(format!("chapter_number_regex: {e}")))?,
             page_image: Rule::parse(&spec.pages.image)?,
         };
+        if compiled.page_image.selector.is_none() {
+            return Err(SourceError::Definition(
+                "pages.image needs a selector (not just an attribute)".into(),
+            ));
+        }
+        // A broken search template must fail at startup, not on first use.
+        if !spec.search.url.contains("{query}") {
+            return Err(SourceError::Definition(format!(
+                "search url {:?} has no {{query}} placeholder",
+                spec.search.url
+            )));
+        }
+        search_url(&spec, "probe").map_err(|_| {
+            SourceError::Definition(format!(
+                "search url {:?} does not substitute into a valid URL",
+                spec.search.url
+            ))
+        })?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(referer) = &spec.referer
@@ -287,6 +324,14 @@ impl SelectorSource {
                 scanlator: None,
             });
         }
+        // source_order is a recency rank (0 = newest); flip it for sites
+        // that list oldest-first so number-less chapters still read in order.
+        if self.spec.manga.chapter_order == ChapterOrder::OldestFirst {
+            let last = chapters.len().saturating_sub(1) as u32;
+            for chapter in &mut chapters {
+                chapter.source_order = last - chapter.source_order;
+            }
+        }
         if chapters.is_empty() {
             return Err(SourceError::Parse(format!(
                 "no chapters matched {:?} on {page_url}",
@@ -353,13 +398,11 @@ impl SelectorSource {
                 tokio::time::sleep(min - elapsed).await;
             }
         }
-        let resp = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+        let result = self.client.get(url.clone()).send().await;
+        // Stamp even on transport errors: a struggling site must not be
+        // retried with zero spacing.
         *last = Some(tokio::time::Instant::now());
+        let resp = result.map_err(|e| SourceError::Http(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(SourceError::Http(format!("{} on {url}", resp.status())));
@@ -380,7 +423,13 @@ impl SelectorSource {
             .parse()
             .map_err(|_| SourceError::Parse(format!("invalid key {key:?}")))?;
         // Keys are URLs produced by this source; never follow one elsewhere.
-        if url.host() != self.spec.base_url.host() {
+        // Full origin (scheme + host + port), not just the host: keys are
+        // client input, and "same host, other port" is a different server.
+        let base = &self.spec.base_url;
+        if url.scheme() != base.scheme()
+            || url.host() != base.host()
+            || url.port_or_known_default() != base.port_or_known_default()
+        {
             return Err(SourceError::Parse(format!(
                 "key {key:?} not on this source"
             )));
@@ -404,16 +453,7 @@ impl Source for SelectorSource {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<MangaSummary>> {
-        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-        let url_str = self
-            .spec
-            .search
-            .url
-            .replace("{base}", self.spec.base_url.as_str().trim_end_matches('/'))
-            .replace("{query}", &encoded);
-        let url: Url = url_str
-            .parse()
-            .map_err(|_| SourceError::Definition(format!("search url {url_str:?}")))?;
+        let url = search_url(&self.spec, query)?;
         let html = self.get_html(&url).await?;
         self.parse_search(&html, &url)
     }
@@ -447,4 +487,20 @@ impl Source for SelectorSource {
             content_type,
         })
     }
+}
+
+/// Substitute `{base}`/`{query}` in a search URL template. The query is
+/// percent-encoded (`%20`, never `+`) so templates work in a path segment
+/// (`{base}/search/{query}`) as well as in a query string (`?s={query}`).
+fn search_url(spec: &SelectorSpec, query: &str) -> Result<Url> {
+    let encoded = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC)
+        .to_string();
+    let url_str = spec
+        .search
+        .url
+        .replace("{base}", spec.base_url.as_str().trim_end_matches('/'))
+        .replace("{query}", &encoded);
+    url_str
+        .parse()
+        .map_err(|_| SourceError::Definition(format!("search url {url_str:?}")))
 }

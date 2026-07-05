@@ -26,6 +26,8 @@ cover = ".summary_image img@data-src"
 chapter_item = "li.wp-manga-chapter"
 chapter_link = "a@href"
 # chapter_number_regex = "(?i)ch(?:apter)?\\.?\\s*(\\d+(?:\\.\\d+)?)"  # default
+# chapter_order = "newest_first"   # or "oldest_first"; only affects chapters
+#                                  # whose number can't be parsed
 
 [pages]
 image = ".reading-content img@data-src"

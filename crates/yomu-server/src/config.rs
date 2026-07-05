@@ -20,6 +20,7 @@ pub struct Config {
     /// Directory of source definitions (`*.toml`, see sources.d examples).
     pub sources_dir: PathBuf,
     pub updater: UpdaterConfig,
+    pub local: LocalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,8 +28,28 @@ pub struct Config {
 pub struct UpdaterConfig {
     /// Master switch for the periodic new-chapter check.
     pub enabled: bool,
-    /// Seconds between two library-wide checks.
+    /// Seconds between two library-wide checks (clamped to ≥ 60).
     pub interval_secs: u64,
+}
+
+/// The built-in "local" source: series that already live on the server's
+/// disk as `<dir>/<Series>/<Chapter>/*.png` or `<Series>/<Chapter>.cbz`
+/// (see `yomu_source::local`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalConfig {
+    pub enabled: bool,
+    /// Directory holding the local series.
+    pub dir: PathBuf,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: PathBuf::from("local"),
+        }
+    }
 }
 
 impl Default for Config {
@@ -40,6 +61,7 @@ impl Default for Config {
             data_dir: PathBuf::from("data"),
             sources_dir: PathBuf::from("sources.d"),
             updater: UpdaterConfig::default(),
+            local: LocalConfig::default(),
         }
     }
 }

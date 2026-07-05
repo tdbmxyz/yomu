@@ -2,10 +2,12 @@
 //!
 //! A [`Source`] knows how to search a site, list a manga's chapters and
 //! resolve a chapter's page images. yomu deliberately has no extension
-//! system: sources are either declarative [`selector::SelectorSource`]s
-//! (a TOML file with CSS selectors — enough for most scan sites) or, later,
+//! system: sources are declarative [`selector::SelectorSource`]s (a TOML
+//! file with CSS selectors — enough for most scan sites), the built-in
+//! [`local::LocalSource`] (series already on the server's disk), or, later,
 //! native Rust implementations for API-based sites.
 
+pub mod local;
 pub mod registry;
 pub mod selector;
 

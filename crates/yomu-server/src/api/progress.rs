@@ -1,10 +1,12 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
-use yomu_domain::{EventsResponse, Position, ProgressEvent, PushEventsRequest, SetPositionRequest};
+use yomu_domain::{
+    EventsResponse, Position, ProgressEvent, PushEventsRequest, PushEventsResponse,
+    SetPositionRequest,
+};
 
 use super::ApiError;
 use crate::state::AppState;
@@ -41,28 +43,30 @@ pub async fn set_position(
 }
 
 /// Offline client pushing its journal on reconnect. Idempotent: events are
-/// keyed by their client-generated ids.
+/// keyed by their client-generated ids. Events for manga deleted meanwhile
+/// are skipped (reported in the response) rather than failing the batch —
+/// a permanently failing batch would wedge the client's outbox forever.
 pub async fn push_events(
     State(state): State<AppState>,
     Json(req): Json<PushEventsRequest>,
-) -> Result<StatusCode, ApiError> {
-    for event in &req.events {
-        state.db.append_event(event).await?;
+) -> Result<Json<PushEventsResponse>, ApiError> {
+    let (accepted, skipped) = state.db.append_events(&req.events).await?;
+    if skipped > 0 {
+        tracing::debug!(accepted, skipped, "journal push skipped stale events");
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(PushEventsResponse { accepted, skipped }))
 }
 
 #[derive(Deserialize)]
 pub struct EventsQuery {
-    /// Return events with id strictly greater than this cursor.
-    since: Option<Uuid>,
+    /// Server-assigned arrival cursor (`next_since` of the previous page).
+    since: Option<i64>,
 }
 
 pub async fn events(
     State(state): State<AppState>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<EventsResponse>, ApiError> {
-    Ok(Json(EventsResponse {
-        events: state.db.events_since(query.since).await?,
-    }))
+    let (events, next_since) = state.db.events_since(query.since).await?;
+    Ok(Json(EventsResponse { events, next_since }))
 }

@@ -5,18 +5,59 @@
 //   fetch — "save to device" simply fetches every page once)
 // - other GET /api/v1/*: network-first with cache fallback, so library and
 //   chapter lists stay browsable offline (possibly stale)
-// - app shell (/, hashed .js/.wasm/.css): cache-first with background
-//   refresh of '/'; hashed assets are immutable by construction
+// - app shell: the cache holds ONE shell entry (SHELL), refreshed by every
+//   online navigation; its hashed .js/.wasm/.css are precached at install
+//   and re-synced on every shell refresh, so offline boot always has the
+//   exact assets the cached shell references.
 //
 // Bump CACHE when the caching logic changes.
-const CACHE = "yomu-v1";
+const CACHE = "yomu-v2";
+const SHELL = "/";
+
+// Hashed assets referenced by a shell document (href/src/import of
+// .js/.css/.wasm — what trunk emits).
+const assetUrls = (html) => {
+  const urls = new Set();
+  for (const match of html.matchAll(/(?:href|src|from)\s*=?\s*["']([^"']+\.(?:js|css|wasm))["']/g)) {
+    urls.add(new URL(match[1], self.location.origin).pathname);
+  }
+  return [...urls];
+};
+
+// Cache a freshly fetched shell and its hashed assets. Assets go in FIRST:
+// if we go offline halfway, the cached shell must never reference assets
+// that didn't make it. Stale assets of older deploys are pruned at the end.
+async function refreshShell(cache, response) {
+  const html = await response.clone().text();
+  const wanted = assetUrls(html);
+  await Promise.all(
+    wanted.map(async (url) => {
+      if (!(await cache.match(url))) {
+        const asset = await fetch(url);
+        if (!asset.ok) throw new Error(`precache ${url}: ${asset.status}`);
+        await cache.put(url, asset);
+      }
+    }),
+  );
+  await cache.put(SHELL, response);
+  for (const key of await cache.keys()) {
+    const path = new URL(key.url).pathname;
+    if (/\.(?:js|css|wasm)$/.test(path) && !wanted.includes(path)) {
+      await cache.delete(key);
+    }
+  }
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE)
-      .then((cache) => cache.addAll(["/"]))
-      .then(() => self.skipWaiting()),
+    (async () => {
+      const cache = await caches.open(CACHE);
+      const shell = await fetch(SHELL);
+      // Precache shell + hashed assets: offline must work from the very
+      // first session, before any navigation went through this worker.
+      if (shell.ok) await refreshShell(cache, shell);
+      await self.skipWaiting();
+    })(),
   );
 });
 
@@ -46,7 +87,7 @@ async function cacheFirst(request) {
   return response;
 }
 
-async function networkFirst(request, fallbackUrl) {
+async function networkFirst(request) {
   try {
     const response = await fetch(request);
     if (response.ok) {
@@ -55,7 +96,26 @@ async function networkFirst(request, fallbackUrl) {
     }
     return response;
   } catch (err) {
-    const cached = await caches.match(fallbackUrl ?? request);
+    const cached = await caches.match(request);
+    if (cached) return cached;
+    throw err;
+  }
+}
+
+// SPA navigations all serve the shell: cache one copy under SHELL (not per
+// visited URL), refresh it — and its asset set — on every online load. The
+// refresh runs after the response is served (waitUntil); if it fails
+// mid-way the previous consistent shell+assets stay in place.
+async function navigate(event) {
+  const cache = await caches.open(CACHE);
+  try {
+    const response = await fetch(SHELL);
+    if (response.ok) {
+      event.waitUntil(refreshShell(cache, response.clone()).catch(() => {}));
+    }
+    return response;
+  } catch (err) {
+    const cached = await cache.match(SHELL);
     if (cached) return cached;
     throw err;
   }
@@ -68,14 +128,13 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === "navigate") {
-    // SPA: any route is served by the shell.
-    event.respondWith(networkFirst(request, "/"));
+    event.respondWith(navigate(event));
   } else if (isImage(url)) {
     event.respondWith(cacheFirst(request));
   } else if (url.pathname.startsWith("/api/")) {
     event.respondWith(networkFirst(request));
   } else {
-    // Hashed static assets.
+    // Hashed static assets: immutable by construction.
     event.respondWith(cacheFirst(request));
   }
 });

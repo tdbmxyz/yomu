@@ -14,7 +14,8 @@ pub fn spawn(state: AppState) {
 }
 
 async fn run(state: AppState) {
-    let interval = Duration::from_secs(state.config.updater.interval_secs);
+    // Clamp: interval_secs = 0 would busy-loop hammering every source.
+    let interval = Duration::from_secs(state.config.updater.interval_secs.max(60));
     loop {
         // Sleep first: startup should not hammer every source at once,
         // and a fresh library was just synced by its add flow anyway.

@@ -27,17 +27,14 @@ pub async fn download(
 }
 
 /// Page count for the reader. For non-downloaded chapters this resolves the
-/// page list live from the source (cached for the session).
+/// page list live from the source (cached with a TTL).
 pub async fn pages(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PagesResponse>, ApiError> {
     let chapter = state.db.get_chapter(id).await?;
 
-    if matches!(chapter.download, DownloadState::Downloaded { .. }) {
-        let files = crate::downloader::page_files(&state, &chapter)
-            .await
-            .map_err(|e| ApiError::Internal(format!("reading chapter dir: {e}")))?;
+    if let Some(files) = downloaded_files(&state, &chapter).await {
         return Ok(Json(PagesResponse {
             chapter_id: id,
             page_count: files.len() as u32,
@@ -61,10 +58,7 @@ pub async fn page_image(
 ) -> Result<Response, ApiError> {
     let chapter = state.db.get_chapter(id).await?;
 
-    if matches!(chapter.download, DownloadState::Downloaded { .. }) {
-        let files = crate::downloader::page_files(&state, &chapter)
-            .await
-            .map_err(|e| ApiError::Internal(format!("reading chapter dir: {e}")))?;
+    if let Some(files) = downloaded_files(&state, &chapter).await {
         let path = files.get(n as usize).ok_or(ApiError::NotFound)?;
         let bytes = tokio::fs::read(path)
             .await
@@ -75,21 +69,51 @@ pub async fn page_image(
         ));
     }
 
-    let urls = live_pages(&state, &chapter).await?;
-    let url = urls.get(n as usize).ok_or(ApiError::NotFound)?;
     let manga = state.db.get_manga(chapter.manga_id).await?;
     let source = state
         .sources
         .get(&manga.source_id)
         .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
-    let image = source.image(url).await?;
-    Ok(image_response(image.bytes.to_vec(), image.content_type))
+
+    let urls = live_pages(&state, &chapter).await?;
+    let url = urls.get(n as usize).ok_or(ApiError::NotFound)?;
+    match source.image(url).await {
+        Ok(image) => Ok(image_response(image.bytes.to_vec(), image.content_type)),
+        // The cached page list may hold expired CDN URLs; re-resolve the
+        // chapter once and retry before giving up.
+        Err(_) => {
+            state.live_pages.invalidate(chapter.id).await;
+            let urls = live_pages(&state, &chapter).await?;
+            let url = urls.get(n as usize).ok_or(ApiError::NotFound)?;
+            let image = source.image(url).await?;
+            Ok(image_response(image.bytes.to_vec(), image.content_type))
+        }
+    }
 }
 
-/// Page-URL list for a live-read chapter, resolved once per session.
+/// Page files of a downloaded chapter — `None` when the chapter isn't
+/// downloaded *or* its directory vanished (wiped disk, moved data_dir), in
+/// which case serving falls back to the live path instead of erroring.
+async fn downloaded_files(state: &AppState, chapter: &Chapter) -> Option<Vec<std::path::PathBuf>> {
+    if !matches!(chapter.download, DownloadState::Downloaded { .. }) {
+        return None;
+    }
+    match crate::downloader::page_files(state, chapter).await {
+        Ok(files) if !files.is_empty() => Some(files),
+        _ => {
+            tracing::warn!(
+                chapter = %chapter.id,
+                "chapter marked downloaded but files are missing; serving live"
+            );
+            None
+        }
+    }
+}
+
+/// Page-URL list for a live-read chapter, resolved once per TTL window.
 async fn live_pages(state: &AppState, chapter: &Chapter) -> Result<Vec<Url>, ApiError> {
-    if let Some(urls) = state.live_pages.read().await.get(&chapter.id) {
-        return Ok(urls.clone());
+    if let Some(urls) = state.live_pages.get(chapter.id).await {
+        return Ok(urls);
     }
 
     let manga = state.db.get_manga(chapter.manga_id).await?;
@@ -101,11 +125,7 @@ async fn live_pages(state: &AppState, chapter: &Chapter) -> Result<Vec<Url>, Api
 
     // Remember the count for the UI even after restart.
     let _ = state.db.set_page_count(chapter.id, urls.len() as u32).await;
-    state
-        .live_pages
-        .write()
-        .await
-        .insert(chapter.id, urls.clone());
+    state.live_pages.put(chapter.id, urls.clone()).await;
     Ok(urls)
 }
 

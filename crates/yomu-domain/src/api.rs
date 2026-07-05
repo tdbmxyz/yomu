@@ -71,10 +71,25 @@ pub struct PushEventsRequest {
     pub events: Vec<crate::ProgressEvent>,
 }
 
-/// Journal page for incremental sync (`?since=<event id>`).
+/// Outcome of a journal push. Events referencing manga the server no longer
+/// knows are *skipped*, not errors: the client may clear them from its
+/// outbox (they can never apply) instead of retrying forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushEventsResponse {
+    pub accepted: u32,
+    pub skipped: u32,
+}
+
+/// Journal page for incremental sync (`?since=<cursor>`). The cursor is the
+/// server-assigned arrival sequence — not the event id, which is stamped by
+/// the observing device and would skip late-arriving offline pushes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsResponse {
     pub events: Vec<crate::ProgressEvent>,
+    /// Pass as `?since=` on the next poll; `None` when the journal is empty
+    /// up to this page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_since: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

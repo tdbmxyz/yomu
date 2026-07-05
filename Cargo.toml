@@ -31,9 +31,11 @@ thiserror = "2"
 
 # source scraping
 async-trait = "0.1"
+percent-encoding = "2"
 regex = "1"
 scraper = "0.27"
 toml = "0.8"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 # server
 anyhow = "1"

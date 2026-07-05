@@ -24,7 +24,9 @@ impl Registry {
             // Missing dir = no sources yet; that's a valid empty setup.
             Err(_) => return Ok(registry),
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| SourceError::Definition(format!("reading {}: {e}", dir.display())))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
@@ -33,13 +35,34 @@ impl Registry {
                 .map_err(|e| SourceError::Definition(format!("{}: {e}", path.display())))?;
             let spec: SelectorSpec = toml::from_str(&raw)
                 .map_err(|e| SourceError::Definition(format!("{}: {e}", path.display())))?;
-            registry.insert(Arc::new(SelectorSource::new(spec)?));
+            registry
+                .insert(Arc::new(SelectorSource::new(spec)?))
+                .map_err(|e| SourceError::Definition(format!("{}: {e}", path.display())))?;
         }
         Ok(registry)
     }
 
-    pub fn insert(&mut self, source: Arc<dyn Source>) {
-        self.sources.insert(source.id().to_string(), source);
+    /// Register a source. Fails on a duplicate id (two definitions silently
+    /// shadowing each other would flip library entries between sites) and on
+    /// ids that can't appear in a URL path segment.
+    pub fn insert(&mut self, source: Arc<dyn Source>) -> Result<()> {
+        let id = source.id().to_string();
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(SourceError::Definition(format!(
+                "source id {id:?} must be a slug (alphanumeric, '-', '_')"
+            )));
+        }
+        if self.sources.contains_key(&id) {
+            return Err(SourceError::Definition(format!(
+                "duplicate source id {id:?}"
+            )));
+        }
+        self.sources.insert(id, source);
+        Ok(())
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<dyn Source>> {
