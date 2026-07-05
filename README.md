@@ -10,6 +10,9 @@ position (chapter + page) following you. Sibling project of
 - **Library**: search a source, track a manga, browse chapters.
 - **Sources without extensions**: a scan site is a TOML file with CSS
   selectors (`sources.d/*.toml`) — no code, no extension ecosystem.
+- **Local series** (à la Suwayomi): drop `local/<Series>/<Chapter>/*.png`
+  (or `<Chapter>.cbz`) on the server and it's a searchable, trackable
+  source like any other.
 - **Server-side downloads**: chapters are fetched to the server's disk by a
   queue worker; or read **live** (proxied page by page, nothing stored).
 - **Progress tracking**: current chapter + page, stored as an append-only
@@ -25,7 +28,7 @@ rationale (ADRs there apply; yomu-specific decisions in `docs/adr/`).
 | Crate | Role |
 | --- | --- |
 | `yomu-domain` | Types + API contract + progress journal merge rule |
-| `yomu-source` | `Source` trait + selector-driven scan-site implementation |
+| `yomu-source` | `Source` trait + selector scan-site impl + local source |
 | `yomu-server` | Axum backend: library, downloader, updater, page serving |
 | `yomu-client` | Typed API client (native & wasm) |
 | `yomu-ui` | Leptos pages: library, search, manga, reader |
