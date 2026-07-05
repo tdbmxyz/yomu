@@ -33,6 +33,11 @@ amended: sync paging is by server `seq`, not event id).
 - **Updates**: periodic re-check (default 6h, min 60s) + manual refresh; new
   chapters of auto-download manga are queued automatically. Duplicate
   chapter keys in one scraped listing are deduped.
+- **Categories** (new): every manga has one (seeded Reading/Paused/Finished,
+  default reading; migration 0003). Per-category `update_enabled` gates the
+  periodic sweep (manual refresh unaffected). Library page: filter tabs +
+  per-category "new-chapter checks" toggle; manga page: category select.
+  `GET/PUT /categories`, `UpdateMangaRequest.category` (None = keep).
 - **Reader**: fullscreen immersive, paged AND vertical modes (persisted per
   manga). Vertical mode scrolls to the target page on entry and only
   journals *user* scrolling (programmatic positioning and placeholder
@@ -76,7 +81,8 @@ amended: sync paging is by server `seq`, not event id).
 2. **Library QoL**: unread badges, sort by last update/read, mark
    read/unread, delete server download, storage usage; local-source UI
    affordances (hide "download"/auto-download for local manga, covers in
-   local search results).
+   local search results); category QoL (user-defined categories, rename,
+   reorder — schema is ready, only CRUD endpoints/UI missing).
 3. **Sources**: native JSON-API source, per-source health in UI, hot-reload
    of sources.d, real-site selector definitions (expect tuning: Cloudflare,
    lazy-load attrs). `chapter_order = "oldest_first"` exists for sites that
