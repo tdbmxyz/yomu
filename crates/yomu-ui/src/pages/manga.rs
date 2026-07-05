@@ -25,6 +25,26 @@ pub fn MangaPage() -> impl IntoView {
         }
     });
 
+    // While a download is queued or running, keep refetching so the chapter
+    // buttons flip to "downloaded" without a manual reload. Each completed
+    // fetch schedules at most one follow-up, so this stops by itself.
+    Effect::new(move |_| {
+        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|d| {
+            d.chapters.iter().any(|c| {
+                matches!(
+                    c.download,
+                    DownloadState::Pending | DownloadState::Downloading
+                )
+            })
+        });
+        if busy {
+            set_timeout(
+                move || refresh.update(|n| *n += 1),
+                std::time::Duration::from_millis(2000),
+            );
+        }
+    });
+
     view! {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
