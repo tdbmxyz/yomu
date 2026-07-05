@@ -82,12 +82,20 @@ Merge is associative and commutative — no conflict resolution UI, no clock
 negotiation beyond last-write-wins at page granularity, which matches the
 product decision (track chapter + page, nothing finer).
 
-## Updater
+## Updater & categories
 
-One periodic task (`updater.interval_secs`, default 6h) re-syncs every
-library manga: new chapters are inserted (existing ids stable), manga with
+One periodic task (`updater.interval_secs`, default 6h) re-syncs library
+manga: new chapters are inserted (existing ids stable), manga with
 `auto_download` get them queued. The same `sync::refresh_manga` powers the
 manual "check now" endpoint, so behavior can't drift.
+
+Every manga belongs to one **category** (`categories` table, seeded
+Reading / Paused / Finished; manga default to `reading`). Each category has
+an `update_enabled` flag and the periodic sweep only checks manga in
+enabled categories — paused/finished series stop hammering their sources.
+Manual per-manga refresh always works regardless of category.
+`GET/PUT /api/v1/categories`, `UpdateMangaRequest.category` to move manga;
+the library UI filters by category and exposes the per-category toggle.
 
 ## Deferred by design
 

@@ -17,8 +17,10 @@ position (chapter + page) following you. Sibling project of
   queue worker; or read **live** (proxied page by page, nothing stored).
 - **Progress tracking**: current chapter + page, stored as an append-only
   journal designed for future offline clients that merge on reconnect.
-- **Updates**: the server periodically re-checks every tracked manga and
-  auto-downloads new chapters where enabled.
+- **Categories**: Reading / Paused / Finished; only categories you opt in
+  are checked for new chapters.
+- **Updates**: the server periodically re-checks tracked manga (in
+  update-enabled categories) and auto-downloads new chapters where enabled.
 
 ## Stack & layout
 
