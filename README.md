@@ -38,6 +38,7 @@ rationale (ADRs there apply; yomu-specific decisions in `docs/adr/`).
 | `yomu-client` | Typed API client (native & wasm) |
 | `yomu-ui` | Leptos pages: library, search, manga, reader |
 | `yomu-web` | Trunk entrypoint |
+| `yomu-shell` | Tauri v2 desktop/Android shell around the same UI |
 
 ## Development
 
@@ -47,6 +48,13 @@ $ just server            # backend on http://127.0.0.1:4700
 $ just web               # frontend with hot reload on http://127.0.0.1:8081
 $ just check && just test
 ```
+
+Desktop shell: `nix develop .#tauri`, then `just shell http://<server>:4700`
+(or set `~/.config/yomu/server`). Android: `nix develop .#android`, then in
+`crates/yomu-shell` run `cargo tauri android build --apk --target aarch64`;
+on first launch the app shows a connect screen asking for the server URL.
+Release signing reads `gen/android/keystore.properties` (see the sample;
+the keystore lives outside the repo).
 
 Add a scan site: copy `crates/yomu-server/sources.d/example.toml.sample` to
 `<sources_dir>/<site>.toml`, adjust the selectors (browser devtools on the

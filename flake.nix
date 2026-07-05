@@ -17,8 +17,20 @@
     pkgs = import nixpkgs {
       inherit system;
       overlays = [rust-overlay.overlays.default];
+      # Android SDK/NDK for the mobile shell
+      config.allowUnfree = true;
+      config.android_sdk.accept_license = true;
     };
     inherit (pkgs) lib;
+
+    androidNdkVersion = "27.0.12077973";
+    androidComposition = pkgs.androidenv.composeAndroidPackages {
+      # what the tauri-generated gradle project compiles against
+      platformVersions = ["34" "36"];
+      buildToolsVersions = ["34.0.0" "35.0.0"];
+      includeNDK = true;
+      ndkVersion = androidNdkVersion;
+    };
 
     version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
@@ -154,6 +166,39 @@
           atk
           librsvg
         ];
+      };
+
+      # Android build of the shell: `nix develop .#android`, then
+      # `cargo tauri android build --apk --target aarch64`.
+      android = pkgs.mkShell {
+        name = "yomu-android";
+
+        packages = with pkgs;
+          [
+            rustToolchain
+            trunk
+            binaryen
+            just
+            cargo-tauri
+            jdk17
+            androidComposition.androidsdk
+          ]
+          ++ lib.optional hasCargoLock wasm-bindgen-cli;
+
+        env = rec {
+          JAVA_HOME = pkgs.jdk17.home;
+          ANDROID_HOME = "${androidComposition.androidsdk}/libexec/android-sdk";
+          NDK_HOME = "${ANDROID_HOME}/ndk/${androidNdkVersion}";
+        };
+
+        # The tauri CLI insists on `rustup target add`; the rust-overlay
+        # toolchain already ships every Android target, so a no-op is honest.
+        shellHook = ''
+          shim_dir=$(mktemp -d)
+          printf '#!/bin/sh\nexit 0\n' > "$shim_dir/rustup"
+          chmod +x "$shim_dir/rustup"
+          export PATH="$shim_dir:$PATH"
+        '';
       };
     };
 

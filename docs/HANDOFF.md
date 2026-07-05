@@ -86,24 +86,31 @@ amended: sync paging is by server `seq`, not event id).
 ## Next steps
 
 1. **Reader polish**: page prefetch (next 2-3), reading direction (RTL),
-   pinch zoom on phone. (Vertical initial-scroll + per-page journal fixed.)
+   pinch zoom on phone. (Fit modes, vertical strip sizing, SPA chapter
+   navigation and live download state landed 2026-07-06.)
 2. **Library QoL**: unread badges, sort by last update/read, mark
    read/unread, delete server download, storage usage; local-source UI
    affordances (hide "download"/auto-download for local manga, covers in
    local search results); category QoL (user-defined categories, rename,
    reorder — schema is ready, only CRUD endpoints/UI missing).
 3. **Sources**: native JSON-API source, per-source health in UI, hot-reload
-   of sources.d, real-site selector definitions (expect tuning: Cloudflare,
-   lazy-load attrs). `chapter_order = "oldest_first"` exists for sites that
-   list oldest-first.
+   of sources.d. Real-site selector definitions exist (site-a,
+   site-b — kept out of the repo in `/var/lib/yomu/sources.d`, staging
+   copies in `~/.config/yomu/sources.d`); Site A premium/tile-scrambled
+   chapters are out of selector reach. `chapter_order = "oldest_first"`
+   exists for sites that list oldest-first.
 4. **Offline hardening**: quota awareness (Cache API eviction), download
    whole-manga button, offline indicator in the topbar, surface the
    "save to device" no-SW error in the UI (it's only a console warn).
-5. **Deployment (phase 4)**: `nix build .#yomu-server/.#yomu-web` verified;
-   eval-test `services.yomu` (module written, untested), deploy on zeus,
-   add a chaos dashboard tile. Server handles SIGTERM now (systemd stop is
-   graceful).
-6. Later: desktop/mobile shell (Tauri) — inject `YOMU_API_BASE` and note
-   the prev/next-chapter links use full document loads (`rel=external`),
-   which need an SPA fallback the Tauri asset protocol doesn't provide;
-   `yomu-store` for a fully native offline app.
+5. **Deployment (phase 4)**: zeus runs `services.yomu` via a
+   `git+file:///projects/rust/yomu` input in /etc/nixos (commit here, then
+   `nix flake update yomu` there). Remaining: chaos dashboard tile.
+6. **Shells (Tauri v2, crates/yomu-shell)**: desktop works (`just shell`,
+   `nix develop .#tauri`; NVIDIA DMABUF workaround is in code). Android
+   works (`nix develop .#android`, then in crates/yomu-shell
+   `cargo tauri android build --apk --target aarch64`); gradle project in
+   gen/android is committed, release keystore + keystore.properties live
+   in ~/.config/yomu (gitignored). Server URL: `YOMU_SERVER` env /
+   `~/.config/yomu/server` on desktop; on Android the ServerGate connect
+   screen writes the `yomu-api-base` localStorage override. No service
+   worker in shells → no offline caching there yet (`yomu-store` later).
