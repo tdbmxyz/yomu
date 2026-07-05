@@ -97,10 +97,20 @@ Manual per-manga refresh always works regardless of category.
 `GET/PUT /api/v1/categories`, `UpdateMangaRequest.category` to move manga;
 the library UI filters by category and exposes the per-category toggle.
 
+## Auth (ADR-0003)
+
+Two modes, chosen by config. `[auth]` with an OIDC issuer (authentik):
+sign-in via authorization-code + PKCE, claims from the userinfo endpoint,
+users upserted by `sub`, sessions à la chaos (opaque token, sha256 at rest,
+HttpOnly cookie or bearer). No `[auth]`: single-account mode — every
+request is the seeded shared "Everyone" user, no login UI. Reading
+progress is per-user (`progress_events.user_id`); library, downloads and
+categories stay server-wide. Browsing stays public in OIDC mode; only
+progress endpoints demand a session.
+
 ## Deferred by design
 
 - **Offline client + store crate** (phase 3): journal and API are ready;
   the client needs a local SQLite + download-to-device manager.
-- **Auth**: LAN-only posture, like chaos.
 - **Webtoon continuous-scroll reader mode**: the reader is paged today;
   vertical mode is a UI change only, tracking stays per page.
