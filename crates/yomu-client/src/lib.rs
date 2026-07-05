@@ -119,6 +119,15 @@ impl YomuClient {
             .ok()
     }
 
+    /// Fetch a page image and discard the body — used to warm caches
+    /// (browser service worker) for offline reading.
+    pub async fn fetch_page(&self, chapter_id: Uuid, page: u32) -> Result<()> {
+        let url = self
+            .page_url(chapter_id, page)
+            .ok_or_else(|| ClientError::Transport("invalid page url".into()))?;
+        Self::check_status(self.http.get(url)).await.map(|_| ())
+    }
+
     // ---- progress ----
 
     pub async fn set_position(&self, manga_id: Uuid, req: &SetPositionRequest) -> Result<Position> {

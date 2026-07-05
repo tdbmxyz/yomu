@@ -4,6 +4,7 @@ use uuid::Uuid;
 use yomu_domain::{Chapter, DownloadState, MangaDetailResponse, UpdateMangaRequest};
 
 use super::{NotFound, param_uuid};
+use crate::offline;
 use crate::use_client;
 
 #[component]
@@ -46,13 +47,14 @@ fn MangaDetail(
     let id = manga.id;
     let cover = client.cover_url(id);
 
-    // "Continue" goes to the last known position, or the first chapter.
-    let continue_target = detail
-        .position
+    // "Continue" goes to the last known position — server's answer merged
+    // with any unsynced offline events — or the first chapter.
+    let position = offline::effective_position(id, detail.position.clone(), &offline::outbox());
+    let continue_target = position
         .as_ref()
         .map(|p| (p.chapter_id, p.page))
         .or_else(|| detail.chapters.first().map(|c| (c.id, 0)));
-    let continue_label = if detail.position.is_some() {
+    let continue_label = if position.is_some() {
         "Continue reading"
     } else {
         "Start reading"
@@ -155,7 +157,7 @@ fn MangaDetail(
             <ChapterList
                 manga_id=id
                 chapters=detail.chapters
-                position_chapter=detail.position.map(|p| p.chapter_id)
+                position_chapter=position.map(|p| p.chapter_id)
                 refresh
             />
         </section>
@@ -214,6 +216,32 @@ fn ChapterItem(
         });
     };
 
+    // "On this device": walk every page through fetch so the service worker
+    // caches it; afterwards the chapter reads fully offline.
+    let on_device = RwSignal::new(offline::device_chapters().contains(&id));
+    let device_busy = RwSignal::new(false);
+    let device_download = {
+        let client = use_client();
+        move |_| {
+            if device_busy.get_untracked() || on_device.get_untracked() {
+                return;
+            }
+            device_busy.set(true);
+            let client = client.clone();
+            spawn_local(async move {
+                let result = offline::prefetch_chapter(&client, id).await;
+                device_busy.set(false);
+                match result {
+                    Ok(()) => {
+                        offline::mark_device_chapter(id);
+                        on_device.set(true);
+                    }
+                    Err(err) => leptos::logging::warn!("device download: {err}"),
+                }
+            });
+        }
+    };
+
     view! {
         <li class="chapter-item" class:current=current>
             <a class="chapter-title" href=format!("/read/{manga_id}/{id}")>
@@ -231,6 +259,21 @@ fn ChapterItem(
                     }
                 })}
             <span class="grow"></span>
+            <button
+                title="Store on this device for offline reading"
+                disabled=move || device_busy.get() || on_device.get()
+                on:click=device_download
+            >
+                {move || {
+                    if on_device.get() {
+                        "on device ✓"
+                    } else if device_busy.get() {
+                        "saving…"
+                    } else {
+                        "save to device"
+                    }
+                }}
+            </button>
             <button disabled=!downloadable on:click=download>
                 {download_label}
             </button>
