@@ -9,6 +9,7 @@
     "frontendDist": "../yomu-web/dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [],
     "security": {
       "csp": null

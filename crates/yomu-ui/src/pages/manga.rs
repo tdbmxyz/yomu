@@ -21,7 +21,18 @@ pub fn MangaPage() -> impl IntoView {
         move || {
             refresh.track();
             let client = client.clone();
-            async move { client.manga(id).await }
+            async move {
+                let key = format!("manga:{id}");
+                match client.manga(id).await {
+                    Ok(detail) => {
+                        offline::cache_put(&key, &detail);
+                        Ok(detail)
+                    }
+                    // last-known-good: keeps the chapter list (and thus
+                    // device-saved chapters) reachable offline in the shell
+                    Err(err) => offline::cache_get(&key).ok_or(err),
+                }
+            }
         }
     });
 
@@ -293,9 +304,11 @@ fn ChapterItem(
         });
     };
 
-    // "On this device": walk every page through fetch so the service worker
-    // caches it; afterwards the chapter reads fully offline.
-    let on_device = RwSignal::new(offline::device_chapters().contains(&id));
+    // "On this device": in the browser, walk every page through fetch so
+    // the service worker caches it; in the Tauri shell, have the shell
+    // download the pages to disk. Either way the chapter then reads with
+    // the server unreachable.
+    let on_device = RwSignal::new(offline::device_chapters().contains_key(&id));
     let device_busy = RwSignal::new(false);
     let device_download = {
         let client = use_client();
@@ -306,11 +319,15 @@ fn ChapterItem(
             device_busy.set(true);
             let client = client.clone();
             spawn_local(async move {
-                let result = offline::prefetch_chapter(&client, id).await;
+                let result = if offline::shell_available() {
+                    offline::shell_save_chapter(&client, id).await
+                } else {
+                    offline::prefetch_chapter(&client, id).await
+                };
                 device_busy.set(false);
                 match result {
-                    Ok(()) => {
-                        offline::mark_device_chapter(id);
+                    Ok(page_count) => {
+                        offline::mark_device_chapter(id, page_count);
                         on_device.set(true);
                     }
                     Err(err) => leptos::logging::warn!("device download: {err}"),

@@ -20,6 +20,7 @@ const OUTBOX_KEY: &str = "yomu-outbox";
 const DEVICE_KEY: &str = "yomu-device-chapters";
 const MODE_KEY_PREFIX: &str = "yomu-reader-mode:";
 const FIT_KEY_PREFIX: &str = "yomu-reader-fit:";
+const DIR_KEY_PREFIX: &str = "yomu-reader-dir:";
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
@@ -164,7 +165,7 @@ pub fn service_worker_active() -> bool {
 pub async fn prefetch_chapter(
     client: &yomu_client::YomuClient,
     chapter_id: Uuid,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     if !service_worker_active() {
         return Err(
             "offline cache unavailable (no service worker; first visit or unsupported browser)"
@@ -181,19 +182,112 @@ pub async fn prefetch_chapter(
             .await
             .map_err(|e| format!("page {n}: {e}"))?;
     }
-    Ok(())
+    Ok(meta.page_count)
 }
 
-pub fn device_chapters() -> Vec<Uuid> {
+/// Chapters stored on this device, with their page count — enough to open
+/// the reader with the server unreachable.
+pub fn device_chapters() -> std::collections::BTreeMap<Uuid, u32> {
     read_json(DEVICE_KEY)
 }
 
-pub fn mark_device_chapter(id: Uuid) {
-    let mut ids = device_chapters();
-    if !ids.contains(&id) {
-        ids.push(id);
-        write_json(DEVICE_KEY, &ids);
-    }
+pub fn device_chapter_pages(id: Uuid) -> Option<u32> {
+    device_chapters().get(&id).copied()
+}
+
+pub fn mark_device_chapter(id: Uuid, page_count: u32) {
+    let mut chapters = device_chapters();
+    chapters.insert(id, page_count);
+    write_json(DEVICE_KEY, &chapters);
+}
+
+// ---- Tauri shell bridge ----
+//
+// In the desktop/Android shell there is no service worker; "save to
+// device" goes through Tauri commands that download pages to the app's
+// data directory, and the reader loads them back over the shell's
+// `yomudev` custom protocol (`window.YOMU_DEVICE_BASE`, injected at
+// startup). Everything here degrades to None/Err outside the shell.
+
+fn tauri_global() -> Option<js_sys::Object> {
+    use leptos::wasm_bindgen::JsCast;
+    let window = web_sys::window()?;
+    js_sys::Reflect::get(&window, &"__TAURI__".into())
+        .ok()?
+        .dyn_into()
+        .ok()
+}
+
+pub fn shell_available() -> bool {
+    tauri_global().is_some()
+}
+
+/// URL serving page `n` of a device-saved chapter inside the shell.
+pub fn shell_page_url(chapter_id: Uuid, n: u32) -> Option<String> {
+    let window = web_sys::window()?;
+    let base = js_sys::Reflect::get(&window, &"YOMU_DEVICE_BASE".into())
+        .ok()?
+        .as_string()?;
+    Some(format!("{base}chapter/{chapter_id}/{n}"))
+}
+
+async fn shell_invoke(
+    command: &str,
+    args: js_sys::Object,
+) -> Result<leptos::wasm_bindgen::JsValue, String> {
+    use leptos::wasm_bindgen::JsCast;
+    let tauri = tauri_global().ok_or("not running inside the shell")?;
+    let core = js_sys::Reflect::get(&tauri, &"core".into()).map_err(|_| "no __TAURI__.core")?;
+    let invoke: js_sys::Function = js_sys::Reflect::get(&core, &"invoke".into())
+        .map_err(|_| "no invoke")?
+        .dyn_into()
+        .map_err(|_| "invoke is not a function")?;
+    let promise: js_sys::Promise = invoke
+        .call2(&core, &command.into(), &args)
+        .map_err(|e| format!("{e:?}"))?
+        .dyn_into()
+        .map_err(|_| "invoke did not return a promise")?;
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
+}
+
+/// Download a chapter into the shell's device storage.
+pub async fn shell_save_chapter(
+    client: &yomu_client::YomuClient,
+    chapter_id: Uuid,
+) -> Result<u32, String> {
+    let meta = client
+        .chapter_pages(chapter_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let args = js_sys::Object::new();
+    let set = |key: &str, value: leptos::wasm_bindgen::JsValue| {
+        let _ = js_sys::Reflect::set(&args, &key.into(), &value);
+    };
+    set("base", client.base().to_string().into());
+    set("chapter", chapter_id.to_string().into());
+    set("count", (meta.page_count as f64).into());
+    shell_invoke("device_save_chapter", args).await?;
+    Ok(meta.page_count)
+}
+
+// ---- last-known-good cache (offline browsing without a service worker) ----
+
+const CACHE_KEY_PREFIX: &str = "yomu-cache:";
+
+pub fn cache_put<T: serde::Serialize>(key: &str, value: &T) {
+    write_json(&format!("{CACHE_KEY_PREFIX}{key}"), value);
+}
+
+pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    storage()
+        .and_then(|s| {
+            s.get_item(&format!("{CACHE_KEY_PREFIX}{key}"))
+                .ok()
+                .flatten()
+        })
+        .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
 // ---- reader prefs ----
@@ -262,5 +356,38 @@ pub fn set_reader_fit(manga_id: Uuid, fit: ReaderFit) {
             ReaderFit::Original => "original",
         };
         let _ = storage.set_item(&format!("{FIT_KEY_PREFIX}{manga_id}"), value);
+    }
+}
+
+/// Reading direction in paged mode: which side "next page" lives on.
+/// Manga read right-to-left; webtoons and western comics left-to-right.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReaderDirection {
+    #[default]
+    Ltr,
+    Rtl,
+}
+
+pub fn reader_direction(manga_id: Uuid) -> ReaderDirection {
+    match storage()
+        .and_then(|s| {
+            s.get_item(&format!("{DIR_KEY_PREFIX}{manga_id}"))
+                .ok()
+                .flatten()
+        })
+        .as_deref()
+    {
+        Some("rtl") => ReaderDirection::Rtl,
+        _ => ReaderDirection::Ltr,
+    }
+}
+
+pub fn set_reader_direction(manga_id: Uuid, direction: ReaderDirection) {
+    if let Some(storage) = storage() {
+        let value = match direction {
+            ReaderDirection::Ltr => "ltr",
+            ReaderDirection::Rtl => "rtl",
+        };
+        let _ = storage.set_item(&format!("{DIR_KEY_PREFIX}{manga_id}"), value);
     }
 }

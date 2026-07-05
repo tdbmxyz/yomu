@@ -227,8 +227,31 @@ button.danger:hover {
 
 .manga-head {
   display: flex;
+  /* stretch would deform the cover to the text column's height */
+  align-items: flex-start;
   gap: 1.5rem;
   margin-bottom: 1.5rem;
+}
+
+/* phones: cover and text side by side no longer fit */
+@media (max-width: 40rem) {
+  .manga-head {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .manga-cover.large {
+    width: 10rem;
+  }
+
+  .manga-head-body {
+    width: 100%;
+  }
+
+  .manga-actions {
+    justify-content: center;
+  }
 }
 
 .manga-head-body h2 {
@@ -332,6 +355,9 @@ button.danger:hover {
   overflow: auto;
   cursor: pointer;
   scrollbar-width: thin;
+  /* native vertical scroll stays (fit-width); horizontal swipes and
+     pinches are ours to interpret */
+  touch-action: pan-y;
 }
 
 /* margin:auto centers a page smaller than the stage without making the

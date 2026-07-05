@@ -26,8 +26,14 @@ features = [
     "Navigator",
     "ServiceWorker",
     "ServiceWorkerContainer",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
 ]
 
 [dependencies.js-sys]
 version = "0.3"
+
+[dependencies.wasm-bindgen-futures]
+version = "0.4"
 

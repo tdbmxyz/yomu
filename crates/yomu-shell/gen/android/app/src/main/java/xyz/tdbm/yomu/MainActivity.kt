@@ -1,11 +1,6 @@
 package xyz.tdbm.yomu
 
-import android.os.Bundle
-import androidx.activity.enableEdgeToEdge
-
-class MainActivity : TauriActivity() {
-  override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge()
-    super.onCreate(savedInstanceState)
-  }
-}
+// Note: the tauri template ships enableEdgeToEdge() here, which draws the
+// webview under the system status bar and puts it over the app's topbar.
+// Classic (non-edge-to-edge) layout keeps every button reachable.
+class MainActivity : TauriActivity()

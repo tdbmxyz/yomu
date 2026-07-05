@@ -11,8 +11,49 @@ use leptos_router::hooks::use_query_map;
 use yomu_domain::{ProgressEvent, SetPositionRequest};
 
 use super::{NotFound, param_uuid};
-use crate::offline::{self, ReaderFit, ReaderMode};
+use crate::offline::{self, ReaderDirection, ReaderFit, ReaderMode};
 use crate::use_client;
+
+/// Touch-gesture bookkeeping for the paged stage (swipe / pinch / pan).
+#[derive(Default)]
+struct Gesture {
+    /// First finger's start position, while a one-finger gesture is live.
+    start: Option<(f64, f64)>,
+    /// Pan offset when the drag started.
+    pan0: (f64, f64),
+    /// (finger distance, zoom) at the moment a pinch started.
+    pinch0: Option<(f64, f64)>,
+    /// The finger travelled: not a tap anymore.
+    moved: bool,
+    /// Eat the synthetic click that follows a swipe/pinch/pan.
+    suppress_click: bool,
+}
+
+fn touch_xy(touches: &web_sys::TouchList, index: u32) -> Option<(f64, f64)> {
+    let touch = touches.item(index)?;
+    Some((touch.client_x() as f64, touch.client_y() as f64))
+}
+
+fn touch_distance(touches: &web_sys::TouchList) -> Option<f64> {
+    let (ax, ay) = touch_xy(touches, 0)?;
+    let (bx, by) = touch_xy(touches, 1)?;
+    Some(((ax - bx).powi(2) + (ay - by).powi(2)).sqrt())
+}
+
+/// Page image URL: chapters saved to the device inside the Tauri shell are
+/// served by the shell's own protocol; everything else comes from the
+/// server (where the browser's service worker may still answer offline).
+fn page_source(client: &yomu_client::YomuClient, chapter_id: uuid::Uuid, n: u32) -> String {
+    if offline::device_chapter_pages(chapter_id).is_some()
+        && let Some(url) = offline::shell_page_url(chapter_id, n)
+    {
+        return url;
+    }
+    client
+        .page_url(chapter_id, n)
+        .map(|u| u.to_string())
+        .unwrap_or_default()
+}
 
 /// Routed wrapper: re-creates the reader whenever the chapter param
 /// changes, so prev/next chapter can be a plain SPA link. A full-document
@@ -43,6 +84,7 @@ fn ReaderInner() -> impl IntoView {
     let page = RwSignal::new(initial_page);
     let mode = RwSignal::new(offline::reader_mode(manga_id));
     let fit = RwSignal::new(offline::reader_fit(manga_id));
+    let dir = RwSignal::new(offline::reader_direction(manga_id));
     let chrome = RwSignal::new(true);
 
     let client = use_client();
@@ -50,14 +92,39 @@ fn ReaderInner() -> impl IntoView {
         let client = client.clone();
         move || {
             let client = client.clone();
-            async move { client.chapter_pages(chapter_id).await }
+            async move {
+                match client.chapter_pages(chapter_id).await {
+                    Ok(meta) => Ok(meta),
+                    // Saved on this device: enough metadata to read with
+                    // the server unreachable.
+                    Err(err) => match offline::device_chapter_pages(chapter_id) {
+                        Some(page_count) => Ok(yomu_domain::PagesResponse {
+                            chapter_id,
+                            page_count,
+                            downloaded: false,
+                        }),
+                        None => Err(err),
+                    },
+                }
+            }
         }
     });
     let detail = LocalResource::new({
         let client = client.clone();
         move || {
             let client = client.clone();
-            async move { client.manga(manga_id).await }
+            async move {
+                let key = format!("manga:{manga_id}");
+                match client.manga(manga_id).await {
+                    Ok(detail) => {
+                        offline::cache_put(&key, &detail);
+                        Ok(detail)
+                    }
+                    // offline: chapter title + prev/next come from the
+                    // last-known-good copy the manga page stored
+                    Err(err) => offline::cache_get(&key).ok_or(err),
+                }
+            }
         }
     });
 
@@ -125,12 +192,18 @@ fn ReaderInner() -> impl IntoView {
     };
 
     let key_turn = turn.clone();
-    let key_handle =
-        window_event_listener(leptos::ev::keydown, move |ev| match ev.key().as_str() {
-            "ArrowLeft" => key_turn(-1),
-            "ArrowRight" => key_turn(1),
+    let key_handle = window_event_listener(leptos::ev::keydown, move |ev| {
+        // In RTL the previous page is on the right.
+        let forward: i64 = match dir.get_untracked() {
+            ReaderDirection::Ltr => 1,
+            ReaderDirection::Rtl => -1,
+        };
+        match ev.key().as_str() {
+            "ArrowLeft" => key_turn(-forward),
+            "ArrowRight" => key_turn(forward),
             _ => {}
-        });
+        }
+    });
     on_cleanup(move || key_handle.remove());
 
     let neighbours = move || {
@@ -166,9 +239,16 @@ fn ReaderInner() -> impl IntoView {
         fit.set(next);
         offline::set_reader_fit(manga_id, next);
     };
+    let toggle_dir = move |_| {
+        let next = match dir.get_untracked() {
+            ReaderDirection::Ltr => ReaderDirection::Rtl,
+            ReaderDirection::Rtl => ReaderDirection::Ltr,
+        };
+        dir.set(next);
+        offline::set_reader_direction(manga_id, next);
+    };
 
-    let turn_prev = turn.clone();
-    let turn_next = turn.clone();
+    let turn_paged = turn.clone();
     let report_scroll = report.clone();
     let client_paged = use_client();
     let client_vertical = use_client();
@@ -195,6 +275,16 @@ fn ReaderInner() -> impl IntoView {
                                         ReaderFit::Original => "fit: 1:1",
                                     }}
                                 </button>
+                                <button
+                                    class="mode-btn"
+                                    title="Reading direction (which side is the next page)"
+                                    on:click=toggle_dir
+                                >
+                                    {move || match dir.get() {
+                                        ReaderDirection::Ltr => "ltr →",
+                                        ReaderDirection::Rtl => "← rtl",
+                                    }}
+                                </button>
                             }
                         })
                 }}
@@ -204,8 +294,7 @@ fn ReaderInner() -> impl IntoView {
             </div>
 
             {move || {
-                let prev = turn_prev.clone();
-                let next = turn_next.clone();
+                let turn = turn_paged.clone();
                 let report = report_scroll.clone();
                 match pages.get() {
                     None => view! { <p class="muted reader-msg">"Loading pages…"</p> }.into_any(),
@@ -217,10 +306,7 @@ fn ReaderInner() -> impl IntoView {
                     }
                     Some(Ok(meta)) => match mode.get() {
                         ReaderMode::Paged => {
-                            let src = client_paged
-                                .page_url(chapter_id, page.get())
-                                .map(|u| u.to_string())
-                                .unwrap_or_default();
+                            let src = page_source(&client_paged, chapter_id, page.get());
                             let stage = NodeRef::<leptos::html::Div>::new();
                             // Width/original fits scroll; the next page must
                             // start at its top-left again.
@@ -231,10 +317,42 @@ fn ReaderInner() -> impl IntoView {
                                     el.set_scroll_left(0);
                                 }
                             });
+                            // Zoom (pinch / ctrl+wheel) and pan, reset on
+                            // page turn.
+                            let zoom = RwSignal::new(1.0_f64);
+                            let pan = RwSignal::new((0.0_f64, 0.0_f64));
+                            Effect::new(move |_| {
+                                page.get();
+                                zoom.set(1.0);
+                                pan.set((0.0, 0.0));
+                            });
+                            let gesture = StoredValue::new(Gesture::default());
+                            let clamp_pan = move |(x, y): (f64, f64)| -> (f64, f64) {
+                                let z = zoom.get_untracked();
+                                let Some(el) = stage.get_untracked() else {
+                                    return (0.0, 0.0);
+                                };
+                                let max_x = (z - 1.0) * el.client_width() as f64 / 2.0;
+                                let max_y = (z - 1.0) * el.client_height() as f64 / 2.0;
+                                (x.clamp(-max_x, max_x), y.clamp(-max_y, max_y))
+                            };
+                            // forward = next page in reading order; which
+                            // physical side that is depends on direction.
+                            let go = {
+                                let turn = turn.clone();
+                                move |forward: bool| {
+                                    turn(if forward { 1 } else { -1 });
+                                }
+                            };
                             // Tap zones by position instead of overlay
-                            // buttons: buttons outside the scroller would
+                            // buttons: buttons over the scroller would
                             // swallow touch panning once the page overflows.
+                            let click_go = go.clone();
                             let on_click = move |ev: leptos::ev::MouseEvent| {
+                                if gesture.with_value(|g| g.suppress_click) {
+                                    gesture.update_value(|g| g.suppress_click = false);
+                                    return;
+                                }
                                 let width = window()
                                     .inner_width()
                                     .ok()
@@ -243,13 +361,120 @@ fn ReaderInner() -> impl IntoView {
                                 if width <= 0.0 {
                                     return;
                                 }
+                                let rtl = dir.get_untracked() == ReaderDirection::Rtl;
                                 let x = ev.client_x() as f64;
                                 if x < width / 3.0 {
-                                    prev(-1);
+                                    // left side: back in LTR, forward in RTL
+                                    click_go(rtl);
                                 } else if x > width * 2.0 / 3.0 {
-                                    next(1);
+                                    click_go(!rtl);
                                 } else {
                                     chrome.update(|c| *c = !*c);
+                                }
+                            };
+                            let on_touchstart = move |ev: leptos::ev::TouchEvent| {
+                                let touches = ev.touches();
+                                if touches.length() == 2 {
+                                    if let Some(d) = touch_distance(&touches) {
+                                        gesture.update_value(|g| {
+                                            g.pinch0 = Some((d, zoom.get_untracked()));
+                                            g.start = None;
+                                            g.moved = true;
+                                        });
+                                    }
+                                } else if touches.length() == 1
+                                    && let Some(pos) = touch_xy(&touches, 0)
+                                {
+                                    gesture.update_value(|g| {
+                                        g.start = Some(pos);
+                                        g.pan0 = pan.get_untracked();
+                                        g.moved = false;
+                                    });
+                                }
+                            };
+                            let on_touchmove = move |ev: leptos::ev::TouchEvent| {
+                                let touches = ev.touches();
+                                if touches.length() == 2 {
+                                    let Some((d0, z0)) = gesture.with_value(|g| g.pinch0)
+                                    else {
+                                        return;
+                                    };
+                                    let Some(d) = touch_distance(&touches) else {
+                                        return;
+                                    };
+                                    ev.prevent_default();
+                                    let z = (z0 * d / d0).clamp(1.0, 5.0);
+                                    zoom.set(z);
+                                    if z <= 1.0 {
+                                        pan.set((0.0, 0.0));
+                                    } else {
+                                        pan.set(clamp_pan(pan.get_untracked()));
+                                    }
+                                } else if touches.length() == 1 {
+                                    let Some((sx, sy)) = gesture.with_value(|g| g.start) else {
+                                        return;
+                                    };
+                                    let Some((x, y)) = touch_xy(&touches, 0) else {
+                                        return;
+                                    };
+                                    let (dx, dy) = (x - sx, y - sy);
+                                    if dx.abs() > 10.0 || dy.abs() > 10.0 {
+                                        gesture.update_value(|g| g.moved = true);
+                                    }
+                                    if zoom.get_untracked() > 1.0 {
+                                        // drag pans the zoomed page
+                                        ev.prevent_default();
+                                        let (px, py) = gesture.with_value(|g| g.pan0);
+                                        pan.set(clamp_pan((px + dx, py + dy)));
+                                    }
+                                }
+                            };
+                            let swipe_go = go.clone();
+                            let on_touchend = move |ev: leptos::ev::TouchEvent| {
+                                if ev.touches().length() > 0 {
+                                    // finger lifted mid-pinch: wait for a
+                                    // fresh touchstart before tracking again
+                                    gesture.update_value(|g| g.start = None);
+                                    return;
+                                }
+                                let (start, pinch, moved) =
+                                    gesture.with_value(|g| (g.start, g.pinch0, g.moved));
+                                gesture.update_value(|g| {
+                                    g.start = None;
+                                    g.pinch0 = None;
+                                    if moved || pinch.is_some() {
+                                        g.suppress_click = true;
+                                    }
+                                });
+                                if pinch.is_some() || !moved || zoom.get_untracked() > 1.0 {
+                                    return;
+                                }
+                                let (Some((sx, sy)), Some(touch)) =
+                                    (start, ev.changed_touches().item(0))
+                                else {
+                                    return;
+                                };
+                                let dx = touch.client_x() as f64 - sx;
+                                let dy = touch.client_y() as f64 - sy;
+                                if dx.abs() > 60.0 && dx.abs() > 2.0 * dy.abs() {
+                                    // swiping left pulls in the page that
+                                    // sits on the right
+                                    let rtl = dir.get_untracked() == ReaderDirection::Rtl;
+                                    swipe_go(if dx < 0.0 { !rtl } else { rtl });
+                                }
+                            };
+                            let on_wheel = move |ev: leptos::ev::WheelEvent| {
+                                if !ev.ctrl_key() {
+                                    return;
+                                }
+                                ev.prevent_default();
+                                let z = (zoom.get_untracked() * (1.0 - ev.delta_y() * 0.002))
+                                    .clamp(1.0, 5.0);
+                                zoom.set(z);
+                                if z <= 1.0 {
+                                    pan.set((0.0, 0.0));
+                                } else {
+                                    pan.set(clamp_pan(pan.get_untracked()));
                                 }
                             };
                             view! {
@@ -260,8 +485,25 @@ fn ReaderInner() -> impl IntoView {
                                     class:fit-original=move || fit.get() == ReaderFit::Original
                                     node_ref=stage
                                     on:click=on_click
+                                    on:touchstart=on_touchstart
+                                    on:touchmove=on_touchmove
+                                    on:touchend=on_touchend
+                                    on:wheel=on_wheel
                                 >
-                                    <img class="reader-page" src=src alt=""/>
+                                    <img
+                                        class="reader-page"
+                                        src=src
+                                        alt=""
+                                        style:transform=move || {
+                                            let z = zoom.get();
+                                            let (x, y) = pan.get();
+                                            if z > 1.0 {
+                                                format!("translate({x}px, {y}px) scale({z})")
+                                            } else {
+                                                String::new()
+                                            }
+                                        }
+                                    />
                                 </div>
                             }
                                 .into_any()
@@ -323,10 +565,8 @@ fn ReaderInner() -> impl IntoView {
                                 >
                                     {(0..meta.page_count)
                                         .map(|n| {
-                                            let src = client_vertical
-                                                .page_url(chapter_id, n)
-                                                .map(|u| u.to_string())
-                                                .unwrap_or_default();
+                                            let src =
+                                                page_source(&client_vertical, chapter_id, n);
                                             view! {
                                                 <img
                                                     class="reader-strip-page"

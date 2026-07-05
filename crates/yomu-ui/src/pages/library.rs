@@ -2,18 +2,29 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use yomu_domain::{Category, MangaWithPosition, UpdateCategoryRequest};
 
+use crate::offline;
 use crate::use_client;
 
 #[component]
 pub fn Library() -> impl IntoView {
     let client = use_client();
     let refresh = RwSignal::new(0u32);
+    // Last-known-good fallbacks: without a service worker (Tauri shell)
+    // the library stays browsable while the server is unreachable.
     let library = LocalResource::new({
         let client = client.clone();
         move || {
             refresh.track();
             let client = client.clone();
-            async move { client.library().await }
+            async move {
+                match client.library().await {
+                    Ok(list) => {
+                        offline::cache_put("library", &list);
+                        Ok(list)
+                    }
+                    Err(err) => offline::cache_get("library").ok_or(err),
+                }
+            }
         }
     });
     let categories = LocalResource::new({
@@ -21,7 +32,15 @@ pub fn Library() -> impl IntoView {
         move || {
             refresh.track();
             let client = client.clone();
-            async move { client.categories().await }
+            async move {
+                match client.categories().await {
+                    Ok(list) => {
+                        offline::cache_put("categories", &list);
+                        Ok(list)
+                    }
+                    Err(err) => offline::cache_get("categories").ok_or(err),
+                }
+            }
         }
     });
     // None = "All".

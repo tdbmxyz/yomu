@@ -6,8 +6,15 @@
 //! `$XDG_CONFIG_HOME/yomu/server` (one line, desktop), or nothing — then the
 //! UI's own resolution takes over (localStorage override set through the
 //! in-app connect screen, which is the path on Android).
+//!
+//! Device downloads: webviews here have no service worker, so "save to
+//! device" calls the [`device_save_chapter`] command, which stores pages
+//! under the app data directory; the reader loads them back through the
+//! `yomudev` custom protocol (base URL injected as `window.YOMU_DEVICE_BASE`).
 
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use std::path::PathBuf;
+
+use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 fn configured_server() -> Option<String> {
     if let Ok(url) = std::env::var("YOMU_SERVER") {
@@ -25,6 +32,113 @@ fn dirs_config() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
 }
 
+// ---- device chapter storage ----
+
+struct Http(reqwest::Client);
+
+fn chapters_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("chapters"))
+}
+
+/// Chapter ids come from the (trusted) UI, but they are also path segments:
+/// only accept plain UUID-looking strings.
+fn checked_id(chapter: &str) -> Result<&str, String> {
+    let ok = !chapter.is_empty()
+        && chapter
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    ok.then_some(chapter)
+        .ok_or_else(|| "invalid chapter id".into())
+}
+
+fn extension_for(content_type: &str) -> &'static str {
+    match content_type {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/avif" => "avif",
+        _ => "jpg",
+    }
+}
+
+fn content_type_for(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("avif") => "image/avif",
+        _ => "image/jpeg",
+    }
+}
+
+/// Download every page of a chapter from the server into device storage.
+/// Written to a `.partial-` directory and renamed, so a stored chapter is
+/// always complete (same rule as the server's downloader).
+#[tauri::command]
+async fn device_save_chapter(
+    app: tauri::AppHandle,
+    http: State<'_, Http>,
+    base: String,
+    chapter: String,
+    count: u32,
+) -> Result<(), String> {
+    checked_id(&chapter)?;
+    let base = url::Url::parse(&base).map_err(|e| e.to_string())?;
+    let dir = chapters_dir(&app)?;
+    let partial = dir.join(format!(".partial-{chapter}"));
+    let _ = std::fs::remove_dir_all(&partial);
+    std::fs::create_dir_all(&partial).map_err(|e| e.to_string())?;
+
+    for n in 0..count {
+        let url = base
+            .join(&format!("api/v1/chapters/{chapter}/pages/{n}"))
+            .map_err(|e| e.to_string())?;
+        let resp = http.0.get(url).send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("page {n}: HTTP {}", resp.status()));
+        }
+        let ext = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(extension_for)
+            .unwrap_or("jpg");
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        std::fs::write(partial.join(format!("{n:04}.{ext}")), &bytes).map_err(|e| e.to_string())?;
+    }
+
+    let target = dir.join(&chapter);
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::rename(&partial, &target).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove a chapter from device storage.
+#[tauri::command]
+fn device_delete_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), String> {
+    checked_id(&chapter)?;
+    let dir = chapters_dir(&app)?.join(&chapter);
+    std::fs::remove_dir_all(dir).map_err(|e| e.to_string())
+}
+
+fn device_page_file(app: &tauri::AppHandle, chapter: &str, n: u32) -> Option<PathBuf> {
+    let dir = chapters_dir(app).ok()?.join(checked_id(chapter).ok()?);
+    let prefix = format!("{n:04}.");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with(&prefix))
+        })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // WebKitGTK's DMABUF renderer draws a blank window on the NVIDIA
@@ -37,10 +151,51 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(Http(reqwest::Client::new()))
+        .invoke_handler(tauri::generate_handler![
+            device_save_chapter,
+            device_delete_chapter
+        ])
+        // Serves device-saved pages: yomudev://localhost/chapter/<id>/<n>
+        // (http://yomudev.localhost/… on Android/Windows).
+        .register_uri_scheme_protocol("yomudev", |ctx, request| {
+            let not_found = || {
+                tauri::http::Response::builder()
+                    .status(404)
+                    .body(Vec::new())
+                    .expect("static response")
+            };
+            let path = request.uri().path().trim_start_matches('/').to_string();
+            let mut parts = path.split('/');
+            let (Some("chapter"), Some(chapter), Some(n), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return not_found();
+            };
+            let Ok(n) = n.parse::<u32>() else {
+                return not_found();
+            };
+            let Some(file) = device_page_file(ctx.app_handle(), chapter, n) else {
+                return not_found();
+            };
+            match std::fs::read(&file) {
+                Ok(bytes) => tauri::http::Response::builder()
+                    .header("content-type", content_type_for(&file))
+                    .body(bytes)
+                    .unwrap_or_else(|_| not_found()),
+                Err(_) => not_found(),
+            }
+        })
         .setup(|app| {
+            let device_base = if cfg!(any(windows, target_os = "android")) {
+                "http://yomudev.localhost/"
+            } else {
+                "yomudev://localhost/"
+            };
             let mut window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title("yomu");
+                    .title("yomu")
+                    .initialization_script(format!("window.YOMU_DEVICE_BASE = '{device_base}';"));
             if let Some(server) = configured_server().filter(|s| url::Url::parse(s).is_ok()) {
                 // serde_json-free single-quoted injection: the URL was just
                 // validated, but escape quotes anyway.
