@@ -27,10 +27,21 @@ pub struct AddMangaRequest {
     pub auto_download: bool,
 }
 
-/// Per-manga settings (full replacement).
+/// Per-manga settings. `category` is optional so clients toggling one
+/// setting don't have to know the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateMangaRequest {
     pub auto_download: bool,
+    /// Move to this [`crate::Category`] id; `None` keeps the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+/// Per-category settings (`PUT /categories/{id}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCategoryRequest {
+    /// Include this category's manga in the periodic new-chapter check.
+    pub update_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

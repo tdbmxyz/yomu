@@ -67,9 +67,11 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMangaRequest>,
 ) -> Result<Json<Manga>, ApiError> {
-    Ok(Json(
-        state.db.set_auto_download(id, req.auto_download).await?,
-    ))
+    let mut manga = state.db.set_auto_download(id, req.auto_download).await?;
+    if let Some(category) = &req.category {
+        manga = state.db.set_category(id, category).await?;
+    }
+    Ok(Json(manga))
 }
 
 pub async fn delete(

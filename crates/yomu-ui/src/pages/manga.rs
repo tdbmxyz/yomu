@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use uuid::Uuid;
-use yomu_domain::{Chapter, DownloadState, MangaDetailResponse, UpdateMangaRequest};
+use yomu_domain::{Category, Chapter, DownloadState, MangaDetailResponse, UpdateMangaRequest};
 
 use super::{NotFound, param_uuid};
 use crate::offline;
@@ -87,6 +87,35 @@ fn MangaDetail(
             spawn_local(async move {
                 let req = UpdateMangaRequest {
                     auto_download: !auto_download,
+                    category: None,
+                };
+                match client.update_manga(id, &req).await {
+                    Ok(_) => refresh.update(|n| *n += 1),
+                    Err(err) => status.set(Some(format!("Update failed: {err}"))),
+                }
+            });
+        }
+    };
+
+    // Category select (Reading / Paused / Finished …); which categories the
+    // updater checks is configured on the library page.
+    let categories = LocalResource::new({
+        let client = client.clone();
+        move || {
+            let client = client.clone();
+            async move { client.categories().await }
+        }
+    });
+    let current_category = manga.category.clone();
+    let set_category = {
+        let client = client.clone();
+        move |ev: leptos::ev::Event| {
+            let value = event_target_value(&ev);
+            let client = client.clone();
+            spawn_local(async move {
+                let req = UpdateMangaRequest {
+                    auto_download,
+                    category: Some(value),
                 };
                 match client.update_manga(id, &req).await {
                     Ok(_) => refresh.update(|n| *n += 1),
@@ -148,6 +177,34 @@ fn MangaDetail(
                                 "Auto-download: off"
                             }}
                         </button>
+                        {move || {
+                            let current = current_category.clone();
+                            let on_change = set_category.clone();
+                            categories
+                                .get()
+                                .and_then(|r| r.ok())
+                                .map(|list: Vec<Category>| {
+                                    view! {
+                                        <select
+                                            class="category-select"
+                                            title="Category"
+                                            on:change=on_change
+                                        >
+                                            {list
+                                                .into_iter()
+                                                .map(|c| {
+                                                    let selected = c.id == current;
+                                                    view! {
+                                                        <option value=c.id selected=selected>
+                                                            {c.name}
+                                                        </option>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </select>
+                                    }
+                                })
+                        }}
                         <button class="danger" on:click=delete>
                             "Remove from library"
                         </button>

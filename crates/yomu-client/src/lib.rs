@@ -4,10 +4,10 @@
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    AddMangaRequest, ApiErrorBody, Chapter, EventsResponse, HealthResponse, Manga,
+    AddMangaRequest, ApiErrorBody, Category, Chapter, EventsResponse, HealthResponse, Manga,
     MangaDetailResponse, MangaSummary, MangaWithPosition, PagesResponse, Position,
     PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
-    UpdateMangaRequest,
+    UpdateCategoryRequest, UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -103,6 +103,20 @@ impl YomuClient {
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
         self.base.join(&format!("api/v1/manga/{id}/cover")).ok()
+    }
+
+    // ---- categories ----
+
+    pub async fn categories(&self) -> Result<Vec<Category>> {
+        self.get("api/v1/categories").await
+    }
+
+    pub async fn update_category(&self, id: &str, req: &UpdateCategoryRequest) -> Result<Category> {
+        let req = self
+            .http
+            .put(self.url(&format!("api/v1/categories/{id}"))?)
+            .json(req);
+        self.send(req).await
     }
 
     // ---- chapters & pages ----

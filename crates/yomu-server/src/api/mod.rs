@@ -1,5 +1,6 @@
 //! HTTP API (`/api/v1`) and static frontend serving.
 
+mod categories;
 mod chapters;
 mod error;
 mod library;
@@ -23,6 +24,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/library", get(library::list).post(library::add))
+        .route("/categories", get(categories::list))
+        .route("/categories/{id}", axum::routing::put(categories::update))
         .route(
             "/manga/{id}",
             get(library::detail)
