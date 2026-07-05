@@ -19,6 +19,7 @@ use yomu_domain::{Position, ProgressEvent, PushEventsRequest, merge_position};
 const OUTBOX_KEY: &str = "yomu-outbox";
 const DEVICE_KEY: &str = "yomu-device-chapters";
 const MODE_KEY_PREFIX: &str = "yomu-reader-mode:";
+const FIT_KEY_PREFIX: &str = "yomu-reader-fit:";
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
@@ -225,5 +226,41 @@ pub fn set_reader_mode(manga_id: Uuid, mode: ReaderMode) {
             ReaderMode::Vertical => "vertical",
         };
         let _ = storage.set_item(&format!("{MODE_KEY_PREFIX}{manga_id}"), value);
+    }
+}
+
+/// How a page is scaled in paged mode. `Screen` shows the whole page at
+/// once; `Width` and `Original` trade that for readability and scroll.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReaderFit {
+    #[default]
+    Screen,
+    Width,
+    Original,
+}
+
+pub fn reader_fit(manga_id: Uuid) -> ReaderFit {
+    match storage()
+        .and_then(|s| {
+            s.get_item(&format!("{FIT_KEY_PREFIX}{manga_id}"))
+                .ok()
+                .flatten()
+        })
+        .as_deref()
+    {
+        Some("width") => ReaderFit::Width,
+        Some("original") => ReaderFit::Original,
+        _ => ReaderFit::Screen,
+    }
+}
+
+pub fn set_reader_fit(manga_id: Uuid, fit: ReaderFit) {
+    if let Some(storage) = storage() {
+        let value = match fit {
+            ReaderFit::Screen => "screen",
+            ReaderFit::Width => "width",
+            ReaderFit::Original => "original",
+        };
+        let _ = storage.set_item(&format!("{FIT_KEY_PREFIX}{manga_id}"), value);
     }
 }

@@ -11,7 +11,7 @@ use leptos_router::hooks::use_query_map;
 use yomu_domain::{ProgressEvent, SetPositionRequest};
 
 use super::{NotFound, param_uuid};
-use crate::offline::{self, ReaderMode};
+use crate::offline::{self, ReaderFit, ReaderMode};
 use crate::use_client;
 
 #[component]
@@ -27,6 +27,7 @@ pub fn Reader() -> impl IntoView {
         .unwrap_or(0);
     let page = RwSignal::new(initial_page);
     let mode = RwSignal::new(offline::reader_mode(manga_id));
+    let fit = RwSignal::new(offline::reader_fit(manga_id));
     let chrome = RwSignal::new(true);
 
     let client = use_client();
@@ -141,6 +142,15 @@ pub fn Reader() -> impl IntoView {
         mode.set(next);
         offline::set_reader_mode(manga_id, next);
     };
+    let cycle_fit = move |_| {
+        let next = match fit.get_untracked() {
+            ReaderFit::Screen => ReaderFit::Width,
+            ReaderFit::Width => ReaderFit::Original,
+            ReaderFit::Original => ReaderFit::Screen,
+        };
+        fit.set(next);
+        offline::set_reader_fit(manga_id, next);
+    };
 
     let turn_prev = turn.clone();
     let turn_next = turn.clone();
@@ -159,6 +169,20 @@ pub fn Reader() -> impl IntoView {
                         ReaderMode::Vertical => "⇆ paged",
                     }}
                 </button>
+                {move || {
+                    (mode.get() == ReaderMode::Paged)
+                        .then(|| {
+                            view! {
+                                <button class="mode-btn" title="Page fit" on:click=cycle_fit>
+                                    {move || match fit.get() {
+                                        ReaderFit::Screen => "fit: screen",
+                                        ReaderFit::Width => "fit: width",
+                                        ReaderFit::Original => "fit: 1:1",
+                                    }}
+                                </button>
+                            }
+                        })
+                }}
                 <span class="muted">
                     {move || format!("{} / {}", page.get() + 1, page_count().max(1))}
                 </span>
@@ -182,24 +206,47 @@ pub fn Reader() -> impl IntoView {
                                 .page_url(chapter_id, page.get())
                                 .map(|u| u.to_string())
                                 .unwrap_or_default();
+                            let stage = NodeRef::<leptos::html::Div>::new();
+                            // Width/original fits scroll; the next page must
+                            // start at its top-left again.
+                            Effect::new(move |_| {
+                                page.get();
+                                if let Some(el) = stage.get() {
+                                    el.set_scroll_top(0);
+                                    el.set_scroll_left(0);
+                                }
+                            });
+                            // Tap zones by position instead of overlay
+                            // buttons: buttons outside the scroller would
+                            // swallow touch panning once the page overflows.
+                            let on_click = move |ev: leptos::ev::MouseEvent| {
+                                let width = window()
+                                    .inner_width()
+                                    .ok()
+                                    .and_then(|w| w.as_f64())
+                                    .unwrap_or(0.0);
+                                if width <= 0.0 {
+                                    return;
+                                }
+                                let x = ev.client_x() as f64;
+                                if x < width / 3.0 {
+                                    prev(-1);
+                                } else if x > width * 2.0 / 3.0 {
+                                    next(1);
+                                } else {
+                                    chrome.update(|c| *c = !*c);
+                                }
+                            };
                             view! {
-                                <div class="reader-stage">
+                                <div
+                                    class="reader-stage"
+                                    class:fit-screen=move || fit.get() == ReaderFit::Screen
+                                    class:fit-width=move || fit.get() == ReaderFit::Width
+                                    class:fit-original=move || fit.get() == ReaderFit::Original
+                                    node_ref=stage
+                                    on:click=on_click
+                                >
                                     <img class="reader-page" src=src alt=""/>
-                                    <button
-                                        class="page-zone left"
-                                        aria-label="previous page"
-                                        on:click=move |_| prev(-1)
-                                    ></button>
-                                    <button
-                                        class="page-zone center"
-                                        aria-label="toggle controls"
-                                        on:click=move |_| chrome.update(|c| *c = !*c)
-                                    ></button>
-                                    <button
-                                        class="page-zone right"
-                                        aria-label="next page"
-                                        on:click=move |_| next(1)
-                                    ></button>
                                 </div>
                             }
                                 .into_any()
