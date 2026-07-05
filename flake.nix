@@ -112,17 +112,49 @@
       default = self.nixosModules.yomu;
     };
 
-    devShells.${system}.default = pkgs.mkShell {
-      name = "yomu";
+    devShells.${system} = {
+      default = pkgs.mkShell {
+        name = "yomu";
 
-      packages = with pkgs;
-        [
-          rustToolchain
-          trunk
-          binaryen
-          just
-        ]
-        ++ lib.optional hasCargoLock wasm-bindgen-cli;
+        packages = with pkgs;
+          [
+            rustToolchain
+            trunk
+            binaryen
+            just
+          ]
+          ++ lib.optional hasCargoLock wasm-bindgen-cli;
+      };
+
+      # Desktop/mobile shell development: `nix develop .#tauri`. Adds the
+      # Linux webview stack and the tauri CLI on top of the default shell.
+      tauri = pkgs.mkShell {
+        name = "yomu-tauri";
+
+        packages = with pkgs;
+          [
+            rustToolchain
+            trunk
+            binaryen
+            just
+            cargo-tauri
+            pkg-config
+          ]
+          ++ lib.optional hasCargoLock wasm-bindgen-cli;
+
+        buildInputs = with pkgs; [
+          gtk3
+          webkitgtk_4_1
+          libsoup_3
+          openssl
+          glib
+          cairo
+          pango
+          gdk-pixbuf
+          atk
+          librsvg
+        ];
+      };
     };
 
     formatter.${system} = pkgs.alejandra;

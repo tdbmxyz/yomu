@@ -7,6 +7,7 @@ members = [
     "crates/yomu-client",
     "crates/yomu-ui",
     "crates/yomu-web",
+    "crates/yomu-shell",
 ]
 
 [workspace.package]

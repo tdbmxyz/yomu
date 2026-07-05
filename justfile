@@ -15,14 +15,24 @@ web:
 build-web:
     cd crates/yomu-web && trunk build --release
 
-# Full check: formatting, lints, native + wasm compilation.
+# Full check: formatting, lints, native + wasm compilation. yomu-shell
+# needs the webview stack — check it with `just check-shell` in `.#tauri`.
 check:
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --exclude yomu-shell --all-targets -- -D warnings
     cargo check -p yomu-web -p yomu-ui --target wasm32-unknown-unknown
+
+# Lint the Tauri shell (run inside `nix develop .#tauri`)
+check-shell:
+    cargo clippy -p yomu-shell --all-targets -- -D warnings
+
+# Run the desktop shell against a server (run inside `nix develop .#tauri`)
+shell server="http://127.0.0.1:4700":
+    cd crates/yomu-web && trunk build --release
+    YOMU_SERVER={{server}} cargo run -p yomu-shell
 
 fmt:
     cargo fmt --all
 
 test:
-    cargo test --workspace
+    cargo test --workspace --exclude yomu-shell

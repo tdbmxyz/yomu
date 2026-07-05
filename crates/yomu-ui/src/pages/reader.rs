@@ -14,8 +14,23 @@ use super::{NotFound, param_uuid};
 use crate::offline::{self, ReaderFit, ReaderMode};
 use crate::use_client;
 
+/// Routed wrapper: re-creates the reader whenever the chapter param
+/// changes, so prev/next chapter can be a plain SPA link. A full-document
+/// reload would need a server-side SPA fallback, which the Tauri shell's
+/// asset protocol doesn't have.
 #[component]
 pub fn Reader() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    view! {
+        {move || {
+            params.track();
+            view! { <ReaderInner/> }
+        }}
+    }
+}
+
+#[component]
+fn ReaderInner() -> impl IntoView {
     let (Some(manga_id), Some(chapter_id)) = (param_uuid("manga"), param_uuid("chapter")) else {
         return view! { <NotFound/> }.into_any();
     };
@@ -335,15 +350,8 @@ pub fn Reader() -> impl IntoView {
                     neighbours()
                         .and_then(|(previous, _)| previous)
                         .map(|prev| {
-                            // rel=external: the reader reads its params once
-                            // at mount; same-route SPA nav would keep the old
-                            // chapter.
                             view! {
-                                <a
-                                    class="button"
-                                    rel="external"
-                                    href=format!("/read/{manga_id}/{prev}")
-                                >
+                                <a class="button" href=format!("/read/{manga_id}/{prev}")>
                                     "← previous chapter"
                                 </a>
                             }
@@ -357,7 +365,6 @@ pub fn Reader() -> impl IntoView {
                             view! {
                                 <a
                                     class="button primary"
-                                    rel="external"
                                     href=format!("/read/{manga_id}/{next}")
                                 >
                                     "next chapter →"

@@ -373,3 +373,32 @@ button.danger:hover {
   /* keeps scroll geometry sane before lazy images load */
   min-height: 8rem;
 }
+
+/* server gate (shell first-run / wrong server) */
+
+.gate-msg {
+  padding: 2rem;
+  text-align: center;
+}
+
+.server-gate {
+  max-width: 32rem;
+  margin: 15vh auto 0;
+  padding: 0 1.5rem;
+}
+
+.gate-form {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.gate-form input {
+  flex: 1 1 16rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}

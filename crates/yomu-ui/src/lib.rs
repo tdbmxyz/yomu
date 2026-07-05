@@ -40,23 +40,99 @@ pub fn App(config: AppConfig) -> impl IntoView {
     on_cleanup(move || online_handle.remove());
 
     view! {
-        <Router>
-            <nav class="topbar">
-                <span class="brand">"yomu"</span>
-                <A href="/">"Library"</A>
-                <A href="/search">"Add manga"</A>
-                <span class="grow"></span>
-                <Account/>
-            </nav>
-            <main>
-                <Routes fallback=|| view! { <p class="muted">"Page not found"</p> }>
-                    <Route path=path!("/") view=pages::Library/>
-                    <Route path=path!("/search") view=pages::Search/>
-                    <Route path=path!("/manga/:id") view=pages::MangaPage/>
-                    <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
-                </Routes>
-            </main>
-        </Router>
+        <ServerGate>
+            <Router>
+                <nav class="topbar">
+                    <span class="brand">"yomu"</span>
+                    <A href="/">"Library"</A>
+                    <A href="/search">"Add manga"</A>
+                    <span class="grow"></span>
+                    <Account/>
+                </nav>
+                <main>
+                    <Routes fallback=|| view! { <p class="muted">"Page not found"</p> }>
+                        <Route path=path!("/") view=pages::Library/>
+                        <Route path=path!("/search") view=pages::Search/>
+                        <Route path=path!("/manga/:id") view=pages::MangaPage/>
+                        <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
+                    </Routes>
+                </main>
+            </Router>
+        </ServerGate>
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum GateState {
+    Checking,
+    Ready,
+    Unreachable,
+}
+
+/// Blocks the app behind a health check so a shell (Tauri, or a fresh
+/// PWA install) pointing at the wrong place gets a "connect to your
+/// server" form instead of a wall of failed requests. The chosen URL is
+/// the `yomu-api-base` localStorage override the API-base resolution
+/// already honors. Offline is NOT unreachable: the cached UI must stay
+/// usable, so the gate opens and the offline plumbing takes over.
+#[component]
+fn ServerGate(children: ChildrenFn) -> impl IntoView {
+    let gate = RwSignal::new(GateState::Checking);
+    let client = use_client();
+    spawn_local(async move {
+        let online = web_sys::window().is_none_or(|w| w.navigator().on_line());
+        match client.health().await {
+            Ok(_) => gate.set(GateState::Ready),
+            Err(_) if !online => gate.set(GateState::Ready),
+            Err(_) => gate.set(GateState::Unreachable),
+        }
+    });
+
+    let current = use_client().base().to_string();
+    let input = RwSignal::new(current.clone());
+    let save = move |_| {
+        let value = input.get_untracked();
+        if Url::parse(&value).is_err() {
+            return;
+        }
+        if let Some(window) = web_sys::window() {
+            if let Ok(Some(storage)) = window.local_storage() {
+                let _ = storage.set_item("yomu-api-base", &value);
+            }
+            let _ = window.location().reload();
+        }
+    };
+
+    view! {
+        {move || match gate.get() {
+            GateState::Checking => view! { <p class="muted gate-msg">"Connecting…"</p> }.into_any(),
+            GateState::Ready => children().into_any(),
+            GateState::Unreachable => {
+                view! {
+                    <section class="server-gate">
+                        <h2>"Cannot reach the yomu server"</h2>
+                        <p class="muted">
+                            "Enter the address of your server (for example "
+                            <code>"http://192.168.1.128:4700"</code> ")."
+                        </p>
+                        <div class="gate-form">
+                            <input
+                                type="url"
+                                prop:value=move || input.get()
+                                on:input=move |ev| input.set(event_target_value(&ev))
+                            />
+                            <button class="primary" on:click=save>
+                                "Connect"
+                            </button>
+                            <button on:click=move |_| gate.set(GateState::Ready)>
+                                "Continue anyway"
+                            </button>
+                        </div>
+                    </section>
+                }
+                    .into_any()
+            }
+        }}
     }
 }
 
