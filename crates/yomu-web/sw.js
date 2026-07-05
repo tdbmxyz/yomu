@@ -127,12 +127,18 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  if (request.mode === "navigate") {
+  if (url.pathname.startsWith("/api/")) {
+    // Before the navigate branch: /api/v1/auth/login|callback are full-page
+    // navigations that must reach the server (they redirect to/from the
+    // identity provider), never be answered with the app shell.
+    if (request.mode === "navigate") return;
+    if (isImage(url)) {
+      event.respondWith(cacheFirst(request));
+    } else {
+      event.respondWith(networkFirst(request));
+    }
+  } else if (request.mode === "navigate") {
     event.respondWith(navigate(event));
-  } else if (isImage(url)) {
-    event.respondWith(cacheFirst(request));
-  } else if (url.pathname.startsWith("/api/")) {
-    event.respondWith(networkFirst(request));
   } else {
     // Hashed static assets: immutable by construction.
     event.respondWith(cacheFirst(request));

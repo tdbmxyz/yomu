@@ -106,7 +106,11 @@ pub async fn flush_outbox(client: &yomu_client::YomuClient) {
             }
             leptos::logging::log!("synced {} offline progress event(s)", outcome.accepted);
         }
-        Err(yomu_client::ClientError::Api { status, message }) if (400..500).contains(&status) => {
+        // 401/403 are NOT poison: signing in will make the same batch
+        // succeed, so those events must stay queued.
+        Err(yomu_client::ClientError::Api { status, message })
+            if (400..500).contains(&status) && status != 401 && status != 403 =>
+        {
             remove_pushed();
             leptos::logging::warn!(
                 "server rejected {} offline event(s) ({status}: {message}); dropped",

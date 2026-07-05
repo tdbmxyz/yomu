@@ -9,6 +9,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 use yomu_domain::{
     Category, Chapter, ChapterRef, DownloadState, Manga, MangaDetails, Position, ProgressEvent,
+    User,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -391,17 +392,126 @@ impl Db {
         Ok(())
     }
 
+    // ---- users & sessions ----
+
+    pub async fn user_by_id(&self, id: Uuid) -> Result<User> {
+        let row = sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(DbError::NotFound)?;
+        User::try_from(row)
+    }
+
+    /// User for an OIDC subject, created or refreshed from the provider's
+    /// claims. The username falls back to the subject on collision (two
+    /// providers' users sharing a preferred_username).
+    pub async fn upsert_oidc_user(
+        &self,
+        subject: &str,
+        username: &str,
+        display_name: &str,
+    ) -> Result<User> {
+        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE subject = ?")
+            .bind(subject)
+            .fetch_optional(&self.pool)
+            .await?;
+        if let Some(id) = existing {
+            let id = parse_uuid(id)?;
+            sqlx::query("UPDATE users SET display_name = ? WHERE id = ?")
+                .bind(display_name)
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+            return self.user_by_id(id).await;
+        }
+
+        let id = Uuid::now_v7();
+        let insert = |username: String| {
+            sqlx::query(
+                "INSERT INTO users (id, subject, username, display_name, created_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(id.to_string())
+            .bind(subject.to_string())
+            .bind(username)
+            .bind(display_name.to_string())
+            .bind(Utc::now())
+        };
+        let result = insert(username.trim().to_lowercase())
+            .execute(&self.pool)
+            .await;
+        match result {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                insert(format!("{}-{subject}", username.trim().to_lowercase()))
+                    .execute(&self.pool)
+                    .await?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.user_by_id(id).await
+    }
+
+    pub async fn create_session(
+        &self,
+        token_hash: &str,
+        user_id: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(token_hash)
+        .bind(user_id.to_string())
+        .bind(Utc::now())
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        // Opportunistic cleanup; logins are rare enough that this is free.
+        sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve a session token hash to its (non-expired) user.
+    pub async fn user_by_session(&self, token_hash: &str) -> Result<User> {
+        let row = sqlx::query_as::<_, UserRow>(
+            "SELECT u.* FROM users u
+             JOIN sessions s ON s.user_id = u.id
+             WHERE s.token_hash = ? AND s.expires_at >= ?",
+        )
+        .bind(token_hash)
+        .bind(Utc::now())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(DbError::NotFound)?;
+        User::try_from(row)
+    }
+
+    pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ---- progress journal ----
 
-    /// Append an event. Idempotent on id: replaying a batch is harmless,
-    /// which makes offline sync retries safe.
-    pub async fn append_event(&self, event: &ProgressEvent) -> Result<()> {
+    /// Append an event for a user. Idempotent on id: replaying a batch is
+    /// harmless, which makes offline sync retries safe.
+    pub async fn append_event(&self, user_id: Uuid, event: &ProgressEvent) -> Result<()> {
         sqlx::query(
-            "INSERT INTO progress_events (id, manga_id, chapter_id, page, device, at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(event.id.to_string())
+        .bind(user_id.to_string())
         .bind(event.manga_id.to_string())
         .bind(event.chapter_id.to_string())
         .bind(event.page)
@@ -423,7 +533,11 @@ impl Db {
     /// errors: they can never apply, and one of them must not wedge the
     /// client's outbox behind an eternally failing batch.
     /// Returns (accepted, skipped).
-    pub async fn append_events(&self, events: &[ProgressEvent]) -> Result<(u32, u32)> {
+    pub async fn append_events(
+        &self,
+        user_id: Uuid,
+        events: &[ProgressEvent],
+    ) -> Result<(u32, u32)> {
         let mut tx = self.pool.begin().await?;
         let (mut accepted, mut skipped) = (0, 0);
         for event in events {
@@ -437,11 +551,12 @@ impl Db {
                 continue;
             }
             sqlx::query(
-                "INSERT INTO progress_events (id, manga_id, chapter_id, page, device, at)
-                 VALUES (?, ?, ?, ?, ?, ?)
+                "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(event.id.to_string())
+            .bind(user_id.to_string())
             .bind(event.manga_id.to_string())
             .bind(event.chapter_id.to_string())
             .bind(event.page)
@@ -456,14 +571,15 @@ impl Db {
         Ok((accepted, skipped))
     }
 
-    /// Merged current position (max at, id tie-break — same rule as
-    /// `yomu_domain::merge_position`).
-    pub async fn latest_position(&self, manga_id: Uuid) -> Result<Option<Position>> {
+    /// A user's merged current position (max at, id tie-break — same rule
+    /// as `yomu_domain::merge_position`).
+    pub async fn latest_position(&self, user_id: Uuid, manga_id: Uuid) -> Result<Option<Position>> {
         let row = sqlx::query(
             "SELECT chapter_id, page, at FROM progress_events
-             WHERE manga_id = ? ORDER BY at DESC, id DESC LIMIT 1",
+             WHERE manga_id = ? AND user_id = ? ORDER BY at DESC, id DESC LIMIT 1",
         )
         .bind(manga_id.to_string())
+        .bind(user_id.to_string())
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| {
@@ -483,11 +599,14 @@ impl Db {
     /// nothing was returned).
     pub async fn events_since(
         &self,
+        user_id: Uuid,
         since: Option<i64>,
     ) -> Result<(Vec<ProgressEvent>, Option<i64>)> {
         let rows = sqlx::query_as::<_, EventRow>(
-            "SELECT * FROM progress_events WHERE seq > ? ORDER BY seq LIMIT 1000",
+            "SELECT * FROM progress_events WHERE user_id = ? AND seq > ?
+             ORDER BY seq LIMIT 1000",
         )
+        .bind(user_id.to_string())
         .bind(since.unwrap_or(0))
         .fetch_all(&self.pool)
         .await?;
@@ -570,6 +689,29 @@ impl TryFrom<MangaRow> for Manga {
             category: row.category,
             added_at: row.added_at,
             last_checked_at: row.last_checked_at,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct UserRow {
+    id: String,
+    #[allow(dead_code)]
+    subject: Option<String>,
+    username: String,
+    display_name: String,
+    #[allow(dead_code)]
+    created_at: DateTime<Utc>,
+}
+
+impl TryFrom<UserRow> for User {
+    type Error = DbError;
+
+    fn try_from(row: UserRow) -> Result<Self> {
+        Ok(User {
+            id: parse_uuid(row.id)?,
+            username: row.username,
+            display_name: row.display_name,
         })
     }
 }
@@ -675,6 +817,9 @@ impl TryFrom<EventRow> for ProgressEvent {
 mod tests {
     use super::*;
     use yomu_domain::{MangaSummary, merge_position};
+
+    /// The seeded single-account user (see migration 0004).
+    const SHARED: Uuid = Uuid::nil();
 
     fn details(key: &str, chapters: &[(&str, Option<f64>)]) -> MangaDetails {
         MangaDetails {
@@ -785,12 +930,12 @@ mod tests {
 
         let events = [event(1, 100, 3), event(3, 200, 8), event(2, 200, 5)];
         for e in &events {
-            db.append_event(e).await.unwrap();
+            db.append_event(SHARED, e).await.unwrap();
         }
         // Replay (offline sync retry) must be a no-op.
-        db.append_event(&events[0]).await.unwrap();
+        db.append_event(SHARED, &events[0]).await.unwrap();
 
-        let position = db.latest_position(manga.id).await.unwrap().unwrap();
+        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
         // Same winner as the in-memory merge rule.
         let expected = merge_position(&events).unwrap();
         assert_eq!(position.page, expected.page);
@@ -798,15 +943,15 @@ mod tests {
 
         // Cursor pages by arrival order, not event id: replaying doesn't
         // move it, later inserts extend it.
-        let (all, cursor) = db.events_since(None).await.unwrap();
+        let (all, cursor) = db.events_since(SHARED, None).await.unwrap();
         assert_eq!(all.len(), 3);
         let cursor = cursor.unwrap();
-        let (tail, _) = db.events_since(Some(cursor)).await.unwrap();
+        let (tail, _) = db.events_since(SHARED, Some(cursor)).await.unwrap();
         assert!(tail.is_empty());
         // An old-id event arriving late (offline device reconnects) is
         // still visible past the cursor — the bug an id cursor would have.
-        db.append_event(&event(0, 50, 1)).await.unwrap();
-        let (late, _) = db.events_since(Some(cursor)).await.unwrap();
+        db.append_event(SHARED, &event(0, 50, 1)).await.unwrap();
+        let (late, _) = db.events_since(SHARED, Some(cursor)).await.unwrap();
         assert_eq!(late.len(), 1);
         assert_eq!(late[0].id, Uuid::from_u128(0));
 
@@ -820,17 +965,99 @@ mod tests {
             ..bad
         };
         assert!(matches!(
-            db.append_event(&bad).await,
+            db.append_event(SHARED, &bad).await,
             Err(DbError::Constraint(_))
         ));
 
         // Batch append skips events for deleted manga instead of failing:
         // one stale event must not wedge an offline outbox forever.
         let batch = [bad.clone(), event(4, 300, 9)];
-        let (accepted, skipped) = db.append_events(&batch).await.unwrap();
+        let (accepted, skipped) = db.append_events(SHARED, &batch).await.unwrap();
         assert_eq!((accepted, skipped), (1, 1));
-        let position = db.latest_position(manga.id).await.unwrap().unwrap();
+        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
         assert_eq!(position.page, 9);
+    }
+
+    #[tokio::test]
+    async fn users_sessions_and_per_user_positions() {
+        let db = Db::in_memory().await.unwrap();
+
+        // The shared account is seeded by the migration.
+        let shared = db.user_by_id(SHARED).await.unwrap();
+        assert_eq!(shared.username, "everyone");
+
+        // OIDC upsert: created once, refreshed on later logins; a username
+        // collision falls back to a subject-suffixed one.
+        let alice = db
+            .upsert_oidc_user("sub-1", "Alice", "Alice")
+            .await
+            .unwrap();
+        assert_eq!(alice.username, "alice");
+        let again = db
+            .upsert_oidc_user("sub-1", "Alice", "Alice Renamed")
+            .await
+            .unwrap();
+        assert_eq!(again.id, alice.id);
+        assert_eq!(again.display_name, "Alice Renamed");
+        let clash = db
+            .upsert_oidc_user("sub-2", "alice", "Other Alice")
+            .await
+            .unwrap();
+        assert_ne!(clash.id, alice.id);
+        assert_eq!(clash.username, "alice-sub-2");
+
+        // Sessions resolve until deleted or expired.
+        db.create_session("h1", alice.id, Utc::now() + chrono::Duration::days(1))
+            .await
+            .unwrap();
+        assert_eq!(db.user_by_session("h1").await.unwrap().id, alice.id);
+        db.create_session("h2", alice.id, Utc::now() - chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(matches!(
+            db.user_by_session("h2").await,
+            Err(DbError::NotFound)
+        ));
+        db.delete_session("h1").await.unwrap();
+        assert!(matches!(
+            db.user_by_session("h1").await,
+            Err(DbError::NotFound)
+        ));
+
+        // Positions are per user: Alice's reading doesn't move the shared
+        // account's position.
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let chapter = db.list_chapters(manga.id).await.unwrap().remove(0);
+        let event = ProgressEvent {
+            id: Uuid::from_u128(1),
+            manga_id: manga.id,
+            chapter_id: chapter.id,
+            page: 7,
+            device: "test".into(),
+            at: Utc::now(),
+        };
+        db.append_event(alice.id, &event).await.unwrap();
+        assert_eq!(
+            db.latest_position(alice.id, manga.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .page,
+            7
+        );
+        assert!(
+            db.latest_position(SHARED, manga.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (alice_events, _) = db.events_since(alice.id, None).await.unwrap();
+        assert_eq!(alice_events.len(), 1);
+        let (shared_events, _) = db.events_since(SHARED, None).await.unwrap();
+        assert!(shared_events.is_empty());
     }
 
     #[tokio::test]

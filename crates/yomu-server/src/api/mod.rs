@@ -1,5 +1,6 @@
 //! HTTP API (`/api/v1`) and static frontend serving.
 
+mod auth;
 mod categories;
 mod chapters;
 mod error;
@@ -21,6 +22,10 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
+        .route("/auth/me", get(auth::me))
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/logout", axum::routing::post(auth::logout))
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/library", get(library::list).post(library::add))

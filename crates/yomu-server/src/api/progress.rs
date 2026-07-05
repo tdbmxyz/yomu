@@ -9,12 +9,15 @@ use yomu_domain::{
 };
 
 use super::ApiError;
+use crate::auth::CurrentUser;
 use crate::state::AppState;
 
 /// Online client reporting its position: the server wraps it into a journal
-/// event with a server-side timestamp.
+/// event with a server-side timestamp. Per-user (the shared account in
+/// single mode).
 pub async fn set_position(
     State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Path(manga_id): Path<Uuid>,
     Json(req): Json<SetPositionRequest>,
 ) -> Result<Json<Position>, ApiError> {
@@ -34,7 +37,7 @@ pub async fn set_position(
         device: req.device,
         at: Utc::now(),
     };
-    state.db.append_event(&event).await?;
+    state.db.append_event(user.id, &event).await?;
     Ok(Json(Position {
         chapter_id: event.chapter_id,
         page: event.page,
@@ -48,9 +51,10 @@ pub async fn set_position(
 /// a permanently failing batch would wedge the client's outbox forever.
 pub async fn push_events(
     State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Json(req): Json<PushEventsRequest>,
 ) -> Result<Json<PushEventsResponse>, ApiError> {
-    let (accepted, skipped) = state.db.append_events(&req.events).await?;
+    let (accepted, skipped) = state.db.append_events(user.id, &req.events).await?;
     if skipped > 0 {
         tracing::debug!(accepted, skipped, "journal push skipped stale events");
     }
@@ -65,8 +69,9 @@ pub struct EventsQuery {
 
 pub async fn events(
     State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<EventsResponse>, ApiError> {
-    let (events, next_since) = state.db.events_since(query.since).await?;
+    let (events, next_since) = state.db.events_since(user.id, query.since).await?;
     Ok(Json(EventsResponse { events, next_since }))
 }

@@ -1,7 +1,9 @@
 mod api;
+mod auth;
 mod config;
 mod db;
 mod downloader;
+mod oidc;
 mod state;
 mod sync;
 mod updater;
@@ -47,7 +49,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("opening database {}", config.db_path.display()))?;
 
-    let state = state::AppState::new(config, db, sources);
+    let oidc = oidc::OidcRuntime::from_config(&config.auth).context("configuring [auth]")?;
+    match &oidc {
+        Some(_) => tracing::info!(
+            issuer = %config.auth.issuer.as_ref().expect("issuer set").as_str(),
+            "auth: OIDC sign-in enabled"
+        ),
+        None => tracing::info!("auth: single-account mode (no [auth] issuer configured)"),
+    }
+
+    let state = state::AppState::new(config, db, sources, oidc);
     downloader::spawn(state.clone());
     updater::spawn(state.clone());
 
