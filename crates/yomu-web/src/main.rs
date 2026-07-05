@@ -17,6 +17,13 @@ fn api_base() -> Url {
 
 fn main() {
     console_error_panic_hook::set_once();
+
+    // Offline support: the service worker caches the app shell, page images
+    // and API responses (see sw.js). Registration is fire-and-forget.
+    if let Some(window) = web_sys::window() {
+        let _ = window.navigator().service_worker().register("/sw.js");
+    }
+
     let config = AppConfig {
         api_base: api_base(),
     };

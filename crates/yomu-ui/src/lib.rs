@@ -2,9 +2,11 @@
 //! shell). Platform specifics are injected via [`AppConfig`], same seam as
 //! chaos.
 
+pub mod offline;
 mod pages;
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::components::{A, Route, Router, Routes};
 use leptos_router::path;
 use url::Url;
@@ -22,7 +24,20 @@ pub fn use_client() -> YomuClient {
 
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
-    provide_context(config);
+    provide_context(config.clone());
+
+    // Sync any progress recorded while offline: once at startup, and again
+    // whenever the browser reports connectivity is back.
+    let flush_client = YomuClient::new(config.api_base.clone());
+    spawn_local({
+        let client = flush_client.clone();
+        async move { offline::flush_outbox(&client).await }
+    });
+    let online_handle = window_event_listener(leptos::ev::online, move |_| {
+        let client = flush_client.clone();
+        spawn_local(async move { offline::flush_outbox(&client).await });
+    });
+    on_cleanup(move || online_handle.remove());
 
     view! {
         <Router>
