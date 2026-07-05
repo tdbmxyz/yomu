@@ -42,8 +42,16 @@ fn write_json<T: serde::Serialize>(key: &str, value: &T) {
 pub fn uuid_v7_js() -> Uuid {
     let millis = js_sys::Date::now() as u64;
     let mut bytes = [0u8; 16];
-    if let Some(crypto) = web_sys::window().and_then(|w| w.crypto().ok()) {
-        let _ = crypto.get_random_values_with_u8_array(&mut bytes);
+    let filled = web_sys::window()
+        .and_then(|w| w.crypto().ok())
+        .and_then(|crypto| crypto.get_random_values_with_u8_array(&mut bytes).ok())
+        .is_some();
+    if !filled {
+        // No Web Crypto (exotic webview): Math.random is plenty to keep two
+        // same-millisecond events from colliding on id.
+        for byte in bytes.iter_mut() {
+            *byte = (js_sys::Math::random() * 256.0) as u8;
+        }
     }
     bytes[0] = (millis >> 40) as u8;
     bytes[1] = (millis >> 32) as u8;
@@ -68,18 +76,42 @@ pub fn outbox_push(event: ProgressEvent) {
     write_json(OUTBOX_KEY, &events);
 }
 
-/// Push the outbox to the server; on success the outbox is cleared (events
-/// are idempotent by id, so a crash between push and clear is harmless).
+/// Push the outbox to the server. On success only the *pushed* events are
+/// removed — new events appended while the request was in flight survive
+/// (events are idempotent by id, so a crash between push and remove is
+/// harmless). A 4xx answer means the server understood and refused: those
+/// events can never succeed, so they are dropped too rather than poisoning
+/// every future flush.
 pub async fn flush_outbox(client: &yomu_client::YomuClient) {
     let events = outbox();
     if events.is_empty() {
         return;
     }
-    let count = events.len();
+    let pushed: Vec<Uuid> = events.iter().map(|e| e.id).collect();
+    let remove_pushed = || {
+        let remaining: Vec<ProgressEvent> = outbox()
+            .into_iter()
+            .filter(|e| !pushed.contains(&e.id))
+            .collect();
+        write_json(OUTBOX_KEY, &remaining);
+    };
     match client.push_events(&PushEventsRequest { events }).await {
-        Ok(()) => {
-            write_json(OUTBOX_KEY, &Vec::<ProgressEvent>::new());
-            leptos::logging::log!("synced {count} offline progress event(s)");
+        Ok(outcome) => {
+            remove_pushed();
+            if outcome.skipped > 0 {
+                leptos::logging::warn!(
+                    "server skipped {} stale offline event(s) (manga deleted?)",
+                    outcome.skipped
+                );
+            }
+            leptos::logging::log!("synced {} offline progress event(s)", outcome.accepted);
+        }
+        Err(yomu_client::ClientError::Api { status, message }) if (400..500).contains(&status) => {
+            remove_pushed();
+            leptos::logging::warn!(
+                "server rejected {} offline event(s) ({status}: {message}); dropped",
+                pushed.len()
+            );
         }
         Err(err) => leptos::logging::warn!("outbox flush failed (still offline?): {err}"),
     }
@@ -110,13 +142,30 @@ pub fn effective_position(
 
 // ---- device downloads ----
 
+/// Whether a service worker currently controls this page — i.e. whether
+/// fetches actually land in the offline cache. False on the very first
+/// visit (registration pending), in webviews without SW support, etc.
+pub fn service_worker_active() -> bool {
+    web_sys::window()
+        .map(|w| w.navigator().service_worker().controller().is_some())
+        .unwrap_or(false)
+}
+
 /// Fetch chapter metadata and every page image once. The service worker's
 /// runtime caching stores each response, after which the chapter (and its
-/// metadata) is readable with the server unreachable.
+/// metadata) is readable with the server unreachable. Refuses to run when
+/// no service worker controls the page: the fetches would succeed but cache
+/// nothing, and the chapter would be marked "on device" while it isn't.
 pub async fn prefetch_chapter(
     client: &yomu_client::YomuClient,
     chapter_id: Uuid,
 ) -> Result<(), String> {
+    if !service_worker_active() {
+        return Err(
+            "offline cache unavailable (no service worker; first visit or unsupported browser)"
+                .into(),
+        );
+    }
     let meta = client
         .chapter_pages(chapter_id)
         .await

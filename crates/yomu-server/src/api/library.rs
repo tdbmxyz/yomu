@@ -76,10 +76,18 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let chapter_ids: Vec<Uuid> = state
+        .db
+        .list_chapters(id)
+        .await?
+        .iter()
+        .map(|c| c.id)
+        .collect();
     state.db.delete_manga(id).await?;
-    // Downloaded pages and cached cover go with the manga.
+    // Downloaded pages, cached cover and live page lists go with the manga.
     let _ = tokio::fs::remove_dir_all(state.config.data_dir.join(id.to_string())).await;
     let _ = remove_cover_cache(&state, id).await;
+    state.live_pages.invalidate_many(&chapter_ids).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

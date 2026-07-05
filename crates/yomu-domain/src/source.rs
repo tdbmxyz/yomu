@@ -29,8 +29,8 @@ pub struct MangaDetails {
     pub summary: MangaSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// In source order (as listed on the site), oldest or newest first —
-    /// `ChapterRef::source_order` records the position either way.
+    /// As listed on the site; `ChapterRef::source_order` is normalized so
+    /// that ordering by it *descending* gives reading order (see below).
     pub chapters: Vec<ChapterRef>,
 }
 
@@ -43,7 +43,9 @@ pub struct ChapterRef {
     /// Ordering falls back to `source_order` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number: Option<f64>,
-    /// Position in the source listing (0 = first listed).
+    /// Recency rank: 0 = newest chapter. Sources listing oldest-first must
+    /// reverse their listing index so number-less chapters still sort into
+    /// reading order (`ORDER BY source_order DESC`).
     pub source_order: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scanlator: Option<String>,

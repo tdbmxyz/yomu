@@ -17,7 +17,16 @@ uuid.workspace = true
 
 [dependencies.web-sys]
 workspace = true
-features = ["Window", "Storage", "Crypto", "Element"]
+features = [
+    "Window",
+    "Storage",
+    "Crypto",
+    "Element",
+    "HtmlElement",
+    "Navigator",
+    "ServiceWorker",
+    "ServiceWorkerContainer",
+]
 
 [dependencies.js-sys]
 version = "0.3"

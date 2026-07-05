@@ -12,6 +12,15 @@
     <link data-trunk rel="copy-file" href="manifest.webmanifest" />
     <link data-trunk rel="copy-file" href="icon-192.png" />
     <link data-trunk rel="copy-file" href="icon-512.png" />
+    <!-- Register before the wasm bundle loads: the worker precaches the
+         shell and its hashed assets at install, so offline works from the
+         first session (registering from inside the app would be too late
+         for the assets already fetched uncontrolled). -->
+    <script>
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js");
+      }
+    </script>
   </head>
   <body></body>
 </html>

@@ -22,8 +22,24 @@ async fn run(state: AppState) {
                     continue;
                 }
                 let outcome = download_chapter(&state, &chapter).await;
-                if let Err(err) = state.db.finish_download(chapter.id, outcome).await {
-                    tracing::error!(%err, "recording download outcome");
+                let succeeded = outcome.is_ok();
+                match state.db.finish_download(chapter.id, outcome).await {
+                    // Manga deleted while we were downloading: the files
+                    // just published belong to nothing — remove them.
+                    Ok(false) => {
+                        let dir = state.chapter_dir(chapter.manga_id, chapter.id);
+                        let _ = tokio::fs::remove_dir_all(&dir).await;
+                        if let Some(parent) = dir.parent() {
+                            let _ = tokio::fs::remove_dir(parent).await; // only if empty
+                        }
+                    }
+                    Ok(true) => {
+                        if succeeded {
+                            // Readers switch to the on-disk copy.
+                            state.live_pages.invalidate(chapter.id).await;
+                        }
+                    }
+                    Err(err) => tracing::error!(%err, "recording download outcome"),
                 }
                 continue; // drain the queue before sleeping
             }
@@ -66,13 +82,11 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
         .await
         .map_err(|e| format!("creating {}: {e}", partial.display()))?;
 
-    for (index, url) in pages.iter().enumerate() {
-        let image = source.image(url).await.map_err(|e| e.to_string())?;
-        let ext = extension_for(&image.content_type, url);
-        let path = partial.join(format!("{index:04}.{ext}"));
-        tokio::fs::write(&path, &image.bytes)
-            .await
-            .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    let fetched = fetch_pages(source.as_ref(), &pages, &partial).await;
+    if let Err(reason) = fetched {
+        // Don't leave half a chapter of litter behind a failed attempt.
+        let _ = tokio::fs::remove_dir_all(&partial).await;
+        return Err(reason);
     }
 
     // Atomic-ish publish: the final directory only ever appears complete.
@@ -82,6 +96,22 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
         .map_err(|e| format!("publishing {}: {e}", dir.display()))?;
 
     Ok(pages.len() as u32)
+}
+
+async fn fetch_pages(
+    source: &dyn yomu_source::Source,
+    pages: &[url::Url],
+    partial: &std::path::Path,
+) -> Result<(), String> {
+    for (index, url) in pages.iter().enumerate() {
+        let image = source.image(url).await.map_err(|e| e.to_string())?;
+        let ext = extension_for(&image.content_type, url);
+        let path = partial.join(format!("{index:04}.{ext}"));
+        tokio::fs::write(&path, &image.bytes)
+            .await
+            .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Downloaded page files for a chapter, in reading order.

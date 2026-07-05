@@ -6,6 +6,7 @@
 use chrono::Utc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use leptos::wasm_bindgen::JsCast;
 use leptos_router::hooks::use_query_map;
 use yomu_domain::{ProgressEvent, SetPositionRequest};
 
@@ -69,7 +70,6 @@ pub fn Reader() -> impl IntoView {
             });
         }
     };
-    report(initial_page);
 
     let page_count = move || {
         pages
@@ -78,6 +78,20 @@ pub fn Reader() -> impl IntoView {
             .map(|p| p.page_count)
             .unwrap_or(0)
     };
+
+    // Journal the opening position once the chapter is confirmed to exist —
+    // not at mount, where a bad link would create an event for a chapter
+    // that was never opened.
+    let opened = StoredValue::new(false);
+    Effect::new({
+        let report = report.clone();
+        move |_| {
+            if page_count() > 0 && !opened.get_value() {
+                opened.set_value(true);
+                report(page.get_untracked());
+            }
+        }
+    });
     let turn = {
         let report = report.clone();
         move |delta: i64| {
@@ -191,13 +205,45 @@ pub fn Reader() -> impl IntoView {
                                 .into_any()
                         }
                         ReaderMode::Vertical => {
-                            let count = meta.page_count;
+                            let strip = NodeRef::<leptos::html::Div>::new();
+                            // Start at the current page, not the top: entering
+                            // vertical mode (or "continue reading") must not
+                            // rewind the saved position.
+                            Effect::new(move |_| {
+                                let Some(el) = strip.get() else { return };
+                                if let Some(child) = el.children().item(page.get_untracked()) {
+                                    child.scroll_into_view();
+                                }
+                            });
+                            // Only user scrolling moves the journal: the
+                            // programmatic positioning above also fires
+                            // scroll events, and while images are still
+                            // placeholder-height they would map to a wrong
+                            // page and overwrite the saved position.
+                            let interacted = RwSignal::new(false);
                             let on_scroll = move |ev: leptos::ev::Event| {
+                                if !interacted.get_untracked() {
+                                    return;
+                                }
                                 let el = event_target::<web_sys::Element>(&ev);
-                                let max = (el.scroll_height() - el.client_height()).max(1) as f64;
-                                let fraction = (el.scroll_top() as f64 / max).clamp(0.0, 1.0);
-                                let index =
-                                    (fraction * count.saturating_sub(1) as f64).round() as u32;
+                                // The page under the viewport's midline; per
+                                // element offsets, so uneven page heights and
+                                // still-loading images don't skew the index.
+                                let middle = el.scroll_top() as f64
+                                    + el.client_height() as f64 / 2.0;
+                                let children = el.children();
+                                let mut index = 0;
+                                for i in 0..children.length() {
+                                    let Some(child) = children
+                                        .item(i)
+                                        .and_then(|c| c.dyn_into::<web_sys::HtmlElement>().ok())
+                                    else {
+                                        continue;
+                                    };
+                                    if (child.offset_top() as f64) <= middle {
+                                        index = i;
+                                    }
+                                }
                                 if index != page.get_untracked() {
                                     page.set(index);
                                     report(index);
@@ -206,10 +252,14 @@ pub fn Reader() -> impl IntoView {
                             view! {
                                 <div
                                     class="reader-scroll"
+                                    node_ref=strip
                                     on:scroll=on_scroll
+                                    on:wheel=move |_| interacted.set(true)
+                                    on:touchstart=move |_| interacted.set(true)
+                                    on:pointerdown=move |_| interacted.set(true)
                                     on:click=move |_| chrome.update(|c| *c = !*c)
                                 >
-                                    {(0..count)
+                                    {(0..meta.page_count)
                                         .map(|n| {
                                             let src = client_vertical
                                                 .page_url(chapter_id, n)

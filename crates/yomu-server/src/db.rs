@@ -177,6 +177,12 @@ impl Db {
                 .into_iter()
                 .collect();
 
+        // A scraped listing can contain the same chapter twice; keep the
+        // first occurrence, otherwise the second upsert discards an id we
+        // just recorded as new.
+        let mut seen = std::collections::HashSet::new();
+        let listing = listing.iter().filter(|c| seen.insert(c.key.as_str()));
+
         let mut new_ids = Vec::new();
         for chapter in listing {
             let id = Uuid::now_v7();
@@ -273,13 +279,16 @@ impl Db {
         Ok(())
     }
 
+    /// Record a download outcome. Returns `false` when the chapter row no
+    /// longer exists (manga deleted mid-download) so the caller can discard
+    /// the files it just wrote.
     pub async fn finish_download(
         &self,
         id: Uuid,
         outcome: std::result::Result<u32, String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let now = Utc::now();
-        match outcome {
+        let result = match outcome {
             Ok(page_count) => {
                 sqlx::query(
                     "UPDATE chapters SET download_state = 'downloaded', downloaded_at = ?,
@@ -290,7 +299,7 @@ impl Db {
                 .bind(page_count)
                 .bind(id.to_string())
                 .execute(&self.pool)
-                .await?;
+                .await?
             }
             Err(reason) => {
                 sqlx::query(
@@ -302,10 +311,10 @@ impl Db {
                 .bind(reason)
                 .bind(id.to_string())
                 .execute(&self.pool)
-                .await?;
+                .await?
             }
-        }
-        Ok(())
+        };
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn set_page_count(&self, id: Uuid, page_count: u32) -> Result<()> {
@@ -344,6 +353,44 @@ impl Db {
         Ok(())
     }
 
+    /// Append a whole offline journal in one transaction. Events for manga
+    /// the server no longer knows (deleted meanwhile) are *skipped*, not
+    /// errors: they can never apply, and one of them must not wedge the
+    /// client's outbox behind an eternally failing batch.
+    /// Returns (accepted, skipped).
+    pub async fn append_events(&self, events: &[ProgressEvent]) -> Result<(u32, u32)> {
+        let mut tx = self.pool.begin().await?;
+        let (mut accepted, mut skipped) = (0, 0);
+        for event in events {
+            let known: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM manga WHERE id = ?)")
+                    .bind(event.manga_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !known {
+                skipped += 1;
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO progress_events (id, manga_id, chapter_id, page, device, at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(event.id.to_string())
+            .bind(event.manga_id.to_string())
+            .bind(event.chapter_id.to_string())
+            .bind(event.page)
+            .bind(&event.device)
+            .bind(event.at)
+            .execute(&mut *tx)
+            .await?;
+            // Replays (id conflict) also count as accepted: the event is in.
+            accepted += 1;
+        }
+        tx.commit().await?;
+        Ok((accepted, skipped))
+    }
+
     /// Merged current position (max at, id tie-break — same rule as
     /// `yomu_domain::merge_position`).
     pub async fn latest_position(&self, manga_id: Uuid) -> Result<Option<Position>> {
@@ -364,27 +411,27 @@ impl Db {
         .transpose()
     }
 
-    /// Journal slice for incremental sync: events with id > `since`
-    /// (UUIDv7 ids are time-ordered, so this is a stable cursor).
-    pub async fn events_since(&self, since: Option<Uuid>) -> Result<Vec<ProgressEvent>> {
-        let rows = match since {
-            Some(cursor) => {
-                sqlx::query_as::<_, EventRow>(
-                    "SELECT * FROM progress_events WHERE id > ? ORDER BY id LIMIT 1000",
-                )
-                .bind(cursor.to_string())
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query_as::<_, EventRow>(
-                    "SELECT * FROM progress_events ORDER BY id LIMIT 1000",
-                )
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
-        rows.into_iter().map(ProgressEvent::try_from).collect()
+    /// Journal slice for incremental sync. The cursor is the row's
+    /// server-assigned arrival sequence — event ids are stamped by the
+    /// observing device and would make a cursor skip late offline pushes.
+    /// Returns the events plus the cursor for the next page (`None` when
+    /// nothing was returned).
+    pub async fn events_since(
+        &self,
+        since: Option<i64>,
+    ) -> Result<(Vec<ProgressEvent>, Option<i64>)> {
+        let rows = sqlx::query_as::<_, EventRow>(
+            "SELECT * FROM progress_events WHERE seq > ? ORDER BY seq LIMIT 1000",
+        )
+        .bind(since.unwrap_or(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let next = rows.last().map(|row| row.seq);
+        let events = rows
+            .into_iter()
+            .map(ProgressEvent::try_from)
+            .collect::<Result<_>>()?;
+        Ok((events, next))
     }
 }
 
@@ -514,6 +561,7 @@ impl TryFrom<ChapterRow> for Chapter {
 
 #[derive(sqlx::FromRow)]
 struct EventRow {
+    seq: i64,
     id: String,
     manga_id: String,
     chapter_id: String,
@@ -662,10 +710,19 @@ mod tests {
         assert_eq!(position.page, expected.page);
         assert_eq!(position.page, 8);
 
-        let all = db.events_since(None).await.unwrap();
+        // Cursor pages by arrival order, not event id: replaying doesn't
+        // move it, later inserts extend it.
+        let (all, cursor) = db.events_since(None).await.unwrap();
         assert_eq!(all.len(), 3);
-        let tail = db.events_since(Some(all[0].id)).await.unwrap();
-        assert_eq!(tail.len(), 2);
+        let cursor = cursor.unwrap();
+        let (tail, _) = db.events_since(Some(cursor)).await.unwrap();
+        assert!(tail.is_empty());
+        // An old-id event arriving late (offline device reconnects) is
+        // still visible past the cursor — the bug an id cursor would have.
+        db.append_event(&event(0, 50, 1)).await.unwrap();
+        let (late, _) = db.events_since(Some(cursor)).await.unwrap();
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].id, Uuid::from_u128(0));
 
         // Unknown manga is a constraint error (client sent garbage).
         let bad = ProgressEvent {
@@ -680,5 +737,34 @@ mod tests {
             db.append_event(&bad).await,
             Err(DbError::Constraint(_))
         ));
+
+        // Batch append skips events for deleted manga instead of failing:
+        // one stale event must not wedge an offline outbox forever.
+        let batch = [bad.clone(), event(4, 300, 9)];
+        let (accepted, skipped) = db.append_events(&batch).await.unwrap();
+        assert_eq!((accepted, skipped), (1, 1));
+        let position = db.latest_position(manga.id).await.unwrap().unwrap();
+        assert_eq!(position.page, 9);
+    }
+
+    #[tokio::test]
+    async fn duplicate_chapter_keys_in_one_listing_are_deduped() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+
+        // The same chapter listed twice (scraped page quirk): one row, one
+        // "new chapter", and the sync must not error after commit.
+        let new = db
+            .sync_chapters(
+                manga.id,
+                &details("m1", &[("c2", Some(2.0)), ("c2", Some(2.0))]).chapters,
+            )
+            .await
+            .unwrap();
+        assert_eq!(new.len(), 1);
+        assert_eq!(db.count_chapters(manga.id).await.unwrap(), 2);
     }
 }
