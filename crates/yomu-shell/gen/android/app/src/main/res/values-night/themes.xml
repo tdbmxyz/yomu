@@ -1,6 +1,7 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Same as values/themes.xml: the app is always dark (#14161c). -->
     <style name="Theme.yomu_shell" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">#FF14161C</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
