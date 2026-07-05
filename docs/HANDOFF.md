@@ -38,6 +38,15 @@ amended: sync paging is by server `seq`, not event id).
   periodic sweep (manual refresh unaffected). Library page: filter tabs +
   per-category "new-chapter checks" toggle; manga page: category select.
   `GET/PUT /categories`, `UpdateMangaRequest.category` (None = keep).
+- **Auth** (new, ADR-0003): `[auth]` + OIDC issuer (authentik) → sign-in
+  via code+PKCE, userinfo claims, chaos-style sessions (yomu_session
+  cookie / bearer); no `[auth]` → single-account mode, every request is
+  the seeded shared "everyone" user (nil UUID), no login UI. Progress is
+  per-user (migration 0004); library/downloads/categories stay shared.
+  Extractors: `CurrentUser` (progress endpoints, 401 signed-out in OIDC
+  mode), `OptionalUser` (library positions). Topbar shows sign-in/out only
+  in OIDC mode. SW lets /api navigations through (login redirects);
+  outbox keeps events on 401/403. E2E'd against a stub IdP (python).
 - **Reader**: fullscreen immersive, paged AND vertical modes (persisted per
   manga). Vertical mode scrolls to the target page on entry and only
   journals *user* scrolling (programmatic positioning and placeholder

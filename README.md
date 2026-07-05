@@ -17,6 +17,9 @@ position (chapter + page) following you. Sibling project of
   queue worker; or read **live** (proxied page by page, nothing stored).
 - **Progress tracking**: current chapter + page, stored as an append-only
   journal designed for future offline clients that merge on reconnect.
+- **Optional sign-in**: point `[auth]` at an OIDC provider (authentik) for
+  per-user reading positions; without it everyone shares one account and
+  the same position — zero login friction.
 - **Categories**: Reading / Paused / Finished; only categories you opt in
   are checked for new chapters.
 - **Updates**: the server periodically re-checks tracked manga (in
