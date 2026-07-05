@@ -66,6 +66,17 @@ main {
   flex: 1;
 }
 
+.account {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.account-btn {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+}
+
 input,
 select {
   background: var(--bg);

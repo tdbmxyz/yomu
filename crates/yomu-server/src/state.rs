@@ -10,6 +10,7 @@ use yomu_source::registry::Registry;
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::oidc::OidcRuntime;
 
 /// How long a live-read chapter's page-URL list stays valid. Scan sites
 /// commonly serve expiring CDN image URLs; a stale list would 502 every
@@ -81,16 +82,20 @@ pub struct AppState {
     /// Wakes the download worker when chapters become pending.
     pub download_notify: Arc<Notify>,
     pub live_pages: Arc<LivePages>,
+    /// `Some` when `[auth]` configures an OIDC provider; `None` runs the
+    /// single-account mode (everyone is the shared user).
+    pub oidc: Option<Arc<OidcRuntime>>,
 }
 
 impl AppState {
-    pub fn new(config: Config, db: Db, sources: Registry) -> Self {
+    pub fn new(config: Config, db: Db, sources: Registry, oidc: Option<OidcRuntime>) -> Self {
         Self {
             config: Arc::new(config),
             db,
             sources: Arc::new(sources),
             download_notify: Arc::new(Notify::new()),
             live_pages: Arc::new(LivePages::default()),
+            oidc: oidc.map(Arc::new),
         }
     }
 

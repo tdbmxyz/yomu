@@ -10,6 +10,8 @@ use yomu_source::SourceError;
 #[derive(Debug)]
 pub enum ApiError {
     NotFound,
+    /// No (valid) session on a per-user endpoint in OIDC mode.
+    Unauthorized,
     Unprocessable(String),
     /// The upstream scan site failed or changed layout.
     UpstreamFailed(String),
@@ -51,6 +53,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             ApiError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             ApiError::UpstreamFailed(msg) => (StatusCode::BAD_GATEWAY, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),

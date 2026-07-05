@@ -21,6 +21,7 @@ pub struct Config {
     pub sources_dir: PathBuf,
     pub updater: UpdaterConfig,
     pub local: LocalConfig,
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,30 @@ impl Default for LocalConfig {
     }
 }
 
+/// OIDC sign-in (authentik). Leave `issuer` unset for single-account mode:
+/// no login, every reader is the shared "Everyone" account.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// OIDC issuer, e.g. `https://auth.example.com/application/o/yomu/`
+    /// (its `/.well-known/openid-configuration` must resolve).
+    pub issuer: Option<url::Url>,
+    pub client_id: String,
+    pub client_secret: String,
+    /// Public origin of this server, used to build the OIDC redirect URI
+    /// (`<public_url>/api/v1/auth/callback` — register it in authentik).
+    /// Derived from the request's Host header when unset.
+    pub public_url: Option<url::Url>,
+    /// Session lifetime in days (0 = default 90).
+    pub session_days: u32,
+}
+
+impl AuthConfig {
+    pub fn oidc_enabled(&self) -> bool {
+        self.issuer.is_some()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -62,6 +87,7 @@ impl Default for Config {
             sources_dir: PathBuf::from("sources.d"),
             updater: UpdaterConfig::default(),
             local: LocalConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

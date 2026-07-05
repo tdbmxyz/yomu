@@ -9,6 +9,7 @@ use yomu_domain::{
 };
 
 use super::ApiError;
+use crate::auth::OptionalUser;
 use crate::state::AppState;
 use crate::sync;
 
@@ -34,10 +35,18 @@ pub async fn add(
     Ok((StatusCode::CREATED, Json(manga)))
 }
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<MangaWithPosition>>, ApiError> {
+/// The library is server-wide; reading positions are per user (absent when
+/// signed out in OIDC mode).
+pub async fn list(
+    State(state): State<AppState>,
+    OptionalUser(user): OptionalUser,
+) -> Result<Json<Vec<MangaWithPosition>>, ApiError> {
     let mut out = Vec::new();
     for manga in state.db.list_manga().await? {
-        let position = state.db.latest_position(manga.id).await?;
+        let position = match &user {
+            Some(user) => state.db.latest_position(user.id, manga.id).await?,
+            None => None,
+        };
         let chapter_count = state.db.count_chapters(manga.id).await?;
         out.push(MangaWithPosition {
             manga,
@@ -50,11 +59,15 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<MangaWithPos
 
 pub async fn detail(
     State(state): State<AppState>,
+    OptionalUser(user): OptionalUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MangaDetailResponse>, ApiError> {
     let manga = state.db.get_manga(id).await?;
     let chapters = state.db.list_chapters(id).await?;
-    let position = state.db.latest_position(id).await?;
+    let position = match &user {
+        Some(user) => state.db.latest_position(user.id, id).await?,
+        None => None,
+    };
     Ok(Json(MangaDetailResponse {
         manga,
         chapters,

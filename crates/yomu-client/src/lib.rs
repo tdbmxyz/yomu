@@ -5,7 +5,7 @@ use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
     AddMangaRequest, ApiErrorBody, Category, Chapter, EventsResponse, HealthResponse, Manga,
-    MangaDetailResponse, MangaSummary, MangaWithPosition, PagesResponse, Position,
+    MangaDetailResponse, MangaSummary, MangaWithPosition, MeResponse, PagesResponse, Position,
     PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
     UpdateCategoryRequest, UpdateMangaRequest,
 };
@@ -49,6 +49,19 @@ impl YomuClient {
 
     pub async fn health(&self) -> Result<HealthResponse> {
         self.get("api/v1/health").await
+    }
+
+    // ---- auth ----
+
+    /// Auth mode + current user (never a 401; `user` is `None` signed out).
+    /// Sign-in itself is a browser redirect to `<base>/api/v1/auth/login`.
+    pub async fn me(&self) -> Result<MeResponse> {
+        self.get("api/v1/auth/me").await
+    }
+
+    pub async fn logout(&self) -> Result<()> {
+        let req = self.http.post(self.url("api/v1/auth/logout")?);
+        self.send_no_content(req).await
     }
 
     // ---- sources ----

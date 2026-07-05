@@ -17,3 +17,15 @@ interval_secs = 21600      # check every 6 hours (minimum 60)
 [local]
 enabled = true
 dir = "local"
+
+# OIDC sign-in (authentik or any standard provider). Without an issuer,
+# yomu runs in single-account mode: no login, everyone shares the built-in
+# "Everyone" account (and its reading positions). With it, each signed-in
+# user gets their own reading progress; the library stays server-wide.
+# Register <public_url>/api/v1/auth/callback as the redirect URI.
+#[auth]
+#issuer = "https://auth.example.com/application/o/yomu/"
+#client_id = "yomu"
+#client_secret = "…"
+#public_url = "https://yomu.example.com"   # optional; derived from Host if unset
+#session_days = 90
