@@ -119,6 +119,29 @@ button.danger:hover {
 
 /* library */
 
+.category-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+.category-tabs button {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.category-tabs button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.category-update-toggle {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .manga-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));

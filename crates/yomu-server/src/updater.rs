@@ -21,7 +21,9 @@ async fn run(state: AppState) {
         // and a fresh library was just synced by its add flow anyway.
         tokio::time::sleep(interval).await;
 
-        let manga = match state.db.list_manga().await {
+        // Only categories with update_enabled (paused/finished series
+        // don't need to hammer their sources).
+        let manga = match state.db.list_manga_for_update().await {
             Ok(manga) => manga,
             Err(err) => {
                 tracing::error!(%err, "listing library for update check");

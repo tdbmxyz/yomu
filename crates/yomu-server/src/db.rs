@@ -8,7 +8,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 use yomu_domain::{
-    Chapter, ChapterRef, DownloadState, Manga, MangaDetails, Position, ProgressEvent,
+    Category, Chapter, ChapterRef, DownloadState, Manga, MangaDetails, Position, ProgressEvent,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +135,71 @@ impl Db {
             return Err(DbError::NotFound);
         }
         self.get_manga(id).await
+    }
+
+    /// Move a manga to a category. The category must exist (manga.category
+    /// has no FK — SQLite can't ALTER-ADD one — so membership is enforced
+    /// here).
+    pub async fn set_category(&self, id: Uuid, category: &str) -> Result<Manga> {
+        let known: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM categories WHERE id = ?)")
+                .bind(category)
+                .fetch_one(&self.pool)
+                .await?;
+        if !known {
+            return Err(DbError::Constraint(format!(
+                "unknown category {category:?}"
+            )));
+        }
+        let result = sqlx::query("UPDATE manga SET category = ? WHERE id = ?")
+            .bind(category)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound);
+        }
+        self.get_manga(id).await
+    }
+
+    // ---- categories ----
+
+    pub async fn list_categories(&self) -> Result<Vec<Category>> {
+        let rows =
+            sqlx::query_as::<_, CategoryRow>("SELECT * FROM categories ORDER BY position, id")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(Category::from).collect())
+    }
+
+    pub async fn set_category_update(&self, id: &str, update_enabled: bool) -> Result<Category> {
+        let result = sqlx::query("UPDATE categories SET update_enabled = ? WHERE id = ?")
+            .bind(update_enabled)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound);
+        }
+        let row = sqlx::query_as::<_, CategoryRow>("SELECT * FROM categories WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(Category::from(row))
+    }
+
+    /// Manga the periodic updater should check: only categories with
+    /// `update_enabled`.
+    pub async fn list_manga_for_update(&self) -> Result<Vec<Manga>> {
+        let rows = sqlx::query_as::<_, MangaRow>(
+            "SELECT m.* FROM manga m
+             JOIN categories c ON c.id = m.category
+             WHERE c.update_enabled = 1
+             ORDER BY m.title COLLATE NOCASE",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Manga::try_from).collect()
     }
 
     pub async fn set_last_checked(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
@@ -485,6 +550,7 @@ struct MangaRow {
     description: Option<String>,
     cover_url: Option<String>,
     auto_download: bool,
+    category: String,
     added_at: DateTime<Utc>,
     last_checked_at: Option<DateTime<Utc>>,
 }
@@ -501,9 +567,29 @@ impl TryFrom<MangaRow> for Manga {
             description: row.description,
             cover_url: parse_url_opt(row.cover_url)?,
             auto_download: row.auto_download,
+            category: row.category,
             added_at: row.added_at,
             last_checked_at: row.last_checked_at,
         })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct CategoryRow {
+    id: String,
+    name: String,
+    position: i64,
+    update_enabled: bool,
+}
+
+impl From<CategoryRow> for Category {
+    fn from(row: CategoryRow) -> Self {
+        Category {
+            id: row.id,
+            name: row.name,
+            position: row.position as u32,
+            update_enabled: row.update_enabled,
+        }
     }
 }
 
@@ -745,6 +831,47 @@ mod tests {
         assert_eq!((accepted, skipped), (1, 1));
         let position = db.latest_position(manga.id).await.unwrap().unwrap();
         assert_eq!(position.page, 9);
+    }
+
+    #[tokio::test]
+    async fn categories_gate_the_update_sweep() {
+        let db = Db::in_memory().await.unwrap();
+
+        // Seeded categories, in display order, with reading the only one
+        // checked by the updater.
+        let categories = db.list_categories().await.unwrap();
+        assert_eq!(
+            categories.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["reading", "paused", "finished"]
+        );
+        assert_eq!(
+            categories
+                .iter()
+                .map(|c| c.update_enabled)
+                .collect::<Vec<_>>(),
+            [true, false, false]
+        );
+
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        assert_eq!(manga.category, "reading");
+        assert_eq!(db.list_manga_for_update().await.unwrap().len(), 1);
+
+        // Finished manga drop out of the sweep; unknown categories refuse.
+        let manga = db.set_category(manga.id, "finished").await.unwrap();
+        assert_eq!(manga.category, "finished");
+        assert!(db.list_manga_for_update().await.unwrap().is_empty());
+        assert!(matches!(
+            db.set_category(manga.id, "dropped").await,
+            Err(DbError::Constraint(_))
+        ));
+
+        // Re-enabling updates for a category brings its manga back.
+        let finished = db.set_category_update("finished", true).await.unwrap();
+        assert!(finished.update_enabled);
+        assert_eq!(db.list_manga_for_update().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
