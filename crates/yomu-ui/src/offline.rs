@@ -185,20 +185,69 @@ pub async fn prefetch_chapter(
     Ok(meta.page_count)
 }
 
+/// A chapter stored on this device.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct DeviceMark {
+    /// Owning manga, so "on this device" can group by title. Nil for marks
+    /// written before this field existed.
+    #[serde(default = "Uuid::nil")]
+    pub manga: Uuid,
+    pub pages: u32,
+}
+
 /// Chapters stored on this device, with their page count — enough to open
 /// the reader with the server unreachable.
-pub fn device_chapters() -> std::collections::BTreeMap<Uuid, u32> {
-    read_json(DEVICE_KEY)
+pub fn device_chapters() -> std::collections::BTreeMap<Uuid, DeviceMark> {
+    let raw = storage().and_then(|s| s.get_item(DEVICE_KEY).ok().flatten());
+    let Some(raw) = raw else {
+        return Default::default();
+    };
+    if let Ok(map) = serde_json::from_str(&raw) {
+        return map;
+    }
+    // pre-manga-id format: plain chapter -> page count
+    serde_json::from_str::<std::collections::BTreeMap<Uuid, u32>>(&raw)
+        .map(|old| {
+            old.into_iter()
+                .map(|(id, pages)| {
+                    (
+                        id,
+                        DeviceMark {
+                            manga: Uuid::nil(),
+                            pages,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn device_chapter_pages(id: Uuid) -> Option<u32> {
-    device_chapters().get(&id).copied()
+    device_chapters().get(&id).map(|m| m.pages)
 }
 
-pub fn mark_device_chapter(id: Uuid, page_count: u32) {
+pub fn mark_device_chapter(manga_id: Uuid, id: Uuid, page_count: u32) {
     let mut chapters = device_chapters();
-    chapters.insert(id, page_count);
+    chapters.insert(
+        id,
+        DeviceMark {
+            manga: manga_id,
+            pages: page_count,
+        },
+    );
     write_json(DEVICE_KEY, &chapters);
+}
+
+/// Manga with device-saved chapters, and how many each has.
+pub fn device_manga() -> std::collections::BTreeMap<Uuid, u32> {
+    let mut out = std::collections::BTreeMap::new();
+    for mark in device_chapters().values() {
+        if !mark.manga.is_nil() {
+            *out.entry(mark.manga).or_default() += 1;
+        }
+    }
+    out
 }
 
 // ---- Tauri shell bridge ----
@@ -288,6 +337,93 @@ pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
                 .flatten()
         })
         .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+// ---- theme ----
+
+const THEME_KEY: &str = "yomu-theme";
+
+/// A skin: palette (and for some, typography) applied app-wide through the
+/// `data-theme` attribute on `<html>` (see styles.css).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    /// Charcoal + teal (the default).
+    #[default]
+    Charcoal,
+    /// The original dark blue-grey + pink.
+    Rose,
+    /// Light, warm paper + deep red.
+    Paper,
+    /// Pure OLED black + crimson.
+    Ink,
+    /// Deep plum + amber.
+    Plum,
+    /// Terminal green-on-black, monospace.
+    Phosphor,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 6] = [
+        Theme::Charcoal,
+        Theme::Rose,
+        Theme::Paper,
+        Theme::Ink,
+        Theme::Plum,
+        Theme::Phosphor,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Theme::Charcoal => "charcoal",
+            Theme::Rose => "rose",
+            Theme::Paper => "paper",
+            Theme::Ink => "ink",
+            Theme::Plum => "plum",
+            Theme::Phosphor => "phosphor",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Charcoal => "Charcoal",
+            Theme::Rose => "Rose",
+            Theme::Paper => "Paper",
+            Theme::Ink => "Ink",
+            Theme::Plum => "Plum",
+            Theme::Phosphor => "Phosphor",
+        }
+    }
+
+    fn from_key(key: &str) -> Theme {
+        Theme::ALL
+            .into_iter()
+            .find(|t| t.key() == key)
+            .unwrap_or_default()
+    }
+}
+
+pub fn theme() -> Theme {
+    storage()
+        .and_then(|s| s.get_item(THEME_KEY).ok().flatten())
+        .map(|k| Theme::from_key(&k))
+        .unwrap_or_default()
+}
+
+pub fn set_theme(theme: Theme) {
+    if let Some(storage) = storage() {
+        let _ = storage.set_item(THEME_KEY, theme.key());
+    }
+    apply_theme(theme);
+}
+
+/// Reflect the theme onto `<html data-theme>`, where the CSS reads it.
+pub fn apply_theme(theme: Theme) {
+    if let Some(root) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.document_element())
+    {
+        let _ = root.set_attribute("data-theme", theme.key());
+    }
 }
 
 // ---- reader prefs ----

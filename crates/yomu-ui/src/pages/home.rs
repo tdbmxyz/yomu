@@ -1,0 +1,188 @@
+//! Home: horizontal shelves answering "what do I read now?" — continue
+//! reading, new chapters, chapters saved on this device. The full grid
+//! lives on the Library tab.
+
+use leptos::prelude::*;
+use yomu_domain::MangaWithPosition;
+
+use crate::offline;
+use crate::use_client;
+
+#[component]
+pub fn Home() -> impl IntoView {
+    let client = use_client();
+    // Same resource + last-known-good cache as the Library page, so both
+    // tabs work offline in the shell.
+    let library = LocalResource::new({
+        let client = client.clone();
+        move || {
+            let client = client.clone();
+            async move {
+                match client.library().await {
+                    Ok(list) => {
+                        offline::cache_put("library", &list);
+                        Ok(list)
+                    }
+                    Err(err) => offline::cache_get("library").ok_or(err),
+                }
+            }
+        }
+    });
+
+    view! {
+        <section class="home">
+            {move || match library.get() {
+                None => view! { <p class="muted">"Loading…"</p> }.into_any(),
+                Some(Err(err)) => {
+                    view! { <p class="error">"Could not reach yomu server: " {err.to_string()}</p> }
+                        .into_any()
+                }
+                Some(Ok(list)) if list.is_empty() => {
+                    view! {
+                        <p class="muted gate-msg">
+                            "Nothing tracked yet — use " <a href="/search">"Browse"</a>
+                            " to search a source."
+                        </p>
+                    }
+                        .into_any()
+                }
+                Some(Ok(list)) => {
+                    let mut resume: Vec<MangaWithPosition> =
+                        list.iter().filter(|e| e.position.is_some()).cloned().collect();
+                    resume.sort_by(|a, b| {
+                        let at = |e: &MangaWithPosition| e.position.as_ref().map(|p| p.at);
+                        at(b).cmp(&at(a))
+                    });
+                    resume.truncate(12);
+                    let resume_cards: Vec<AnyView> = resume
+                        .into_iter()
+                        .map(|entry| {
+                            let position = entry.position.clone().expect("filtered");
+                            let subtitle = entry
+                                .position_chapter_title
+                                .clone()
+                                .map(|t| format!("{t} · p. {}", position.page + 1))
+                                .unwrap_or_else(|| format!("p. {}", position.page + 1));
+                            view! {
+                                <ShelfCard
+                                    entry=entry
+                                    href_chapter=Some((position.chapter_id, position.page))
+                                    subtitle=subtitle
+                                    badge=None
+                                />
+                            }
+                                .into_any()
+                        })
+                        .collect();
+
+                    let mut fresh: Vec<MangaWithPosition> =
+                        list.iter().filter(|e| e.unread_count > 0).cloned().collect();
+                    fresh.sort_by_key(|e| std::cmp::Reverse(e.latest_chapter_at));
+                    fresh.truncate(12);
+                    let fresh_cards: Vec<AnyView> = fresh
+                        .into_iter()
+                        .map(|entry| {
+                            let badge = format!("+{}", entry.unread_count);
+                            let subtitle = format!(
+                                "{} chapter{}",
+                                entry.chapter_count,
+                                if entry.chapter_count == 1 { "" } else { "s" },
+                            );
+                            view! {
+                                <ShelfCard
+                                    entry=entry
+                                    href_chapter=None
+                                    subtitle=subtitle
+                                    badge=Some(badge)
+                                />
+                            }
+                                .into_any()
+                        })
+                        .collect();
+
+                    let marks = offline::device_manga();
+                    let device_cards: Vec<AnyView> = list
+                        .iter()
+                        .filter_map(|e| marks.get(&e.manga.id).map(|n| (e.clone(), *n)))
+                        .map(|(entry, saved)| {
+                            let subtitle = format!(
+                                "{saved} chapter{} saved",
+                                if saved == 1 { "" } else { "s" },
+                            );
+                            view! {
+                                <ShelfCard
+                                    entry=entry
+                                    href_chapter=None
+                                    subtitle=subtitle
+                                    badge=None
+                                />
+                            }
+                                .into_any()
+                        })
+                        .collect();
+
+                    view! {
+                        {shelf(
+                            "Continue reading",
+                            "Nothing in progress — pick something below.",
+                            resume_cards,
+                        )}
+                        {shelf("New chapters", "All caught up.", fresh_cards)}
+                        {(!device_cards.is_empty())
+                            .then(|| shelf("On this device", "", device_cards))}
+                        <p class="home-more">
+                            <a href="/library">"Whole library →"</a>
+                        </p>
+                    }
+                        .into_any()
+                }
+            }}
+        </section>
+    }
+}
+
+fn shelf(title: &'static str, empty: &'static str, cards: Vec<AnyView>) -> impl IntoView {
+    view! {
+        <div class="shelf">
+            <h3 class="shelf-title">{title}</h3>
+            {if cards.is_empty() {
+                view! { <p class="muted shelf-empty">{empty}</p> }.into_any()
+            } else {
+                view! { <div class="shelf-row">{cards}</div> }.into_any()
+            }}
+        </div>
+    }
+}
+
+/// One cover card in a shelf. `href_chapter` links straight into the reader
+/// (resume); otherwise the card opens the manga page.
+#[component]
+fn ShelfCard(
+    entry: MangaWithPosition,
+    href_chapter: Option<(uuid::Uuid, u32)>,
+    subtitle: String,
+    badge: Option<String>,
+) -> impl IntoView {
+    let client = use_client();
+    let id = entry.manga.id;
+    let href = match href_chapter {
+        Some((chapter, page)) => format!("/read/{id}/{chapter}?page={page}"),
+        None => format!("/manga/{id}"),
+    };
+    let cover = client.cover_url(id);
+    view! {
+        <a class="shelf-card" href=href>
+            <span class="cover-wrap">
+                {cover
+                    .map(|url| {
+                        view! {
+                            <img class="manga-cover" src=url.to_string() loading="lazy" alt=""/>
+                        }
+                    })}
+                {badge.map(|b| view! { <span class="unread-badge">{b}</span> })}
+            </span>
+            <span class="manga-title">{entry.manga.title.clone()}</span>
+            <span class="muted manga-meta">{subtitle}</span>
+        </a>
+    }
+}

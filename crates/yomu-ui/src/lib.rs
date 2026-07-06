@@ -25,6 +25,7 @@ pub fn use_client() -> YomuClient {
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
+    offline::apply_theme(offline::theme());
 
     // Sync any progress recorded while offline: once at startup, and again
     // whenever the browser reports connectivity is back.
@@ -44,19 +45,31 @@ pub fn App(config: AppConfig) -> impl IntoView {
             <Router>
                 <nav class="topbar">
                     <span class="brand">"yomu"</span>
-                    <A href="/">"Library"</A>
-                    <A href="/search">"Add manga"</A>
+                    <A href="/">"Home"</A>
+                    <A href="/library">"Library"</A>
+                    <A href="/search">"Browse"</A>
+                    <A href="/more">"More"</A>
                     <span class="grow"></span>
                     <Account/>
                 </nav>
                 <main>
                     <Routes fallback=|| view! { <p class="muted">"Page not found"</p> }>
-                        <Route path=path!("/") view=pages::Library/>
+                        <Route path=path!("/") view=pages::Home/>
+                        <Route path=path!("/library") view=pages::Library/>
                         <Route path=path!("/search") view=pages::Search/>
+                        <Route path=path!("/more") view=pages::More/>
                         <Route path=path!("/manga/:id") view=pages::MangaPage/>
                         <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
                     </Routes>
                 </main>
+                // Phone navigation: the topbar collapses to this fixed tab
+                // bar under 40rem (see styles.css).
+                <nav class="tabbar">
+                    <A href="/"><span class="tab-icon">"⌂"</span>"Home"</A>
+                    <A href="/library"><span class="tab-icon">"▦"</span>"Library"</A>
+                    <A href="/search"><span class="tab-icon">"⌕"</span>"Browse"</A>
+                    <A href="/more"><span class="tab-icon">"≡"</span>"More"</A>
+                </nav>
             </Router>
         </ServerGate>
     }
@@ -140,7 +153,7 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
 /// provider: single-account mode shows nothing (there is no one to sign
 /// in as). Sign-in is a full-page redirect through the provider.
 #[component]
-fn Account() -> impl IntoView {
+pub(crate) fn Account() -> impl IntoView {
     let client = use_client();
     let me = LocalResource::new({
         let client = client.clone();

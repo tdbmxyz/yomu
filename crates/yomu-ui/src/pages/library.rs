@@ -92,36 +92,41 @@ pub fn Library() -> impl IntoView {
                                 .into_iter()
                                 .map(|entry| {
                                     let cover = client.cover_url(entry.manga.id);
-                                    let read_state = entry
-                                        .position
-                                        .as_ref()
-                                        .map(|_| "continue")
-                                        .unwrap_or("start");
+                                    let meta = if entry.unread_count > 0 {
+                                        format!("{} new", entry.unread_count)
+                                    } else {
+                                        format!(
+                                            "{} chapter{}",
+                                            entry.chapter_count,
+                                            if entry.chapter_count == 1 { "" } else { "s" },
+                                        )
+                                    };
+                                    let badge = (entry.unread_count > 0)
+                                        .then(|| entry.unread_count.to_string());
                                     view! {
                                         <a
                                             class="manga-card"
                                             href=format!("/manga/{}", entry.manga.id)
                                         >
-                                            {cover
-                                                .map(|url| {
-                                                    view! {
-                                                        <img
-                                                            class="manga-cover"
-                                                            src=url.to_string()
-                                                            loading="lazy"
-                                                            alt=""
-                                                        />
-                                                    }
-                                                })}
-                                            <span class="manga-title">{entry.manga.title.clone()}</span>
-                                            <span class="muted manga-meta">
-                                                {format!(
-                                                    "{} chapter{} · {}",
-                                                    entry.chapter_count,
-                                                    if entry.chapter_count == 1 { "" } else { "s" },
-                                                    read_state,
-                                                )}
+                                            <span class="cover-wrap">
+                                                {cover
+                                                    .map(|url| {
+                                                        view! {
+                                                            <img
+                                                                class="manga-cover"
+                                                                src=url.to_string()
+                                                                loading="lazy"
+                                                                alt=""
+                                                            />
+                                                        }
+                                                    })}
+                                                {badge
+                                                    .map(|b| {
+                                                        view! { <span class="unread-badge">{b}</span> }
+                                                    })}
                                             </span>
+                                            <span class="manga-title">{entry.manga.title.clone()}</span>
+                                            <span class="muted manga-meta">{meta}</span>
                                         </a>
                                     }
                                 })

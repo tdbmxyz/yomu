@@ -327,7 +327,7 @@ fn ChapterItem(
                 device_busy.set(false);
                 match result {
                     Ok(page_count) => {
-                        offline::mark_device_chapter(id, page_count);
+                        offline::mark_device_chapter(manga_id, id, page_count);
                         on_device.set(true);
                     }
                     Err(err) => leptos::logging::warn!("device download: {err}"),

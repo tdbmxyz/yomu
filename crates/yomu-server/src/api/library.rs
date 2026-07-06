@@ -47,11 +47,29 @@ pub async fn list(
             Some(user) => state.db.latest_position(user.id, manga.id).await?,
             None => None,
         };
-        let chapter_count = state.db.count_chapters(manga.id).await?;
+        // Reading order (same as `detail`), so "after the position" is
+        // well-defined for the unread count.
+        let chapters = state.db.list_chapters(manga.id).await?;
+        let chapter_count = chapters.len() as u32;
+        let read_through = position.as_ref().and_then(|p| {
+            chapters
+                .iter()
+                .position(|c| c.id == p.chapter_id)
+                .map(|i| i as u32 + 1)
+        });
+        let position_chapter_title = position.as_ref().and_then(|p| {
+            chapters
+                .iter()
+                .find(|c| c.id == p.chapter_id)
+                .map(|c| c.title.clone())
+        });
         out.push(MangaWithPosition {
             manga,
             position,
             chapter_count,
+            unread_count: chapter_count - read_through.unwrap_or(0),
+            latest_chapter_at: chapters.iter().map(|c| c.fetched_at).max(),
+            position_chapter_title,
         });
     }
     Ok(Json(out))

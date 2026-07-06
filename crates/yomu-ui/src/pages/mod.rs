@@ -1,10 +1,14 @@
+mod home;
 mod library;
 mod manga;
+mod more;
 mod reader;
 mod search;
 
+pub use home::Home;
 pub use library::Library;
 pub use manga::MangaPage;
+pub use more::More;
 pub use reader::Reader;
 pub use search::Search;
 

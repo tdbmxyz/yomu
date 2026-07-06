@@ -305,14 +305,6 @@ impl Db {
         rows.into_iter().map(Chapter::try_from).collect()
     }
 
-    pub async fn count_chapters(&self, manga_id: Uuid) -> Result<u32> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chapters WHERE manga_id = ?")
-            .bind(manga_id.to_string())
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(count as u32)
-    }
-
     pub async fn mark_pending(&self, chapter_ids: &[Uuid]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for id in chapter_ids {
@@ -855,7 +847,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(db.count_chapters(manga.id).await.unwrap(), 2);
+        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 2);
 
         // Duplicate add is a constraint error, not a second row.
         assert!(matches!(
@@ -907,7 +899,7 @@ mod tests {
             db.get_manga(manga.id).await,
             Err(DbError::NotFound)
         ));
-        assert_eq!(db.count_chapters(manga.id).await.unwrap(), 0);
+        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -1119,6 +1111,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(new.len(), 1);
-        assert_eq!(db.count_chapters(manga.id).await.unwrap(), 2);
+        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 2);
     }
 }

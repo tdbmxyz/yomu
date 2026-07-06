@@ -51,6 +51,17 @@ pub struct MangaWithPosition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
     pub chapter_count: u32,
+    /// Chapters after the current position in reading order — all of them
+    /// when nothing has been read yet.
+    #[serde(default)]
+    pub unread_count: u32,
+    /// When the most recently fetched chapter arrived (drives the client's
+    /// "new chapters" ordering).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_chapter_at: Option<DateTime<Utc>>,
+    /// Title of the chapter the position points at, for "resume" labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_chapter_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

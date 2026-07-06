@@ -285,61 +285,36 @@ fn ReaderInner() -> impl IntoView {
     let client_paged = use_client();
     let client_vertical = use_client();
 
+    // Page count of the chapter under the reader (the routed chapter until
+    // a vertical strip wanders further).
+    let shown_count = move || {
+        segments
+            .get()
+            .iter()
+            .find(|(id, _)| *id == current_chapter.get())
+            .map(|(_, c)| *c)
+            .unwrap_or_else(page_count)
+    };
+    let menu_open = RwSignal::new(false);
+
     view! {
         <div
             class="reader-overlay"
             class:chrome-hidden=move || !chrome.get()
             class:flow=move || mode.get() == ReaderMode::Vertical
         >
+            <div class="reader-progress">
+                <div
+                    class="reader-progress-fill"
+                    style:width=move || {
+                        let count = shown_count().max(1) as f64;
+                        format!("{}%", (page.get() + 1) as f64 / count * 100.0)
+                    }
+                ></div>
+            </div>
             <div class="reader-chrome reader-top">
                 <a href=format!("/manga/{manga_id}")>"← back"</a>
                 <span class="reader-title">{chapter_title}</span>
-                <div class="reader-tools">
-                    <button class="mode-btn" title="Toggle paged / vertical" on:click=toggle_mode>
-                        {move || match mode.get() {
-                            ReaderMode::Paged => "⇅ vertical",
-                            ReaderMode::Vertical => "⇆ paged",
-                        }}
-                    </button>
-                    {move || {
-                        (mode.get() == ReaderMode::Paged)
-                            .then(|| {
-                                view! {
-                                    <button class="mode-btn" title="Page fit" on:click=cycle_fit>
-                                        {move || match fit.get() {
-                                            ReaderFit::Screen => "fit: screen",
-                                            ReaderFit::Width => "fit: width",
-                                            ReaderFit::Original => "fit: 1:1",
-                                        }}
-                                    </button>
-                                    <button
-                                        class="mode-btn"
-                                        title="Reading direction (which side is the next page)"
-                                        on:click=toggle_dir
-                                    >
-                                        {move || match dir.get() {
-                                            ReaderDirection::Ltr => "ltr →",
-                                            ReaderDirection::Rtl => "← rtl",
-                                        }}
-                                    </button>
-                                }
-                            })
-                    }}
-                    <button class="mode-btn" title="Fullscreen" on:click=toggle_fullscreen>
-                        "⛶"
-                    </button>
-                </div>
-                <span class="muted">
-                    {move || {
-                        let count = segments
-                            .get()
-                            .iter()
-                            .find(|(id, _)| *id == current_chapter.get())
-                            .map(|(_, c)| *c)
-                            .unwrap_or_else(page_count);
-                        format!("{} / {}", page.get() + 1, count.max(1))
-                    }}
-                </span>
             </div>
 
             {move || {
@@ -759,33 +734,101 @@ fn ReaderInner() -> impl IntoView {
                 }
             }}
 
+            // Reader options, one layer under the pill's gear.
+            {move || {
+                let toggle_mode = toggle_mode.clone();
+                menu_open.get()
+                    .then(move || {
+                        view! {
+                            <div class="reader-chrome reader-menu">
+                                <button
+                                    class="mode-btn"
+                                    title="Toggle paged / vertical"
+                                    on:click=toggle_mode
+                                >
+                                    {move || match mode.get() {
+                                        ReaderMode::Paged => "⇅ vertical",
+                                        ReaderMode::Vertical => "⇆ paged",
+                                    }}
+                                </button>
+                                {move || {
+                                    (mode.get() == ReaderMode::Paged)
+                                        .then(|| {
+                                            view! {
+                                                <button
+                                                    class="mode-btn"
+                                                    title="Page fit"
+                                                    on:click=cycle_fit
+                                                >
+                                                    {move || match fit.get() {
+                                                        ReaderFit::Screen => "fit: screen",
+                                                        ReaderFit::Width => "fit: width",
+                                                        ReaderFit::Original => "fit: 1:1",
+                                                    }}
+                                                </button>
+                                                <button
+                                                    class="mode-btn"
+                                                    title="Reading direction (which side is the next page)"
+                                                    on:click=toggle_dir
+                                                >
+                                                    {move || match dir.get() {
+                                                        ReaderDirection::Ltr => "ltr →",
+                                                        ReaderDirection::Rtl => "← rtl",
+                                                    }}
+                                                </button>
+                                            }
+                                        })
+                                }}
+                            </div>
+                        }
+                    })
+            }}
+
             <div class="reader-chrome reader-bottom">
                 {move || {
                     neighbours()
                         .and_then(|(previous, _)| previous)
                         .map(|prev| {
                             view! {
-                                <a class="button" href=format!("/read/{manga_id}/{prev}")>
-                                    "← previous chapter"
+                                <a
+                                    class="pill-btn"
+                                    title="Previous chapter"
+                                    href=format!("/read/{manga_id}/{prev}")
+                                >
+                                    "‹"
                                 </a>
                             }
                         })
                 }}
-                <span class="grow"></span>
+                <span class="pill-counter">
+                    {move || format!("{} / {}", page.get() + 1, shown_count().max(1))}
+                </span>
                 {move || {
                     neighbours()
                         .and_then(|(_, next)| next)
                         .map(|next| {
                             view! {
                                 <a
-                                    class="button primary"
+                                    class="pill-btn"
+                                    title="Next chapter"
                                     href=format!("/read/{manga_id}/{next}")
                                 >
-                                    "next chapter →"
+                                    "›"
                                 </a>
                             }
                         })
                 }}
+                <span class="pill-sep"></span>
+                <button
+                    class="pill-btn"
+                    title="Reader options"
+                    on:click=move |_| menu_open.update(|o| *o = !*o)
+                >
+                    "⚙"
+                </button>
+                <button class="pill-btn" title="Fullscreen" on:click=toggle_fullscreen>
+                    "⛶"
+                </button>
             </div>
         </div>
     }
