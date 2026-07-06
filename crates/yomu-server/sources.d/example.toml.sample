@@ -20,11 +20,13 @@ link = ".post-title a@href"
 cover = "img@data-src"
 
 # Optional query-less catalog listings for the Browse tab. `{page}` is the
-# 1-based page number (omit it for single-page listings). Result selectors
-# (item/title/link/cover) default to the [search] ones — override any that
-# differ on the listing pages.
+# 1-based page number (omit it for single-page listings); for endpoints
+# paginated by offset use `{offset}` together with `page_size` (offset =
+# (page - 1) * page_size). Result selectors (item/title/link/cover) default
+# to the [search] ones — override any that differ on the listing pages.
 [browse.popular]
 url = "{base}/manga/?m_orderby=views&page={page}"
+# page_size = 32    # only needed with an {offset} template
 
 [browse.latest]
 url = "{base}/manga/?m_orderby=latest&page={page}"
@@ -33,6 +35,10 @@ url = "{base}/manga/?m_orderby=latest&page={page}"
 title = ".post-title h1"
 description = ".description-summary p"
 cover = ".summary_image img@data-src"
+# Sites that load the chapter list as a fragment from a separate endpoint
+# (htmx-style) instead of rendering it into the manga page: `{url}` is the
+# manga page URL, `{url_parent}` the same URL minus its last path segment.
+# chapters_url = "{url_parent}/full-chapter-list"
 chapter_item = "li.wp-manga-chapter"
 chapter_link = "a@href"
 # chapter_number_regex = "(?i)ch(?:apter)?\\.?\\s*(\\d+(?:\\.\\d+)?)"  # default
@@ -40,4 +46,7 @@ chapter_link = "a@href"
 #                                  # whose number can't be parsed
 
 [pages]
+# Like chapters_url: separate fragment endpoint for the page images, when
+# the chapter page doesn't render them itself (`{url}` = chapter page URL).
+# url = "{url}/images?reading_style=long_strip"
 image = ".reading-content img@data-src"

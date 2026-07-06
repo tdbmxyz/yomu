@@ -73,9 +73,14 @@ pub struct BrowseSpec {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListingSpec {
-    /// URL template; `{base}` and `{page}` (1-based) are substituted. A
-    /// template without `{page}` only ever yields its first page.
+    /// URL template; `{base}`, `{page}` (1-based) and `{offset}`
+    /// ((page − 1) × `page_size`, for offset-paginated endpoints) are
+    /// substituted. A template with neither `{page}` nor `{offset}` only
+    /// ever yields its first page.
     pub url: String,
+    /// Items per page; required when the template uses `{offset}`.
+    #[serde(default)]
+    pub page_size: Option<u32>,
     #[serde(default)]
     pub item: Option<String>,
     #[serde(default)]
@@ -95,7 +100,14 @@ pub struct MangaSpec {
     pub description: Option<String>,
     #[serde(default)]
     pub cover: Option<String>,
-    /// Selector matching one chapter entry on the manga page.
+    /// Some sites load the chapter list as an HTML fragment from a
+    /// separate endpoint (htmx-style) instead of rendering it into the
+    /// manga page. Template substituting `{url}` (the manga page URL) and
+    /// `{url_parent}` (the same URL minus its last path segment).
+    #[serde(default)]
+    pub chapters_url: Option<String>,
+    /// Selector matching one chapter entry on the manga page (or on the
+    /// `chapters_url` fragment when that is set).
     pub chapter_item: String,
     #[serde(default)]
     pub chapter_title: Option<String>,
@@ -128,7 +140,13 @@ fn default_number_regex() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PagesSpec {
-    /// Selector matching every page image on the chapter page.
+    /// Like `manga.chapters_url`: separate fragment endpoint for the page
+    /// images, when the chapter page doesn't render them itself. Same
+    /// placeholders, relative to the chapter page URL.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Selector matching every page image on the chapter page (or on the
+    /// `url` fragment when that is set).
     pub image: String,
 }
 
@@ -189,6 +207,7 @@ fn text_of(el: ElementRef) -> Option<String> {
 /// A compiled browse listing (URL template + result-card rules).
 struct CompiledListing {
     url: String,
+    page_size: Option<u32>,
     item: Selector,
     title: Option<Rule>,
     link: Rule,
@@ -232,6 +251,7 @@ impl SelectorSource {
         let compile_listing = |listing: &ListingSpec| -> Result<CompiledListing> {
             Ok(CompiledListing {
                 url: listing.url.clone(),
+                page_size: listing.page_size,
                 item: sel(listing.item.as_deref().unwrap_or(&spec.search.item))?,
                 title: rule_opt(&listing.title.clone().or_else(|| spec.search.title.clone()))?,
                 link: Rule::parse(listing.link.as_deref().unwrap_or(&spec.search.link))?,
@@ -282,13 +302,32 @@ impl SelectorSource {
         })?;
         // Same startup validation for the browse listing templates.
         for (sort, listing) in &compiled.listings {
-            listing_url(&spec, &listing.url, 1).map_err(|_| {
+            if listing.url.contains("{offset}") && listing.page_size.is_none() {
+                return Err(SourceError::Definition(format!(
+                    "browse.{} url uses {{offset}} but has no page_size",
+                    sort.key()
+                )));
+            }
+            listing_url(&spec, listing, 1).map_err(|_| {
                 SourceError::Definition(format!(
                     "browse.{} url {:?} does not substitute into a valid URL",
                     sort.key(),
                     listing.url
                 ))
             })?;
+        }
+        // And for the optional fragment-endpoint templates.
+        for (name, template) in [
+            ("manga.chapters_url", &spec.manga.chapters_url),
+            ("pages.url", &spec.pages.url),
+        ] {
+            if let Some(template) = template {
+                entity_url(template, &spec.base_url).map_err(|_| {
+                    SourceError::Definition(format!(
+                        "{name} {template:?} does not substitute into a valid URL"
+                    ))
+                })?;
+            }
         }
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -354,6 +393,19 @@ impl SelectorSource {
     }
 
     pub fn parse_manga(&self, html: &str, page_url: &Url) -> Result<MangaDetails> {
+        self.parse_manga_parts(html, html, page_url, page_url)
+    }
+
+    /// Manga page and chapter list parsed from separate documents — the
+    /// same one unless `manga.chapters_url` points the chapter list at its
+    /// own fragment endpoint.
+    pub fn parse_manga_parts(
+        &self,
+        html: &str,
+        chapters_html: &str,
+        page_url: &Url,
+        chapters_url: &Url,
+    ) -> Result<MangaDetails> {
         let doc = Html::parse_document(html);
         let root = doc.root_element();
 
@@ -375,12 +427,13 @@ impl SelectorSource {
             .and_then(|r| r.extract(root))
             .and_then(|c| page_url.join(&c).ok());
 
+        let chapters_doc = Html::parse_document(chapters_html);
         let mut chapters = Vec::new();
-        for (index, item) in doc.select(&self.compiled.chapter_item).enumerate() {
+        for (index, item) in chapters_doc.select(&self.compiled.chapter_item).enumerate() {
             let Some(link) = self.compiled.chapter_link.extract(item) else {
                 continue;
             };
-            let Ok(url) = page_url.join(&link) else {
+            let Ok(url) = chapters_url.join(&link) else {
                 continue;
             };
             let title = self
@@ -411,7 +464,7 @@ impl SelectorSource {
         }
         if chapters.is_empty() {
             return Err(SourceError::Parse(format!(
-                "no chapters matched {:?} on {page_url}",
+                "no chapters matched {:?} on {chapters_url}",
                 self.spec.manga.chapter_item
             )));
         }
@@ -545,11 +598,11 @@ impl Source for SelectorSource {
 
     async fn browse(&self, sort: BrowseSort, page: u32) -> Result<Vec<MangaSummary>> {
         let listing = self.listing(sort)?;
-        // A template without {page} has exactly one page.
-        if page > 1 && !listing.url.contains("{page}") {
+        // A template without a pagination placeholder has exactly one page.
+        if page > 1 && !listing.url.contains("{page}") && !listing.url.contains("{offset}") {
             return Ok(Vec::new());
         }
-        let url = listing_url(&self.spec, &listing.url, page.max(1))?;
+        let url = listing_url(&self.spec, listing, page.max(1))?;
         let html = self.get_html(&url).await?;
         self.parse_listing(sort, &html, &url)
     }
@@ -557,11 +610,22 @@ impl Source for SelectorSource {
     async fn manga(&self, key: &str) -> Result<MangaDetails> {
         let url = self.key_url(key)?;
         let html = self.get_html(&url).await?;
-        self.parse_manga(&html, &url)
+        match &self.spec.manga.chapters_url {
+            None => self.parse_manga(&html, &url),
+            Some(template) => {
+                let chapters_url = entity_url(template, &url)?;
+                let chapters_html = self.get_html(&chapters_url).await?;
+                self.parse_manga_parts(&html, &chapters_html, &url, &chapters_url)
+            }
+        }
     }
 
     async fn pages(&self, chapter_key: &str) -> Result<Vec<Url>> {
         let url = self.key_url(chapter_key)?;
+        let url = match &self.spec.pages.url {
+            None => url,
+            Some(template) => entity_url(template, &url)?,
+        };
         let html = self.get_html(&url).await?;
         self.parse_pages(&html, &url)
     }
@@ -621,14 +685,32 @@ fn parse_cards(
     out
 }
 
-/// Substitute `{base}`/`{page}` in a browse listing URL template.
-fn listing_url(spec: &SelectorSpec, template: &str, page: u32) -> Result<Url> {
-    let url_str = template
+/// Substitute `{base}`/`{page}`/`{offset}` in a browse listing URL template.
+fn listing_url(spec: &SelectorSpec, listing: &CompiledListing, page: u32) -> Result<Url> {
+    let offset = (page - 1) * listing.page_size.unwrap_or(0);
+    let url_str = listing
+        .url
         .replace("{base}", spec.base_url.as_str().trim_end_matches('/'))
-        .replace("{page}", &page.to_string());
+        .replace("{page}", &page.to_string())
+        .replace("{offset}", &offset.to_string());
     url_str
         .parse()
         .map_err(|_| SourceError::Definition(format!("browse url {url_str:?}")))
+}
+
+/// Substitute `{url}`/`{url_parent}` in a fragment-endpoint template
+/// (`manga.chapters_url`, `pages.url`).
+fn entity_url(template: &str, url: &Url) -> Result<Url> {
+    let mut parent = url.clone();
+    if let Ok(mut segments) = parent.path_segments_mut() {
+        segments.pop();
+    }
+    let url_str = template
+        .replace("{url}", url.as_str().trim_end_matches('/'))
+        .replace("{url_parent}", parent.as_str().trim_end_matches('/'));
+    url_str
+        .parse()
+        .map_err(|_| SourceError::Definition(format!("fragment url {url_str:?}")))
 }
 
 /// Substitute `{base}`/`{query}` in a search URL template. The query is
@@ -645,4 +727,85 @@ fn search_url(spec: &SelectorSpec, query: &str) -> Result<Url> {
     url_str
         .parse()
         .map_err(|_| SourceError::Definition(format!("search url {url_str:?}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_url_substitutes_url_and_parent() {
+        let url = Url::parse("https://site.test/series/ABC123/some-slug").unwrap();
+        assert_eq!(
+            entity_url("{url_parent}/full-chapter-list", &url)
+                .unwrap()
+                .as_str(),
+            "https://site.test/series/ABC123/full-chapter-list"
+        );
+        assert_eq!(
+            entity_url("{url}/images?page=1", &url).unwrap().as_str(),
+            "https://site.test/series/ABC123/some-slug/images?page=1"
+        );
+    }
+
+    #[test]
+    fn listing_url_offset_pagination() {
+        let spec: SelectorSpec = toml::from_str(
+            r#"
+            id = "t"
+            name = "T"
+            base_url = "https://site.test"
+            [search]
+            url = "{base}/search?q={query}"
+            item = ".card"
+            link = "a@href"
+            [browse.popular]
+            url = "{base}/list?limit=32&offset={offset}"
+            page_size = 32
+            [manga]
+            chapter_item = "li"
+            chapter_link = "a@href"
+            [pages]
+            image = "img@src"
+            "#,
+        )
+        .unwrap();
+        let source = SelectorSource::new(spec).unwrap();
+        let listing = &source.compiled.listings[0].1;
+        assert_eq!(
+            listing_url(&source.spec, listing, 1).unwrap().as_str(),
+            "https://site.test/list?limit=32&offset=0"
+        );
+        assert_eq!(
+            listing_url(&source.spec, listing, 3).unwrap().as_str(),
+            "https://site.test/list?limit=32&offset=64"
+        );
+    }
+
+    #[test]
+    fn offset_without_page_size_is_rejected() {
+        let spec: SelectorSpec = toml::from_str(
+            r#"
+            id = "t"
+            name = "T"
+            base_url = "https://site.test"
+            [search]
+            url = "{base}/search?q={query}"
+            item = ".card"
+            link = "a@href"
+            [browse.popular]
+            url = "{base}/list?offset={offset}"
+            [manga]
+            chapter_item = "li"
+            chapter_link = "a@href"
+            [pages]
+            image = "img@src"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            SelectorSource::new(spec),
+            Err(SourceError::Definition(_))
+        ));
+    }
 }

@@ -106,6 +106,56 @@ fn parses_browse_listing_with_search_selector_defaults() {
 }
 
 #[test]
+fn parses_chapters_from_a_separate_fragment() {
+    // Sites that load the chapter list htmx-style: the manga page only has
+    // the details, chapters come from `chapters_url`.
+    let spec: SelectorSpec = toml::from_str(
+        r#"
+        id = "fixture"
+        name = "Fixture Scans"
+        base_url = "https://fixture.test"
+
+        [search]
+        url = "{base}/search?q={query}"
+        item = ".manga-item"
+        link = "a.manga-link@href"
+
+        [manga]
+        title = "h1.entry-title"
+        chapters_url = "{url_parent}/chapter-list"
+        chapter_item = "li.chapter"
+        chapter_link = "a@href"
+
+        [pages]
+        image = ".reading-content img.page@data-src"
+        "#,
+    )
+    .expect("valid spec");
+    let source = SelectorSource::new(spec).expect("source compiles");
+
+    let page_url = Url::parse("https://fixture.test/manga/solo-farming/some-slug").unwrap();
+    let chapters_url = Url::parse("https://fixture.test/manga/solo-farming/chapter-list").unwrap();
+    let fragment = r#"
+        <ul>
+            <li class="chapter"><a href="/manga/solo-farming/chapter-2">Chapter 2</a></li>
+            <li class="chapter"><a href="/manga/solo-farming/chapter-1">Chapter 1</a></li>
+        </ul>
+    "#;
+    let details = source
+        .parse_manga_parts(&fixture("manga.html"), fragment, &page_url, &chapters_url)
+        .unwrap();
+
+    assert_eq!(details.summary.title, "Solo Farming in the Tower");
+    assert_eq!(details.chapters.len(), 2);
+    assert_eq!(details.chapters[0].number, Some(2.0));
+    // Relative links resolve against the fragment URL.
+    assert_eq!(
+        details.chapters[1].key,
+        "https://fixture.test/manga/solo-farming/chapter-1"
+    );
+}
+
+#[test]
 fn parses_manga_details_and_chapter_numbers() {
     let source = fixture_source();
     let url = Url::parse("https://fixture.test/manga/solo-farming").unwrap();
