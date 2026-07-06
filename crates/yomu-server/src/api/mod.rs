@@ -49,6 +49,11 @@ pub fn router(state: AppState) -> Router {
             "/chapters/{id}/download",
             axum::routing::post(chapters::download),
         )
+        .route(
+            "/chapters/download",
+            axum::routing::post(chapters::download_many),
+        )
+        .route("/chapters/mark", axum::routing::post(chapters::mark))
         .route("/chapters/{id}/pages", get(chapters::pages))
         .route("/chapters/{id}/pages/{n}", get(chapters::page_image))
         .route(

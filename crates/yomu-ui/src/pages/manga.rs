@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use uuid::Uuid;
@@ -15,6 +17,10 @@ pub fn MangaPage() -> impl IntoView {
 
     let refresh = RwSignal::new(0u32);
     let status = RwSignal::new(None::<String>);
+    // Chapter multi-select lives here, above the detail resource, so the
+    // periodic refresh while downloads run doesn't wipe an ongoing selection.
+    let selected = RwSignal::new(HashSet::<Uuid>::new());
+    let anchor = RwSignal::new(None::<usize>);
     let client = use_client();
     let detail = LocalResource::new({
         let client = client.clone();
@@ -59,7 +65,9 @@ pub fn MangaPage() -> impl IntoView {
     view! {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-            Some(Ok(detail)) => view! { <MangaDetail detail refresh status/> }.into_any(),
+            Some(Ok(detail)) => {
+                view! { <MangaDetail detail refresh status selected anchor/> }.into_any()
+            }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
         {move || status.get().map(|s| view! { <p class="status">{s}</p> })}
@@ -72,6 +80,8 @@ fn MangaDetail(
     detail: MangaDetailResponse,
     refresh: RwSignal<u32>,
     status: RwSignal<Option<String>>,
+    selected: RwSignal<HashSet<Uuid>>,
+    anchor: RwSignal<Option<usize>>,
 ) -> impl IntoView {
     let client = use_client();
     let manga = detail.manga.clone();
@@ -247,6 +257,9 @@ fn MangaDetail(
                 chapters=detail.chapters
                 position_chapter=position.map(|p| p.chapter_id)
                 refresh
+                status
+                selected
+                anchor
             />
         </section>
     }
@@ -258,17 +271,122 @@ fn ChapterList(
     chapters: Vec<Chapter>,
     position_chapter: Option<Uuid>,
     refresh: RwSignal<u32>,
+    status: RwSignal<Option<String>>,
+    selected: RwSignal<HashSet<Uuid>>,
+    anchor: RwSignal<Option<usize>>,
 ) -> impl IntoView {
+    let ids = StoredValue::new(chapters.iter().map(|c| c.id).collect::<Vec<_>>());
+
+    // Long-press: the first one starts a selection; while one is active,
+    // long-pressing another row selects everything between it and the last
+    // touched row ("select between").
+    let press = Callback::new(move |index: usize| {
+        let id = ids.with_value(|v| v[index]);
+        selected.update(|s| match anchor.get_untracked() {
+            Some(a) if !s.is_empty() => {
+                let (lo, hi) = if a <= index { (a, index) } else { (index, a) };
+                ids.with_value(|v| s.extend(v[lo..=hi].iter().copied()));
+            }
+            _ => {
+                s.insert(id);
+            }
+        });
+        anchor.set(Some(index));
+    });
+    // Plain tap while a selection is active toggles a single row.
+    let toggle = Callback::new(move |index: usize| {
+        let id = ids.with_value(|v| v[index]);
+        selected.update(|s| {
+            if !s.remove(&id) {
+                s.insert(id);
+            }
+        });
+        anchor.set(Some(index));
+    });
+
+    let selection_active = Memo::new(move |_| !selected.with(|s| s.is_empty()));
+
+    // Bulk actions run on the selection in reading order.
+    let selection_ids = move || {
+        let picked = selected.get_untracked();
+        ids.with_value(|v| {
+            v.iter()
+                .filter(|id| picked.contains(id))
+                .copied()
+                .collect::<Vec<_>>()
+        })
+    };
+    let clear = move || {
+        selected.set(HashSet::new());
+        anchor.set(None);
+    };
+    let download_selected = move |_| {
+        let ids = selection_ids();
+        let client = use_client();
+        spawn_local(async move {
+            match client.download_chapters(&ids).await {
+                Ok(r) => {
+                    status.set(Some(match r.affected {
+                        0 => "Nothing new to download".into(),
+                        n => format!("{n} chapter(s) queued — downloads run one by one"),
+                    }));
+                    refresh.update(|n| *n += 1);
+                }
+                Err(err) => status.set(Some(format!("Download failed: {err}"))),
+            }
+        });
+        clear();
+    };
+    let mark = move |read: bool| {
+        let ids = selection_ids();
+        let client = use_client();
+        spawn_local(async move {
+            match client.mark_chapters(&ids, read).await {
+                Ok(_) => refresh.update(|n| *n += 1),
+                Err(err) => status.set(Some(format!("Mark failed: {err}"))),
+            }
+        });
+        clear();
+    };
+    let select_all = move |_| {
+        selected.set(ids.with_value(|v| v.iter().copied().collect()));
+    };
+
     view! {
         <ul class="chapter-list">
             {chapters
                 .into_iter()
-                .map(|chapter| {
+                .enumerate()
+                .map(|(index, chapter)| {
                     let current = position_chapter == Some(chapter.id);
-                    view! { <ChapterItem manga_id chapter current refresh/> }
+                    view! {
+                        <ChapterItem
+                            manga_id
+                            chapter
+                            current
+                            refresh
+                            index
+                            selected
+                            selection_active
+                            press
+                            toggle
+                        />
+                    }
                 })
                 .collect_view()}
         </ul>
+        <Show when=move || selection_active.get()>
+            <div class="select-bar">
+                <span class="select-count">{move || selected.with(|s| s.len())}</span>
+                <button on:click=select_all>"All"</button>
+                <button on:click=download_selected>"Download"</button>
+                <button on:click=move |_| mark(true)>"Read"</button>
+                <button on:click=move |_| mark(false)>"Unread"</button>
+                <button title="Clear selection" on:click=move |_| clear()>
+                    "✕"
+                </button>
+            </div>
+        </Show>
     }
 }
 
@@ -278,9 +396,78 @@ fn ChapterItem(
     chapter: Chapter,
     current: bool,
     refresh: RwSignal<u32>,
+    index: usize,
+    selected: RwSignal<HashSet<Uuid>>,
+    selection_active: Memo<bool>,
+    press: Callback<usize>,
+    toggle: Callback<usize>,
 ) -> impl IntoView {
     let client = use_client();
     let id = chapter.id;
+    let read = chapter.read;
+    let is_selected = Memo::new(move |_| selected.with(|s| s.contains(&id)));
+
+    // Long-press detection: a primary pointer held ~500ms without moving.
+    // Buttons inside the row are exempt so holding "download" can't start a
+    // selection by accident.
+    let timer = StoredValue::new(None::<TimeoutHandle>);
+    let long_fired = StoredValue::new(false);
+    let start = StoredValue::new((0.0f64, 0.0f64));
+    let cancel = move || {
+        if let Some(handle) = timer.try_update_value(|t| t.take()).flatten() {
+            handle.clear();
+        }
+    };
+    let on_target_button = |ev: &leptos::ev::PointerEvent| {
+        use leptos::wasm_bindgen::JsCast;
+        ev.target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|el| el.closest("button").ok().flatten().is_some())
+    };
+    let pointer_down = move |ev: leptos::ev::PointerEvent| {
+        if ev.button() != 0 || on_target_button(&ev) {
+            return;
+        }
+        long_fired.set_value(false);
+        start.set_value((ev.client_x() as f64, ev.client_y() as f64));
+        cancel();
+        let handle = set_timeout_with_handle(
+            move || {
+                timer.set_value(None);
+                long_fired.set_value(true);
+                press.run(index);
+            },
+            std::time::Duration::from_millis(500),
+        )
+        .ok();
+        timer.set_value(handle);
+    };
+    let pointer_move = move |ev: leptos::ev::PointerEvent| {
+        let (x, y) = start.get_value();
+        let moved = (ev.client_x() as f64 - x).abs() + (ev.client_y() as f64 - y).abs();
+        if moved > 12.0 {
+            cancel();
+        }
+    };
+    let click = move |ev: leptos::ev::MouseEvent| {
+        // The click that ends a long press must not navigate or re-toggle.
+        if long_fired.try_update_value(std::mem::take) == Some(true) {
+            ev.prevent_default();
+            ev.stop_propagation();
+            return;
+        }
+        if selection_active.get_untracked() {
+            ev.prevent_default();
+            toggle.run(index);
+        }
+    };
+    let context_menu = move |ev: leptos::ev::MouseEvent| {
+        // Android fires contextmenu on long press; keep it from covering
+        // our selection. Desktop right-click (no pending press) still works.
+        if timer.with_value(|t| t.is_some()) || selection_active.get_untracked() {
+            ev.prevent_default();
+        }
+    };
 
     let (download_label, downloadable) = match &chapter.download {
         DownloadState::None => ("download", true),
@@ -337,7 +524,24 @@ fn ChapterItem(
     };
 
     view! {
-        <li class="chapter-item" class:current=current>
+        <li
+            class="chapter-item"
+            class:current=current
+            class:read=read
+            class:selected=move || is_selected.get()
+            on:pointerdown=pointer_down
+            on:pointermove=pointer_move
+            on:pointerup=move |_| cancel()
+            on:pointercancel=move |_| cancel()
+            on:pointerleave=move |_| cancel()
+            on:click=click
+            on:contextmenu=context_menu
+        >
+            <Show when=move || selection_active.get()>
+                <span class="select-box" aria-hidden="true">
+                    {move || if is_selected.get() { "☑" } else { "☐" }}
+                </span>
+            </Show>
             <a class="chapter-title" href=format!("/read/{manga_id}/{id}")>
                 {chapter.title.clone()}
             </a>
@@ -353,24 +557,26 @@ fn ChapterItem(
                     }
                 })}
             <span class="grow"></span>
-            <button
-                title="Store on this device for offline reading"
-                disabled=move || device_busy.get() || on_device.get()
-                on:click=device_download
-            >
-                {move || {
-                    if on_device.get() {
-                        "on device ✓"
-                    } else if device_busy.get() {
-                        "saving…"
-                    } else {
-                        "save to device"
-                    }
-                }}
-            </button>
-            <button disabled=!downloadable on:click=download>
-                {download_label}
-            </button>
+            <Show when=move || !selection_active.get()>
+                <button
+                    title="Store on this device for offline reading"
+                    disabled=move || device_busy.get() || on_device.get()
+                    on:click=device_download.clone()
+                >
+                    {move || {
+                        if on_device.get() {
+                            "on device ✓"
+                        } else if device_busy.get() {
+                            "saving…"
+                        } else {
+                            "save to device"
+                        }
+                    }}
+                </button>
+                <button disabled=!downloadable on:click=download.clone()>
+                    {download_label}
+                </button>
+            </Show>
         </li>
     }
 }

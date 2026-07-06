@@ -67,6 +67,20 @@
         };
       };
 
+    tauriLibs = with pkgs; [
+      webkitgtk_4_1
+      gtk3
+      libsoup_3
+      glib
+      cairo
+      pango
+      gdk-pixbuf
+      atk
+      librsvg
+      openssl
+      dbus
+    ];
+
     yomu-server = rustPlatform.buildRustPackage {
       pname = "yomu-server";
       inherit version;
@@ -113,9 +127,55 @@
 
       meta.description = "yomu web frontend (static trunk dist)";
     };
+
+    # Desktop shell (same scheme as chaos-desktop): generate_context! bakes
+    # the web dist into the binary at compile time, so the yomu-web output
+    # is copied in place before cargo runs. wrapGAppsHook3 wires GSettings
+    # schemas + TLS (glib-networking), without which WebKitGTK apps crash or
+    # fail https at runtime.
+    yomu-desktop = rustPlatform.buildRustPackage {
+      pname = "yomu-desktop";
+      inherit version;
+      src = self;
+
+      cargoLock.lockFile = ./Cargo.lock;
+
+      cargoBuildFlags = ["-p" "yomu-shell"];
+      cargoTestFlags = ["-p" "yomu-shell"];
+
+      nativeBuildInputs = with pkgs; [pkg-config wrapGAppsHook3];
+      buildInputs = tauriLibs ++ [pkgs.glib-networking];
+
+      preBuild = ''
+        rm -rf crates/yomu-web/dist
+        cp -r ${yomu-web} crates/yomu-web/dist
+      '';
+
+      postInstall = ''
+        install -Dm644 crates/yomu-shell/icons/128x128.png \
+          $out/share/icons/hicolor/128x128/apps/yomu.png
+        install -Dm644 crates/yomu-shell/icons/32x32.png \
+          $out/share/icons/hicolor/32x32/apps/yomu.png
+        mkdir -p $out/share/applications
+        cat > $out/share/applications/yomu.desktop <<INI
+        [Desktop Entry]
+        Name=yomu
+        Comment=Manga and webtoon library and reader
+        Exec=yomu-shell
+        Icon=yomu
+        Type=Application
+        Categories=Utility;
+        INI
+      '';
+
+      meta = {
+        description = "yomu desktop shell (Tauri)";
+        mainProgram = "yomu-shell";
+      };
+    };
   in {
     packages.${system} = {
-      inherit yomu-server yomu-web;
+      inherit yomu-server yomu-web yomu-desktop;
       default = yomu-server;
     };
 
@@ -154,18 +214,7 @@
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
 
-        buildInputs = with pkgs; [
-          gtk3
-          webkitgtk_4_1
-          libsoup_3
-          openssl
-          glib
-          cairo
-          pango
-          gdk-pixbuf
-          atk
-          librsvg
-        ];
+        buildInputs = tauriLibs;
       };
 
       # Android build of the shell: `nix develop .#android`, then

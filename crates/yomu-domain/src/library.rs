@@ -62,6 +62,10 @@ pub struct Chapter {
     /// Known once pages have been listed (on download or first live read).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_count: Option<u32>,
+    /// Read mark for the requesting user (bulk-marked or auto-marked as the
+    /// reading position moves past the chapter).
+    #[serde(default)]
+    pub read: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

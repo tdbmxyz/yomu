@@ -305,19 +305,23 @@ impl Db {
         rows.into_iter().map(Chapter::try_from).collect()
     }
 
-    pub async fn mark_pending(&self, chapter_ids: &[Uuid]) -> Result<()> {
+    /// Queue chapters for download; already queued/downloaded ones are left
+    /// alone. Returns how many were actually (re)queued.
+    pub async fn mark_pending(&self, chapter_ids: &[Uuid]) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
+        let mut queued = 0;
         for id in chapter_ids {
-            sqlx::query(
+            let result = sqlx::query(
                 "UPDATE chapters SET download_state = 'pending', download_error = NULL
                  WHERE id = ? AND download_state IN ('none', 'failed')",
             )
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+            queued += result.rows_affected() as u32;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(queued)
     }
 
     pub async fn next_pending_download(&self) -> Result<Option<Chapter>> {
@@ -373,6 +377,70 @@ impl Db {
             }
         };
         Ok(result.rows_affected() > 0)
+    }
+
+    // ---- read marks ----
+
+    /// Mark chapters read for a user. Idempotent; unknown chapter ids are a
+    /// constraint error (the FK catches stale client state).
+    pub async fn mark_read(&self, user_id: Uuid, chapter_ids: &[Uuid]) -> Result<u32> {
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
+        let mut affected = 0;
+        for id in chapter_ids {
+            let result = sqlx::query(
+                "INSERT INTO read_chapters (user_id, chapter_id, at) VALUES (?, ?, ?)
+                 ON CONFLICT (user_id, chapter_id) DO NOTHING",
+            )
+            .bind(user_id.to_string())
+            .bind(id.to_string())
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                    DbError::Constraint(format!("unknown chapter {id}"))
+                }
+                _ => DbError::Sqlx(e),
+            })?;
+            affected += result.rows_affected() as u32;
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
+
+    pub async fn mark_unread(&self, user_id: Uuid, chapter_ids: &[Uuid]) -> Result<u32> {
+        let mut tx = self.pool.begin().await?;
+        let mut affected = 0;
+        for id in chapter_ids {
+            let result =
+                sqlx::query("DELETE FROM read_chapters WHERE user_id = ? AND chapter_id = ?")
+                    .bind(user_id.to_string())
+                    .bind(id.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+            affected += result.rows_affected() as u32;
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
+
+    /// Ids of a manga's chapters the user has read.
+    pub async fn read_ids(
+        &self,
+        user_id: Uuid,
+        manga_id: Uuid,
+    ) -> Result<std::collections::HashSet<Uuid>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT r.chapter_id FROM read_chapters r
+             JOIN chapters c ON c.id = r.chapter_id
+             WHERE r.user_id = ? AND c.manga_id = ?",
+        )
+        .bind(user_id.to_string())
+        .bind(manga_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(parse_uuid).collect()
     }
 
     pub async fn set_page_count(&self, id: Uuid, page_count: u32) -> Result<()> {
@@ -775,6 +843,8 @@ impl TryFrom<ChapterRow> for Chapter {
             fetched_at: row.fetched_at,
             download,
             page_count: row.page_count.map(|c| c as u32),
+            // Per-user; filled at the API layer from `read_ids`.
+            read: false,
         })
     }
 }
@@ -1091,6 +1161,51 @@ mod tests {
         let finished = db.set_category_update("finished", true).await.unwrap();
         assert!(finished.update_enabled);
         assert_eq!(db.list_manga_for_update().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_marks_are_per_user_and_idempotent() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details(
+                    "m1",
+                    &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c3", Some(3.0))],
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let ids: Vec<Uuid> = chapters.iter().map(|c| c.id).collect();
+
+        assert_eq!(db.mark_read(SHARED, &ids[..2]).await.unwrap(), 2);
+        // Re-marking is a no-op, not an error or a double count.
+        assert_eq!(db.mark_read(SHARED, &ids[..2]).await.unwrap(), 0);
+        let read = db.read_ids(SHARED, manga.id).await.unwrap();
+        assert_eq!(read.len(), 2);
+        assert!(read.contains(&ids[0]) && read.contains(&ids[1]));
+
+        // Marks are per user.
+        let alice = db
+            .upsert_oidc_user("sub-1", "alice", "Alice")
+            .await
+            .unwrap();
+        assert!(db.read_ids(alice.id, manga.id).await.unwrap().is_empty());
+
+        assert_eq!(db.mark_unread(SHARED, &ids[..1]).await.unwrap(), 1);
+        assert_eq!(db.read_ids(SHARED, manga.id).await.unwrap().len(), 1);
+
+        // Unknown chapters are a constraint error, not a silent skip.
+        assert!(matches!(
+            db.mark_read(SHARED, &[Uuid::from_u128(42)]).await,
+            Err(DbError::Constraint(_))
+        ));
+
+        // Marks go with the manga.
+        db.delete_manga(manga.id).await.unwrap();
+        assert!(db.read_ids(SHARED, manga.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

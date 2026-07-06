@@ -4,10 +4,11 @@
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    AddMangaRequest, ApiErrorBody, BrowseSort, Category, Chapter, EventsResponse, HealthResponse,
-    Manga, MangaDetailResponse, MangaSummary, MangaWithPosition, MeResponse, PagesResponse,
-    Position, PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest,
-    SourceInfo, SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
+    AddMangaRequest, ApiErrorBody, BrowseSort, BulkChaptersResponse, Category, Chapter,
+    DownloadChaptersRequest, EventsResponse, HealthResponse, Manga, MangaDetailResponse,
+    MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse, PagesResponse, Position,
+    PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
+    SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -161,6 +162,29 @@ impl YomuClient {
         let req = self
             .http
             .post(self.url(&format!("api/v1/chapters/{id}/download"))?);
+        self.send(req).await
+    }
+
+    /// Queue several chapters; the server's single download worker drains
+    /// them with the source's politeness delay.
+    pub async fn download_chapters(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+        let req =
+            self.http
+                .post(self.url("api/v1/chapters/download")?)
+                .json(&DownloadChaptersRequest {
+                    chapter_ids: ids.to_vec(),
+                });
+        self.send(req).await
+    }
+
+    pub async fn mark_chapters(&self, ids: &[Uuid], read: bool) -> Result<BulkChaptersResponse> {
+        let req = self
+            .http
+            .post(self.url("api/v1/chapters/mark")?)
+            .json(&MarkChaptersRequest {
+                chapter_ids: ids.to_vec(),
+                read,
+            });
         self.send(req).await
     }
 

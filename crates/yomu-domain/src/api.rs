@@ -51,8 +51,7 @@ pub struct MangaWithPosition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
     pub chapter_count: u32,
-    /// Chapters after the current position in reading order — all of them
-    /// when nothing has been read yet.
+    /// Chapters the user hasn't read (no read mark).
     #[serde(default)]
     pub unread_count: u32,
     /// When the most recently fetched chapter arrived (drives the client's
@@ -125,6 +124,28 @@ pub struct SourceSearchResults {
     pub results: Vec<crate::MangaSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Queue several chapters for server download (`POST /chapters/download`).
+/// The download worker drains them one by one with the source's politeness
+/// delay, so a large batch is slow by design, not hammering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadChaptersRequest {
+    pub chapter_ids: Vec<Uuid>,
+}
+
+/// Mark chapters read or unread for the current user
+/// (`POST /chapters/mark`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkChaptersRequest {
+    pub chapter_ids: Vec<Uuid>,
+    pub read: bool,
+}
+
+/// Outcome of a bulk chapter action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkChaptersResponse {
+    pub affected: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

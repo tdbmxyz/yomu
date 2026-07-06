@@ -38,11 +38,51 @@ pub async fn set_position(
         at: Utc::now(),
     };
     state.db.append_event(user.id, &event).await?;
+    auto_mark_read(&state, user.id, std::slice::from_ref(&event)).await;
     Ok(Json(Position {
         chapter_id: event.chapter_id,
         page: event.page,
         at: event.at,
     }))
+}
+
+/// Fold position events into read marks: everything strictly before the
+/// event's chapter in reading order is read, and the chapter itself once
+/// its last known page is reached. Only ever adds marks — re-reading an old
+/// chapter doesn't unmark later ones, and explicit "mark unread" survives
+/// unrelated reading. Best-effort: a failure here must not fail the
+/// position write.
+async fn auto_mark_read(state: &AppState, user_id: Uuid, events: &[ProgressEvent]) {
+    let mut by_manga: std::collections::HashMap<Uuid, Vec<&ProgressEvent>> = Default::default();
+    for event in events {
+        by_manga.entry(event.manga_id).or_default().push(event);
+    }
+    for (manga_id, events) in by_manga {
+        // Deleted manga: no chapters, nothing to mark.
+        let Ok(chapters) = state.db.list_chapters(manga_id).await else {
+            continue;
+        };
+        let mut ids = std::collections::HashSet::new();
+        for event in events {
+            let Some(idx) = chapters.iter().position(|c| c.id == event.chapter_id) else {
+                continue;
+            };
+            ids.extend(chapters[..idx].iter().map(|c| c.id));
+            if chapters[idx]
+                .page_count
+                .is_some_and(|n| event.page + 1 >= n)
+            {
+                ids.insert(event.chapter_id);
+            }
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        let ids: Vec<Uuid> = ids.into_iter().collect();
+        if let Err(err) = state.db.mark_read(user_id, &ids).await {
+            tracing::warn!(%err, %manga_id, "auto-marking chapters read");
+        }
+    }
 }
 
 /// Offline client pushing its journal on reconnect. Idempotent: events are
@@ -58,6 +98,7 @@ pub async fn push_events(
     if skipped > 0 {
         tracing::debug!(accepted, skipped, "journal push skipped stale events");
     }
+    auto_mark_read(&state, user.id, &req.events).await;
     Ok(Json(PushEventsResponse { accepted, skipped }))
 }
 

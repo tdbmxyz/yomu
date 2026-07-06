@@ -47,16 +47,13 @@ pub async fn list(
             Some(user) => state.db.latest_position(user.id, manga.id).await?,
             None => None,
         };
-        // Reading order (same as `detail`), so "after the position" is
-        // well-defined for the unread count.
         let chapters = state.db.list_chapters(manga.id).await?;
         let chapter_count = chapters.len() as u32;
-        let read_through = position.as_ref().and_then(|p| {
-            chapters
-                .iter()
-                .position(|c| c.id == p.chapter_id)
-                .map(|i| i as u32 + 1)
-        });
+        let read = match &user {
+            Some(user) => state.db.read_ids(user.id, manga.id).await?,
+            None => Default::default(),
+        };
+        let unread_count = chapters.iter().filter(|c| !read.contains(&c.id)).count() as u32;
         let position_chapter_title = position.as_ref().and_then(|p| {
             chapters
                 .iter()
@@ -67,7 +64,7 @@ pub async fn list(
             manga,
             position,
             chapter_count,
-            unread_count: chapter_count - read_through.unwrap_or(0),
+            unread_count,
             latest_chapter_at: chapters.iter().map(|c| c.fetched_at).max(),
             position_chapter_title,
         });
@@ -81,11 +78,17 @@ pub async fn detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<MangaDetailResponse>, ApiError> {
     let manga = state.db.get_manga(id).await?;
-    let chapters = state.db.list_chapters(id).await?;
+    let mut chapters = state.db.list_chapters(id).await?;
     let position = match &user {
         Some(user) => state.db.latest_position(user.id, id).await?,
         None => None,
     };
+    if let Some(user) = &user {
+        let read = state.db.read_ids(user.id, id).await?;
+        for chapter in &mut chapters {
+            chapter.read = read.contains(&chapter.id);
+        }
+    }
     Ok(Json(MangaDetailResponse {
         manga,
         chapters,

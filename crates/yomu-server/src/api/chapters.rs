@@ -4,9 +4,13 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use url::Url;
 use uuid::Uuid;
-use yomu_domain::{Chapter, DownloadState, PagesResponse};
+use yomu_domain::{
+    BulkChaptersResponse, Chapter, DownloadChaptersRequest, DownloadState, MarkChaptersRequest,
+    PagesResponse,
+};
 
 use super::ApiError;
+use crate::auth::CurrentUser;
 use crate::state::AppState;
 
 /// Enqueue a chapter for download to the server's disk.
@@ -24,6 +28,38 @@ pub async fn download(
     state.db.mark_pending(&[id]).await?;
     state.download_notify.notify_one();
     Ok((StatusCode::ACCEPTED, Json(state.db.get_chapter(id).await?)))
+}
+
+/// Enqueue a batch of chapters. They join the same single-worker queue as
+/// individual downloads, which drains sequentially with the source's
+/// politeness delay between requests — a big selection downloads slowly on
+/// purpose.
+pub async fn download_many(
+    State(state): State<AppState>,
+    Json(req): Json<DownloadChaptersRequest>,
+) -> Result<(StatusCode, Json<BulkChaptersResponse>), ApiError> {
+    let queued = state.db.mark_pending(&req.chapter_ids).await?;
+    if queued > 0 {
+        state.download_notify.notify_one();
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BulkChaptersResponse { affected: queued }),
+    ))
+}
+
+/// Mark chapters read or unread for the current user.
+pub async fn mark(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<MarkChaptersRequest>,
+) -> Result<Json<BulkChaptersResponse>, ApiError> {
+    let affected = if req.read {
+        state.db.mark_read(user.id, &req.chapter_ids).await?
+    } else {
+        state.db.mark_unread(user.id, &req.chapter_ids).await?
+    };
+    Ok(Json(BulkChaptersResponse { affected }))
 }
 
 /// Page count for the reader. For non-downloaded chapters this resolves the
