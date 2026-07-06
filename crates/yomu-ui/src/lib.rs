@@ -47,7 +47,8 @@ pub fn App(config: AppConfig) -> impl IntoView {
                     <span class="brand">"yomu"</span>
                     <A href="/">"Home"</A>
                     <A href="/library">"Library"</A>
-                    <A href="/search">"Browse"</A>
+                    <A href="/sources">"Sources"</A>
+                    <A href="/search">"Search"</A>
                     <A href="/more">"More"</A>
                     <span class="grow"></span>
                     <Account/>
@@ -57,6 +58,8 @@ pub fn App(config: AppConfig) -> impl IntoView {
                         <Route path=path!("/") view=pages::Home/>
                         <Route path=path!("/library") view=pages::Library/>
                         <Route path=path!("/search") view=pages::Search/>
+                        <Route path=path!("/sources") view=pages::Sources/>
+                        <Route path=path!("/sources/:source") view=pages::SourceCatalog/>
                         <Route path=path!("/more") view=pages::More/>
                         <Route path=path!("/manga/:id") view=pages::MangaPage/>
                         <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
@@ -67,7 +70,8 @@ pub fn App(config: AppConfig) -> impl IntoView {
                 <nav class="tabbar">
                     <A href="/"><span class="tab-icon">"⌂"</span>"Home"</A>
                     <A href="/library"><span class="tab-icon">"▦"</span>"Library"</A>
-                    <A href="/search"><span class="tab-icon">"⌕"</span>"Browse"</A>
+                    <A href="/sources"><span class="tab-icon">"⛁"</span>"Sources"</A>
+                    <A href="/search"><span class="tab-icon">"⌕"</span>"Search"</A>
                     <A href="/more"><span class="tab-icon">"≡"</span>"More"</A>
                 </nav>
             </Router>

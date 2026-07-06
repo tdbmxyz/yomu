@@ -512,6 +512,52 @@ button.danger:hover {
   margin: 1rem 0 0.5rem;
 }
 
+/* ---- sources tab ---- */
+
+.source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.source-card {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.8rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+
+a.source-card:hover {
+  border-color: var(--accent);
+}
+
+.source-card-name {
+  font-weight: 600;
+}
+
+.source-card-host,
+.source-card-sorts {
+  font-size: 0.85rem;
+}
+
+.source-card-sorts {
+  color: var(--accent);
+}
+
+.source-card .muted.source-card-sorts {
+  color: var(--muted);
+}
+
+.catalog-back {
+  text-decoration: none;
+  margin-right: 0.25rem;
+}
+
 .result-list,
 .chapter-list {
   list-style: none;
@@ -856,6 +902,9 @@ body:has(.reader-overlay.flow) main {
 .reader-overlay.flow {
   position: static;
   min-height: 100dvh;
+  /* the reader compensates the scroll itself when chapters are prepended,
+     evicted or grow above the viewport; native anchoring would double it */
+  overflow-anchor: none;
 }
 
 .reader-overlay.flow .reader-chrome,
@@ -868,6 +917,13 @@ body:has(.reader-overlay.flow) main {
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+.strip-chapter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .strip-chapter-break {

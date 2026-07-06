@@ -1,9 +1,9 @@
-//! Browse: one search box across every source at once, and query-less
-//! catalog browsing (popular / latest) per source.
+//! Search: one search box across every source at once. Query-less catalog
+//! browsing lives in the Sources tab (see `sources.rs`).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use yomu_domain::{AddMangaRequest, BrowseSort, MangaSummary, SourceInfo};
+use yomu_domain::{AddMangaRequest, MangaSummary};
 
 use crate::use_client;
 
@@ -48,7 +48,7 @@ pub fn Search() -> impl IntoView {
 
     view! {
         <section class="browse">
-            <h2>"Browse"</h2>
+            <h2>"Search"</h2>
             <form class="search-form" on:submit=submit>
                 <input
                     type="search"
@@ -117,7 +117,7 @@ pub fn Search() -> impl IntoView {
                 }
                 Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
                 Some(Ok(None)) => {
-                    // browse mode
+                    // nothing searched yet
                     match sources.get() {
                         Some(Ok(list)) if list.is_empty() => {
                             view! {
@@ -129,7 +129,15 @@ pub fn Search() -> impl IntoView {
                             }
                                 .into_any()
                         }
-                        Some(Ok(list)) => view! { <SourceBrowser list status/> }.into_any(),
+                        Some(Ok(_)) => {
+                            view! {
+                                <p class="muted">
+                                    "Search every source at once, or browse their catalogs from the "
+                                    <a href="/sources">"Sources"</a> " tab."
+                                </p>
+                            }
+                                .into_any()
+                        }
                         Some(Err(err)) => {
                             view! { <p class="error">{err.to_string()}</p> }.into_any()
                         }
@@ -142,169 +150,10 @@ pub fn Search() -> impl IntoView {
     }
 }
 
-/// Query-less catalog browsing: pick a source, pick a listing, page through
-/// its catalog.
+/// Cover grid of source results, each with track actions. Shared with the
+/// Sources tab's catalog page.
 #[component]
-fn SourceBrowser(list: Vec<SourceInfo>, status: RwSignal<Option<String>>) -> impl IntoView {
-    let browsable: Vec<SourceInfo> = list.into_iter().filter(|s| !s.browse.is_empty()).collect();
-    if browsable.is_empty() {
-        return view! {
-            <p class="muted">
-                "No source offers catalog browsing — add a " <code>"[browse.popular]"</code>
-                " or " <code>"[browse.latest]"</code>
-                " listing to a source definition, or use the search above."
-            </p>
-        }
-        .into_any();
-    }
-
-    let first = browsable[0].clone();
-    let selected = RwSignal::new(first.id.clone());
-    let sort = RwSignal::new(*first.browse.first().unwrap_or(&BrowseSort::Popular));
-    let sorts_of = {
-        let browsable = browsable.clone();
-        move |id: &str| {
-            browsable
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| s.browse.clone())
-                .unwrap_or_default()
-        }
-    };
-
-    let items = RwSignal::new(Vec::<MangaSummary>::new());
-    let next_page = StoredValue::new(1u32);
-    let loading = RwSignal::new(false);
-    let exhausted = RwSignal::new(false);
-
-    let load_more = {
-        let client = use_client();
-        move || {
-            if loading.get_untracked() || exhausted.get_untracked() {
-                return;
-            }
-            loading.set(true);
-            let client = client.clone();
-            let source = selected.get_untracked();
-            let requested_sort = sort.get_untracked();
-            let page = next_page.get_value();
-            spawn_local(async move {
-                match client.browse(&source, requested_sort, page).await {
-                    Ok(batch) => {
-                        // stale answer (source/sort switched meanwhile)?
-                        if selected.get_untracked() == source
-                            && sort.get_untracked() == requested_sort
-                        {
-                            if batch.is_empty() {
-                                exhausted.set(true);
-                            } else {
-                                next_page.set_value(page + 1);
-                                items.update(|all| all.extend(batch));
-                            }
-                        }
-                    }
-                    Err(err) => status.set(Some(format!("Browse failed: {err}"))),
-                }
-                loading.set(false);
-            });
-        }
-    };
-
-    // Reset and load the first page whenever the source or listing changes.
-    Effect::new({
-        let load_more = load_more.clone();
-        move |_| {
-            selected.track();
-            sort.track();
-            items.set(Vec::new());
-            next_page.set_value(1);
-            exhausted.set(false);
-            load_more();
-        }
-    });
-
-    let sorts_view = {
-        let sorts_of = sorts_of.clone();
-        move || {
-            sorts_of(&selected.get())
-                .into_iter()
-                .map(|s| {
-                    view! {
-                        <button
-                            class:active=move || sort.get() == s
-                            on:click=move |_| sort.set(s)
-                        >
-                            {s.label()}
-                        </button>
-                    }
-                })
-                .collect_view()
-        }
-    };
-
-    view! {
-        <div class="category-tabs">
-            {browsable
-                .iter()
-                .map(|source| {
-                    let id = source.id.clone();
-                    let is_active = {
-                        let id = id.clone();
-                        move || selected.get() == id
-                    };
-                    let switch = {
-                        let sorts_of = sorts_of.clone();
-                        let id = id.clone();
-                        move |_| {
-                            let sorts = sorts_of(&id);
-                            if !sorts.contains(&sort.get_untracked())
-                                && let Some(first) = sorts.first()
-                            {
-                                sort.set(*first);
-                            }
-                            selected.set(id.clone());
-                        }
-                    };
-                    view! {
-                        <button class:active=is_active on:click=switch>
-                            {source.name.clone()}
-                        </button>
-                    }
-                })
-                .collect_view()}
-            <span class="grow"></span>
-            {sorts_view}
-        </div>
-        {move || {
-            let list = items.get();
-            view! {
-                <SummaryGrid items=list source=selected.get_untracked() status/>
-            }
-        }}
-        <p class="browse-more">
-            {move || {
-                if exhausted.get() && items.get().is_empty() {
-                    view! { <span class="muted">"Nothing listed."</span> }.into_any()
-                } else if exhausted.get() {
-                    view! { <span class="muted">"End of the listing."</span> }.into_any()
-                } else {
-                    let load = load_more.clone();
-                    view! {
-                        <button disabled=move || loading.get() on:click=move |_| load()>
-                            {move || if loading.get() { "Loading…" } else { "Load more" }}
-                        </button>
-                    }
-                        .into_any()
-                }
-            }}
-        </p>
-    }
-    .into_any()
-}
-
-/// Cover grid of source results, each with track actions.
-#[component]
-fn SummaryGrid(
+pub(crate) fn SummaryGrid(
     items: Vec<MangaSummary>,
     source: String,
     status: RwSignal<Option<String>>,

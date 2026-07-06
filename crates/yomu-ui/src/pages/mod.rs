@@ -4,6 +4,7 @@ mod manga;
 mod more;
 mod reader;
 mod search;
+mod sources;
 
 pub use home::Home;
 pub use library::Library;
@@ -11,6 +12,7 @@ pub use manga::MangaPage;
 pub use more::More;
 pub use reader::Reader;
 pub use search::Search;
+pub use sources::{SourceCatalog, Sources};
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;

@@ -63,8 +63,8 @@ pub fn Library() -> impl IntoView {
                 Some(Ok(list)) if list.is_empty() => {
                     view! {
                         <p class="muted">
-                            "Nothing tracked yet — use " <a href="/search">"Add manga"</a>
-                            " to search a source."
+                            "Nothing tracked yet — use " <a href="/search">"Search"</a>
+                            " or browse the " <a href="/sources">"Sources"</a> " catalogs."
                         </p>
                     }
                         .into_any()

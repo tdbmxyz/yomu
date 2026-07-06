@@ -92,6 +92,11 @@ fn ReaderInner() -> impl IntoView {
     // stays the routed chapter).
     let current_chapter = RwSignal::new(chapter_id);
     let segments: RwSignal<Vec<(uuid::Uuid, u32)>> = RwSignal::new(Vec::new());
+    // Page counts of every chapter the strip has visited: segments evicted
+    // to keep the DOM small re-enter without re-asking the server (their
+    // images come back through the browser HTTP cache).
+    let page_counts: StoredValue<std::collections::HashMap<uuid::Uuid, u32>> =
+        StoredValue::new(std::collections::HashMap::new());
 
     let client = use_client();
     let pages = LocalResource::new({
@@ -541,6 +546,9 @@ fn ReaderInner() -> impl IntoView {
                             if segments.with_untracked(|s| s.is_empty()) {
                                 segments.set(vec![(chapter_id, meta.page_count)]);
                             }
+                            page_counts.update_value(|counts| {
+                                counts.insert(chapter_id, meta.page_count);
+                            });
                             let strip = NodeRef::<leptos::html::Div>::new();
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
@@ -585,6 +593,12 @@ fn ReaderInner() -> impl IntoView {
                                 let Some(next) = chapters.get(index + 1).map(|c| c.id) else {
                                     return; // already at the last chapter
                                 };
+                                if let Some(count) =
+                                    page_counts.with_value(|counts| counts.get(&next).copied())
+                                {
+                                    segments.update(|s| s.push((next, count)));
+                                    return;
+                                }
                                 loading_next.set_value(true);
                                 let client = client_next.clone();
                                 spawn_local(async move {
@@ -593,9 +607,82 @@ fn ReaderInner() -> impl IntoView {
                                         Err(_) => offline::device_chapter_pages(next),
                                     };
                                     if let Some(count) = count {
+                                        page_counts.update_value(|counts| {
+                                            counts.insert(next, count);
+                                        });
                                         segments.update(|s| s.push((next, count)));
                                     }
                                     loading_next.set_value(false);
+                                });
+                            };
+                            // Scrolling up past the strip's start pulls the
+                            // previous chapter in *above* the viewport, so
+                            // the scroll position must be pushed down by the
+                            // new segment's height to keep the view still.
+                            // Native scroll anchoring would do the same
+                            // (doubling the shift where supported), so it is
+                            // disabled on the strip (styles.css) and all
+                            // compensation is done by hand.
+                            let loading_prev = StoredValue::new(false);
+                            let client_prev = client_vertical.clone();
+                            let load_prev = move || {
+                                if loading_prev.get_value() {
+                                    return;
+                                }
+                                let Some(chapters) =
+                                    detail.get_untracked().and_then(|r| r.ok()).map(|d| d.chapters)
+                                else {
+                                    return;
+                                };
+                                let Some(first) =
+                                    segments.with_untracked(|s| s.first().map(|(id, _)| *id))
+                                else {
+                                    return;
+                                };
+                                let Some(index) = chapters.iter().position(|c| c.id == first)
+                                else {
+                                    return;
+                                };
+                                let Some(prev) = index.checked_sub(1).map(|i| chapters[i].id)
+                                else {
+                                    return; // already at the first chapter
+                                };
+                                let prepend = move |count: u32| {
+                                    segments.update(|s| s.insert(0, (prev, count)));
+                                    request_animation_frame(move || {
+                                        let Some(el) = strip.get_untracked() else { return };
+                                        if let Ok(Some(wrap)) = el.query_selector(&format!(
+                                            ".strip-chapter[data-chapter='{prev}']"
+                                        )) && let Ok(wrap) =
+                                            wrap.dyn_into::<web_sys::HtmlElement>()
+                                        {
+                                            window().scroll_by_with_x_and_y(
+                                                0.0,
+                                                wrap.offset_height() as f64,
+                                            );
+                                        }
+                                    });
+                                };
+                                if let Some(count) =
+                                    page_counts.with_value(|counts| counts.get(&prev).copied())
+                                {
+                                    prepend(count);
+                                    return;
+                                }
+                                loading_prev.set_value(true);
+                                let client = client_prev.clone();
+                                spawn_local(async move {
+                                    let count = match client.chapter_pages(prev).await {
+                                        Ok(meta) => Some(meta.page_count),
+                                        Err(_) => offline::device_chapter_pages(prev),
+                                    };
+                                    if let Some(count) = count {
+                                        page_counts.update_value(|counts| {
+                                            counts.insert(prev, count);
+                                        });
+                                        prepend(count);
+                                    }
+                                    loading_prev.set_value(false);
                                 });
                             };
                             let scroll_handle = window_event_listener(
@@ -640,6 +727,8 @@ fn ReaderInner() -> impl IntoView {
                                         && (chapter != current_chapter.get_untracked()
                                             || p != page.get_untracked())
                                     {
+                                        let chapter_changed =
+                                            chapter != current_chapter.get_untracked();
                                         current_chapter.set(chapter);
                                         page.set(p);
                                         report(chapter, p);
@@ -656,12 +745,72 @@ fn ReaderInner() -> impl IntoView {
                                                 )),
                                             );
                                         }
+                                        // Bound the strip to two chapters
+                                        // either side of the one being read;
+                                        // evicted chapters come back through
+                                        // load_prev/load_next and the browser
+                                        // HTTP cache when scrolled towards
+                                        // again. Segments removed *above* the
+                                        // viewport shift it up, so their
+                                        // measured height is scrolled away.
+                                        if chapter_changed {
+                                            let (front, back) =
+                                                segments.with_untracked(|s| {
+                                                    let Some(idx) = s
+                                                        .iter()
+                                                        .position(|(id, _)| *id == chapter)
+                                                    else {
+                                                        return (Vec::new(), Vec::new());
+                                                    };
+                                                    let evicted = |i: usize| {
+                                                        s[i].0
+                                                    };
+                                                    let front: Vec<uuid::Uuid> = (0..idx
+                                                        .saturating_sub(2))
+                                                        .map(evicted)
+                                                        .collect();
+                                                    let back: Vec<uuid::Uuid> =
+                                                        (idx + 3..s.len()).map(evicted).collect();
+                                                    (front, back)
+                                                });
+                                            if !front.is_empty() || !back.is_empty() {
+                                                let mut above = 0.0;
+                                                for id in &front {
+                                                    if let Ok(Some(wrap)) = el.query_selector(
+                                                        &format!(
+                                                            ".strip-chapter[data-chapter='{id}']"
+                                                        ),
+                                                    ) && let Ok(wrap) =
+                                                        wrap.dyn_into::<web_sys::HtmlElement>()
+                                                    {
+                                                        above += wrap.offset_height() as f64;
+                                                    }
+                                                }
+                                                let drop: std::collections::HashSet<uuid::Uuid> =
+                                                    front.into_iter().chain(back).collect();
+                                                segments.update(|s| {
+                                                    s.retain(|(id, _)| !drop.contains(id));
+                                                });
+                                                if above > 0.0 {
+                                                    request_animation_frame(move || {
+                                                        window()
+                                                            .scroll_by_with_x_and_y(0.0, -above);
+                                                    });
+                                                }
+                                            }
+                                        }
                                     }
+                                    let rect = el.get_bounding_client_rect();
                                     // near the bottom: extend the strip
-                                    if el.get_bounding_client_rect().bottom()
-                                        < viewport * 3.0
-                                    {
+                                    if rect.bottom() < viewport * 3.0 {
                                         load_next();
+                                    }
+                                    // near the top (and actually reading, not
+                                    // the programmatic positioning scroll):
+                                    // pull the previous chapter in
+                                    if interacted.get_untracked() && rect.top() > -viewport * 3.0
+                                    {
+                                        load_prev();
                                     }
                                 },
                             );
@@ -677,11 +826,9 @@ fn ReaderInner() -> impl IntoView {
                                     on:click=move |_| chrome.update(|c| *c = !*c)
                                 >
                                     <For
-                                        each=move || {
-                                            segments.get().into_iter().enumerate().collect::<Vec<_>>()
-                                        }
-                                        key=|(_, (chapter, _))| *chapter
-                                        children=move |(i, (chapter, count))| {
+                                        each=move || segments.get()
+                                        key=|(chapter, _)| *chapter
+                                        children=move |(chapter, count)| {
                                             let title = move || {
                                                 detail
                                                     .get()
@@ -694,6 +841,41 @@ fn ReaderInner() -> impl IntoView {
                                                     .map(|c| c.title)
                                                     .unwrap_or_default()
                                             };
+                                            // A lazily loaded image above the
+                                            // viewport grows from its
+                                            // placeholder height when it
+                                            // arrives; shift the scroll by the
+                                            // difference so the view doesn't
+                                            // jump while reading backwards.
+                                            let on_load = move |ev: leptos::ev::Event| {
+                                                let Some(img) = ev
+                                                    .target()
+                                                    .and_then(|t| {
+                                                        t.dyn_into::<web_sys::HtmlElement>().ok()
+                                                    })
+                                                else {
+                                                    return;
+                                                };
+                                                let rect = img.get_bounding_client_rect();
+                                                if rect.top() >= 0.0 {
+                                                    return;
+                                                }
+                                                let placeholder = window()
+                                                    .get_computed_style(&img)
+                                                    .ok()
+                                                    .flatten()
+                                                    .and_then(|s| {
+                                                        s.get_property_value("min-height").ok()
+                                                    })
+                                                    .and_then(|v| {
+                                                        v.strip_suffix("px")?.parse::<f64>().ok()
+                                                    })
+                                                    .unwrap_or(0.0);
+                                                let delta = rect.height() - placeholder;
+                                                if delta.abs() > 1.0 {
+                                                    window().scroll_by_with_x_and_y(0.0, delta);
+                                                }
+                                            };
                                             let images = (0..count)
                                                 .map(|n| {
                                                     let src = page_source(&client, chapter, n);
@@ -703,26 +885,27 @@ fn ReaderInner() -> impl IntoView {
                                                             src=src
                                                             data-chapter=chapter.to_string()
                                                             data-page=n.to_string()
-                                                            loading=if i == 0 && n < 3 {
+                                                            loading=if chapter == chapter_id
+                                                                && n < 3
+                                                            {
                                                                 "eager"
                                                             } else {
                                                                 "lazy"
                                                             }
+                                                            on:load=on_load
                                                             alt=""
                                                         />
                                                     }
                                                 })
                                                 .collect_view();
                                             view! {
-                                                {(i > 0)
-                                                    .then(|| {
-                                                        view! {
-                                                            <div class="strip-chapter-break">
-                                                                {title}
-                                                            </div>
-                                                        }
-                                                    })}
-                                                {images}
+                                                <div
+                                                    class="strip-chapter"
+                                                    data-chapter=chapter.to_string()
+                                                >
+                                                    <div class="strip-chapter-break">{title}</div>
+                                                    {images}
+                                                </div>
                                             }
                                         }
                                     />
