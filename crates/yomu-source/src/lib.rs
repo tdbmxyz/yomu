@@ -13,7 +13,7 @@ pub mod selector;
 
 use bytes::Bytes;
 use url::Url;
-use yomu_domain::{MangaDetails, MangaSummary};
+use yomu_domain::{BrowseSort, MangaDetails, MangaSummary};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
@@ -41,6 +41,21 @@ pub trait Source: Send + Sync {
     fn base_url(&self) -> &Url;
 
     async fn search(&self, query: &str) -> Result<Vec<MangaSummary>>;
+
+    /// Catalog listings this source can [`Source::browse`]. Empty (the
+    /// default) means the source is search-only.
+    fn browse_sorts(&self) -> Vec<BrowseSort> {
+        Vec::new()
+    }
+
+    /// A query-less catalog listing, `page` starting at 1. An empty page
+    /// means the listing is exhausted.
+    async fn browse(&self, sort: BrowseSort, page: u32) -> Result<Vec<MangaSummary>> {
+        let _ = (sort, page);
+        Err(SourceError::Definition(
+            "this source has no browse listings".into(),
+        ))
+    }
 
     /// Details + chapter list for a manga key returned by `search`.
     async fn manga(&self, key: &str) -> Result<MangaDetails>;

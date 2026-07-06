@@ -463,12 +463,53 @@ button.danger:hover {
 .theme-choice[data-swatch="phosphor"] .swatch { background: #0f1210; }
 .theme-choice[data-swatch="phosphor"] .swatch-accent { background: #7fd962; }
 
-/* ---- search ---- */
+/* ---- browse / search ---- */
 
 .search-form {
   display: flex;
+  /* phones: input + buttons must never force a horizontal scroll */
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 1rem;
+}
+
+.search-form input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.source-group {
+  margin-bottom: 1.5rem;
+}
+
+.browse-card .manga-title {
+  font-size: 0.8rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.cover-empty {
+  display: block;
+}
+
+.browse-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.browse-actions button {
+  flex: 1;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.75rem;
+  min-width: 0;
+}
+
+.browse-more {
+  text-align: center;
+  margin: 1rem 0 0.5rem;
 }
 
 .result-list,

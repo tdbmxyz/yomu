@@ -329,6 +329,19 @@ impl Source for LocalSource {
         &self.base
     }
 
+    fn browse_sorts(&self) -> Vec<yomu_domain::BrowseSort> {
+        vec![yomu_domain::BrowseSort::Latest]
+    }
+
+    /// "Browsing" the local disk is the unfiltered series list; it fits on
+    /// one page.
+    async fn browse(&self, _sort: yomu_domain::BrowseSort, page: u32) -> Result<Vec<MangaSummary>> {
+        if page > 1 {
+            return Ok(Vec::new());
+        }
+        self.search("").await
+    }
+
     async fn search(&self, query: &str) -> Result<Vec<MangaSummary>> {
         let mut out = Vec::new();
         for series in self.list_series(query).await? {

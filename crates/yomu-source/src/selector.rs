@@ -13,7 +13,7 @@ use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
 use url::Url;
-use yomu_domain::{ChapterRef, MangaDetails, MangaSummary};
+use yomu_domain::{BrowseSort, ChapterRef, MangaDetails, MangaSummary};
 
 use crate::{ImageData, Result, Source, SourceError};
 
@@ -32,6 +32,8 @@ pub struct SelectorSpec {
     pub referer: Option<String>,
 
     pub search: SearchSpec,
+    #[serde(default)]
+    pub browse: BrowseSpec,
     pub manga: MangaSpec,
     pub pages: PagesSpec,
 }
@@ -52,6 +54,34 @@ pub struct SearchSpec {
     pub title: Option<String>,
     /// Relative to item; must yield the manga page URL (the manga key).
     pub link: String,
+    #[serde(default)]
+    pub cover: Option<String>,
+}
+
+/// Query-less catalog listings (`[browse.popular]`, `[browse.latest]`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowseSpec {
+    #[serde(default)]
+    pub popular: Option<ListingSpec>,
+    #[serde(default)]
+    pub latest: Option<ListingSpec>,
+}
+
+/// One listing. Result selectors default to the `[search]` ones — most
+/// sites render listings and search results with the same cards.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingSpec {
+    /// URL template; `{base}` and `{page}` (1-based) are substituted. A
+    /// template without `{page}` only ever yields its first page.
+    pub url: String,
+    #[serde(default)]
+    pub item: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub link: Option<String>,
     #[serde(default)]
     pub cover: Option<String>,
 }
@@ -156,11 +186,21 @@ fn text_of(el: ElementRef) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// A compiled browse listing (URL template + result-card rules).
+struct CompiledListing {
+    url: String,
+    item: Selector,
+    title: Option<Rule>,
+    link: Rule,
+    cover: Option<Rule>,
+}
+
 struct CompiledSpec {
     search_item: Selector,
     search_title: Option<Rule>,
     search_link: Rule,
     search_cover: Option<Rule>,
+    listings: Vec<(BrowseSort, CompiledListing)>,
     manga_title: Option<Rule>,
     manga_description: Option<Rule>,
     manga_cover: Option<Rule>,
@@ -187,11 +227,31 @@ impl SelectorSource {
         };
         let rule_opt = |raw: &Option<String>| raw.as_deref().map(Rule::parse).transpose();
 
+        // Listing selectors default to the search ones: most sites render
+        // search results and catalog listings with the same cards.
+        let compile_listing = |listing: &ListingSpec| -> Result<CompiledListing> {
+            Ok(CompiledListing {
+                url: listing.url.clone(),
+                item: sel(listing.item.as_deref().unwrap_or(&spec.search.item))?,
+                title: rule_opt(&listing.title.clone().or_else(|| spec.search.title.clone()))?,
+                link: Rule::parse(listing.link.as_deref().unwrap_or(&spec.search.link))?,
+                cover: rule_opt(&listing.cover.clone().or_else(|| spec.search.cover.clone()))?,
+            })
+        };
+        let mut listings = Vec::new();
+        if let Some(listing) = &spec.browse.popular {
+            listings.push((BrowseSort::Popular, compile_listing(listing)?));
+        }
+        if let Some(listing) = &spec.browse.latest {
+            listings.push((BrowseSort::Latest, compile_listing(listing)?));
+        }
+
         let compiled = CompiledSpec {
             search_item: sel(&spec.search.item)?,
             search_title: rule_opt(&spec.search.title)?,
             search_link: Rule::parse(&spec.search.link)?,
             search_cover: rule_opt(&spec.search.cover)?,
+            listings,
             manga_title: rule_opt(&spec.manga.title)?,
             manga_description: rule_opt(&spec.manga.description)?,
             manga_cover: rule_opt(&spec.manga.cover)?,
@@ -220,6 +280,16 @@ impl SelectorSource {
                 spec.search.url
             ))
         })?;
+        // Same startup validation for the browse listing templates.
+        for (sort, listing) in &compiled.listings {
+            listing_url(&spec, &listing.url, 1).map_err(|_| {
+                SourceError::Definition(format!(
+                    "browse.{} url {:?} does not substitute into a valid URL",
+                    sort.key(),
+                    listing.url
+                ))
+            })?;
+        }
 
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(referer) = &spec.referer
@@ -245,35 +315,42 @@ impl SelectorSource {
     // ---- pure parsing (unit-tested against fixtures) ----
 
     pub fn parse_search(&self, html: &str, page_url: &Url) -> Result<Vec<MangaSummary>> {
-        let doc = Html::parse_document(html);
-        let mut out = Vec::new();
-        for item in doc.select(&self.compiled.search_item) {
-            let Some(link) = self.compiled.search_link.extract(item) else {
-                continue;
-            };
-            let Ok(url) = page_url.join(&link) else {
-                continue;
-            };
-            let title = self
-                .compiled
-                .search_title
-                .as_ref()
-                .and_then(|r| r.extract(item))
-                .or_else(|| text_of(item))
-                .unwrap_or_else(|| url.to_string());
-            let cover_url = self
-                .compiled
-                .search_cover
-                .as_ref()
-                .and_then(|r| r.extract(item))
-                .and_then(|c| page_url.join(&c).ok());
-            out.push(MangaSummary {
-                key: url.to_string(),
-                title,
-                cover_url,
-            });
-        }
-        Ok(out)
+        Ok(parse_cards(
+            html,
+            page_url,
+            &self.compiled.search_item,
+            &self.compiled.search_title,
+            &self.compiled.search_link,
+            &self.compiled.search_cover,
+        ))
+    }
+
+    pub fn parse_listing(
+        &self,
+        sort: BrowseSort,
+        html: &str,
+        page_url: &Url,
+    ) -> Result<Vec<MangaSummary>> {
+        let listing = self.listing(sort)?;
+        Ok(parse_cards(
+            html,
+            page_url,
+            &listing.item,
+            &listing.title,
+            &listing.link,
+            &listing.cover,
+        ))
+    }
+
+    fn listing(&self, sort: BrowseSort) -> Result<&CompiledListing> {
+        self.compiled
+            .listings
+            .iter()
+            .find(|(s, _)| *s == sort)
+            .map(|(_, listing)| listing)
+            .ok_or_else(|| {
+                SourceError::Definition(format!("no browse.{} listing configured", sort.key()))
+            })
     }
 
     pub fn parse_manga(&self, html: &str, page_url: &Url) -> Result<MangaDetails> {
@@ -458,6 +535,25 @@ impl Source for SelectorSource {
         self.parse_search(&html, &url)
     }
 
+    fn browse_sorts(&self) -> Vec<BrowseSort> {
+        self.compiled
+            .listings
+            .iter()
+            .map(|(sort, _)| *sort)
+            .collect()
+    }
+
+    async fn browse(&self, sort: BrowseSort, page: u32) -> Result<Vec<MangaSummary>> {
+        let listing = self.listing(sort)?;
+        // A template without {page} has exactly one page.
+        if page > 1 && !listing.url.contains("{page}") {
+            return Ok(Vec::new());
+        }
+        let url = listing_url(&self.spec, &listing.url, page.max(1))?;
+        let html = self.get_html(&url).await?;
+        self.parse_listing(sort, &html, &url)
+    }
+
     async fn manga(&self, key: &str) -> Result<MangaDetails> {
         let url = self.key_url(key)?;
         let html = self.get_html(&url).await?;
@@ -487,6 +583,52 @@ impl Source for SelectorSource {
             content_type,
         })
     }
+}
+
+/// Extract the manga cards matched by `item` on a listing/search page.
+fn parse_cards(
+    html: &str,
+    page_url: &Url,
+    item: &Selector,
+    title: &Option<Rule>,
+    link: &Rule,
+    cover: &Option<Rule>,
+) -> Vec<MangaSummary> {
+    let doc = Html::parse_document(html);
+    let mut out = Vec::new();
+    for card in doc.select(item) {
+        let Some(href) = link.extract(card) else {
+            continue;
+        };
+        let Ok(url) = page_url.join(&href) else {
+            continue;
+        };
+        let title = title
+            .as_ref()
+            .and_then(|r| r.extract(card))
+            .or_else(|| text_of(card))
+            .unwrap_or_else(|| url.to_string());
+        let cover_url = cover
+            .as_ref()
+            .and_then(|r| r.extract(card))
+            .and_then(|c| page_url.join(&c).ok());
+        out.push(MangaSummary {
+            key: url.to_string(),
+            title,
+            cover_url,
+        });
+    }
+    out
+}
+
+/// Substitute `{base}`/`{page}` in a browse listing URL template.
+fn listing_url(spec: &SelectorSpec, template: &str, page: u32) -> Result<Url> {
+    let url_str = template
+        .replace("{base}", spec.base_url.as_str().trim_end_matches('/'))
+        .replace("{page}", &page.to_string());
+    url_str
+        .parse()
+        .map_err(|_| SourceError::Definition(format!("browse url {url_str:?}")))
 }
 
 /// Substitute `{base}`/`{query}` in a search URL template. The query is

@@ -11,6 +11,33 @@ pub struct SourceInfo {
     pub id: String,
     pub name: String,
     pub base_url: Url,
+    /// Catalog listings this source can browse (empty: search only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browse: Vec<BrowseSort>,
+}
+
+/// A query-less catalog listing order offered by a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowseSort {
+    Popular,
+    Latest,
+}
+
+impl BrowseSort {
+    pub fn key(self) -> &'static str {
+        match self {
+            BrowseSort::Popular => "popular",
+            BrowseSort::Latest => "latest",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BrowseSort::Popular => "Popular",
+            BrowseSort::Latest => "Latest",
+        }
+    }
 }
 
 /// A search hit on a source; enough to display and to add to the library.

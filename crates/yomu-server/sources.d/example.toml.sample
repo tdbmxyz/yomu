@@ -19,6 +19,16 @@ title = ".post-title a"
 link = ".post-title a@href"
 cover = "img@data-src"
 
+# Optional query-less catalog listings for the Browse tab. `{page}` is the
+# 1-based page number (omit it for single-page listings). Result selectors
+# (item/title/link/cover) default to the [search] ones — override any that
+# differ on the listing pages.
+[browse.popular]
+url = "{base}/manga/?m_orderby=views&page={page}"
+
+[browse.latest]
+url = "{base}/manga/?m_orderby=latest&page={page}"
+
 [manga]
 title = ".post-title h1"
 description = ".description-summary p"

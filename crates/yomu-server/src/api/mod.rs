@@ -28,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/logout", axum::routing::post(auth::logout))
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
+        .route("/sources/{id}/browse", get(sources::browse))
+        .route("/search", get(sources::search_all))
         .route("/library", get(library::list).post(library::add))
         .route("/categories", get(categories::list))
         .route("/categories/{id}", axum::routing::put(categories::update))

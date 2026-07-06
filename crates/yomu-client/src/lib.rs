@@ -4,10 +4,10 @@
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    AddMangaRequest, ApiErrorBody, Category, Chapter, EventsResponse, HealthResponse, Manga,
-    MangaDetailResponse, MangaSummary, MangaWithPosition, MeResponse, PagesResponse, Position,
-    PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
-    UpdateCategoryRequest, UpdateMangaRequest,
+    AddMangaRequest, ApiErrorBody, BrowseSort, Category, Chapter, EventsResponse, HealthResponse,
+    Manga, MangaDetailResponse, MangaSummary, MangaWithPosition, MeResponse, PagesResponse,
+    Position, PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest,
+    SourceInfo, SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -75,6 +75,29 @@ impl YomuClient {
             .http
             .get(self.url(&format!("api/v1/sources/{source_id}/search"))?)
             .query(&[("q", query)]);
+        self.send(req).await
+    }
+
+    /// One query against every configured source; one entry per source.
+    pub async fn search_all(&self, query: &str) -> Result<Vec<SourceSearchResults>> {
+        let req = self
+            .http
+            .get(self.url("api/v1/search")?)
+            .query(&[("q", query)]);
+        self.send(req).await
+    }
+
+    /// A source's catalog listing (`sort` = popular/latest), 1-based pages.
+    pub async fn browse(
+        &self,
+        source_id: &str,
+        sort: BrowseSort,
+        page: u32,
+    ) -> Result<Vec<MangaSummary>> {
+        let req = self
+            .http
+            .get(self.url(&format!("api/v1/sources/{source_id}/browse"))?)
+            .query(&[("sort", sort.key()), ("page", &page.to_string())]);
         self.send(req).await
     }
 

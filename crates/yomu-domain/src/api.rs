@@ -114,6 +114,19 @@ pub struct EventsResponse {
     pub next_since: Option<i64>,
 }
 
+/// One source's slice of a cross-source search: every configured source
+/// gets an entry, and a failing source reports its error instead of
+/// silently vanishing from the results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSearchResults {
+    pub source_id: String,
+    pub source_name: String,
+    #[serde(default)]
+    pub results: Vec<crate::MangaSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PagesResponse {
     pub chapter_id: Uuid,

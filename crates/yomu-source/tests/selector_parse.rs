@@ -55,6 +55,57 @@ fn parses_search_results() {
 }
 
 #[test]
+fn parses_browse_listing_with_search_selector_defaults() {
+    use yomu_domain::BrowseSort;
+    use yomu_source::Source;
+
+    // Same spec as fixture_source, plus browse listings that reuse the
+    // search result selectors.
+    let spec: SelectorSpec = toml::from_str(
+        r#"
+        id = "fixture"
+        name = "Fixture Scans"
+        base_url = "https://fixture.test"
+
+        [search]
+        url = "{base}/search?q={query}"
+        item = ".manga-item"
+        link = "a.manga-link@href"
+        cover = "img@src"
+
+        [browse.popular]
+        url = "{base}/list?order=views&page={page}"
+
+        [manga]
+        chapter_item = "li.chapter"
+        chapter_link = "a@href"
+
+        [pages]
+        image = ".reading-content img.page@data-src"
+        "#,
+    )
+    .expect("valid spec");
+    let source = SelectorSource::new(spec).expect("source compiles");
+
+    assert_eq!(source.browse_sorts(), vec![BrowseSort::Popular]);
+
+    // A listing page has the same cards as a search page.
+    let url = Url::parse("https://fixture.test/list?order=views&page=1").unwrap();
+    let hits = source
+        .parse_listing(BrowseSort::Popular, &fixture("search.html"), &url)
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].key, "https://fixture.test/manga/solo-farming");
+
+    // No latest listing configured.
+    assert!(
+        source
+            .parse_listing(BrowseSort::Latest, &fixture("search.html"), &url)
+            .is_err()
+    );
+}
+
+#[test]
 fn parses_manga_details_and_chapter_numbers() {
     let source = fixture_source();
     let url = Url::parse("https://fixture.test/manga/solo-farming").unwrap();
