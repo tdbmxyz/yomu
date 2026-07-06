@@ -550,6 +550,15 @@ fn ReaderInner() -> impl IntoView {
                                 counts.insert(chapter_id, meta.page_count);
                             });
                             let strip = NodeRef::<leptos::html::Div>::new();
+                            // Scroll events only count once the programmatic
+                            // opening scroll below has landed; before that
+                            // they would map placeholder-height images to a
+                            // wrong page and overwrite the saved position.
+                            // Deliberately NOT gated on pointer/wheel input:
+                            // desktop mice scroll with the scrollbar and
+                            // keyboards page with the arrows, neither of
+                            // which touches the strip element.
+                            let positioned = StoredValue::new(false);
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
                             // rewind the saved position.
@@ -563,13 +572,8 @@ fn ReaderInner() -> impl IntoView {
                                 if let Ok(Some(child)) = el.query_selector(&selector) {
                                     child.scroll_into_view();
                                 }
+                                positioned.set_value(true);
                             });
-                            // Only user scrolling moves the journal: the
-                            // programmatic positioning above also fires
-                            // scroll events, and while images are still
-                            // placeholder-height they would map to a wrong
-                            // page and overwrite the saved position.
-                            let interacted = RwSignal::new(false);
                             let loading_next = StoredValue::new(false);
                             let client_next = client_vertical.clone();
                             let load_next = move || {
@@ -685,6 +689,27 @@ fn ReaderInner() -> impl IntoView {
                                     loading_prev.set_value(false);
                                 });
                             };
+                            // A wheel-up with the strip already at scroll
+                            // position 0 produces no scroll event, so the
+                            // intent to read backwards would go unseen —
+                            // catch it on the wheel event itself.
+                            let wheel_prev = {
+                                let load_prev = load_prev.clone();
+                                move |ev: leptos::ev::WheelEvent| {
+                                    if ev.delta_y() >= 0.0 {
+                                        return;
+                                    }
+                                    let Some(el) = strip.get_untracked() else { return };
+                                    let viewport = window()
+                                        .inner_height()
+                                        .ok()
+                                        .and_then(|h| h.as_f64())
+                                        .unwrap_or(0.0);
+                                    if el.get_bounding_client_rect().top() > -viewport * 3.0 {
+                                        load_prev();
+                                    }
+                                }
+                            };
                             let scroll_handle = window_event_listener(
                                 leptos::ev::scroll,
                                 move |_| {
@@ -697,12 +722,17 @@ fn ReaderInner() -> impl IntoView {
                                     // the page under the viewport's midline
                                     let middle = viewport / 2.0;
                                     let mut at: Option<(uuid::Uuid, u32)> = None;
+                                    // A placeholder image spans a fraction of
+                                    // its real height, so a position computed
+                                    // from one would be pages off — only
+                                    // report positions read off loaded images.
+                                    let mut at_loaded = false;
                                     if let Ok(imgs) = el.query_selector_all("img[data-page]") {
                                         for i in 0..imgs.length() {
                                             let Some(img) = imgs
                                                 .item(i)
                                                 .and_then(|n| {
-                                                    n.dyn_into::<web_sys::Element>().ok()
+                                                    n.dyn_into::<web_sys::HtmlImageElement>().ok()
                                                 })
                                             else {
                                                 continue;
@@ -719,10 +749,12 @@ fn ReaderInner() -> impl IntoView {
                                                 );
                                             if position.is_some() {
                                                 at = position;
+                                                at_loaded = img.complete();
                                             }
                                         }
                                     }
-                                    if interacted.get_untracked()
+                                    if positioned.get_value()
+                                        && at_loaded
                                         && let Some((chapter, p)) = at
                                         && (chapter != current_chapter.get_untracked()
                                             || p != page.get_untracked())
@@ -805,11 +837,10 @@ fn ReaderInner() -> impl IntoView {
                                     if rect.bottom() < viewport * 3.0 {
                                         load_next();
                                     }
-                                    // near the top (and actually reading, not
-                                    // the programmatic positioning scroll):
-                                    // pull the previous chapter in
-                                    if interacted.get_untracked() && rect.top() > -viewport * 3.0
-                                    {
+                                    // near the top (and past the programmatic
+                                    // positioning scroll): pull the previous
+                                    // chapter in
+                                    if positioned.get_value() && rect.top() > -viewport * 3.0 {
                                         load_prev();
                                     }
                                 },
@@ -820,9 +851,7 @@ fn ReaderInner() -> impl IntoView {
                                 <div
                                     class="reader-scroll"
                                     node_ref=strip
-                                    on:wheel=move |_| interacted.set(true)
-                                    on:touchstart=move |_| interacted.set(true)
-                                    on:pointerdown=move |_| interacted.set(true)
+                                    on:wheel=wheel_prev
                                     on:click=move |_| chrome.update(|c| *c = !*c)
                                 >
                                     <For

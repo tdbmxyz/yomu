@@ -35,6 +35,7 @@ features = [
     "DomRect",
     "NodeList",
     "CssStyleDeclaration",
+    "HtmlImageElement",
 ]
 
 [dependencies.js-sys]
