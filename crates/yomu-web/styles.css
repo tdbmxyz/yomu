@@ -341,6 +341,29 @@ button.danger:hover {
   font-size: 0.85rem;
 }
 
+/* the display-option buttons, grouped so they can wrap as one block */
+.reader-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* phones: back / title / counter on the first row, tools on their own row */
+@media (max-width: 40rem) {
+  .reader-chrome {
+    gap: 0.6rem;
+    padding: 0.5rem 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .reader-tools {
+    order: 10;
+    flex-basis: 100%;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+}
+
 .reader-msg {
   margin: auto;
 }
@@ -378,15 +401,46 @@ button.danger:hover {
   height: auto;
 }
 
-/* vertical (webtoon) mode */
+/* vertical (webtoon) mode — the document itself scrolls ("flow"): mobile
+   browsers only collapse their address bar when the root scroller moves.
+   The app shell around the reader is hidden for the duration. */
+
+body:has(.reader-overlay.flow) {
+  background: #000;
+}
+
+body:has(.reader-overlay.flow) .topbar {
+  display: none;
+}
+
+body:has(.reader-overlay.flow) main {
+  max-width: none;
+  padding: 0;
+  margin: 0;
+}
+
+.reader-overlay.flow {
+  position: static;
+  min-height: 100dvh;
+}
+
+.reader-overlay.flow .reader-chrome {
+  position: fixed;
+}
 
 .reader-scroll {
   flex: 1;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  scrollbar-width: thin;
+}
+
+.strip-chapter-break {
+  width: min(100vw, 48rem);
+  padding: 2.5rem 1rem;
+  text-align: center;
+  font-weight: 600;
+  color: var(--muted);
 }
 
 .reader-strip-page {

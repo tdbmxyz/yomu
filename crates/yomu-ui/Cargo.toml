@@ -29,6 +29,10 @@ features = [
     "Touch",
     "TouchEvent",
     "TouchList",
+    "Document",
+    "History",
+    "DomRect",
+    "NodeList",
 ]
 
 [dependencies.js-sys]

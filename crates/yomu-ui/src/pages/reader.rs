@@ -86,6 +86,12 @@ fn ReaderInner() -> impl IntoView {
     let fit = RwSignal::new(offline::reader_fit(manga_id));
     let dir = RwSignal::new(offline::reader_direction(manga_id));
     let chrome = RwSignal::new(true);
+    // Vertical mode reads continuously across chapters: `segments` lists the
+    // (chapter, page count) pairs currently in the strip, and
+    // `current_chapter` follows the reader through it (in paged mode it
+    // stays the routed chapter).
+    let current_chapter = RwSignal::new(chapter_id);
+    let segments: RwSignal<Vec<(uuid::Uuid, u32)>> = RwSignal::new(Vec::new());
 
     let client = use_client();
     let pages = LocalResource::new({
@@ -132,11 +138,11 @@ fn ReaderInner() -> impl IntoView {
     // merge reconciles once we're back.
     let report = {
         let client = client.clone();
-        move |p: u32| {
+        move |chapter: uuid::Uuid, p: u32| {
             let client = client.clone();
             spawn_local(async move {
                 let req = SetPositionRequest {
-                    chapter_id,
+                    chapter_id: chapter,
                     page: p,
                     device: "web".into(),
                 };
@@ -144,7 +150,7 @@ fn ReaderInner() -> impl IntoView {
                     offline::outbox_push(ProgressEvent {
                         id: offline::uuid_v7_js(),
                         manga_id,
-                        chapter_id,
+                        chapter_id: chapter,
                         page: p,
                         device: "web-offline".into(),
                         at: Utc::now(),
@@ -171,7 +177,7 @@ fn ReaderInner() -> impl IntoView {
         move |_| {
             if page_count() > 0 && !opened.get_value() {
                 opened.set_value(true);
-                report(page.get_untracked());
+                report(chapter_id, page.get_untracked());
             }
         }
     });
@@ -186,7 +192,7 @@ fn ReaderInner() -> impl IntoView {
             let next = (current + delta).clamp(0, count as i64 - 1) as u32;
             if next != current as u32 {
                 page.set(next);
-                report(next);
+                report(chapter_id, next);
             }
         }
     };
@@ -208,7 +214,9 @@ fn ReaderInner() -> impl IntoView {
 
     let neighbours = move || {
         let chapters = detail.get().and_then(|r| r.ok()).map(|d| d.chapters)?;
-        let index = chapters.iter().position(|c| c.id == chapter_id)?;
+        let index = chapters
+            .iter()
+            .position(|c| c.id == current_chapter.get())?;
         let previous = index.checked_sub(1).map(|i| chapters[i].id);
         let next = chapters.get(index + 1).map(|c| c.id);
         Some((previous, next))
@@ -217,11 +225,16 @@ fn ReaderInner() -> impl IntoView {
         detail
             .get()
             .and_then(|r| r.ok())
-            .and_then(|d| d.chapters.into_iter().find(|c| c.id == chapter_id))
+            .and_then(|d| {
+                d.chapters
+                    .into_iter()
+                    .find(|c| c.id == current_chapter.get())
+            })
             .map(|c| c.title)
             .unwrap_or_default()
     };
 
+    let navigate = leptos_router::hooks::use_navigate();
     let toggle_mode = move |_| {
         let next = match mode.get_untracked() {
             ReaderMode::Paged => ReaderMode::Vertical,
@@ -229,6 +242,17 @@ fn ReaderInner() -> impl IntoView {
         };
         mode.set(next);
         offline::set_reader_mode(manga_id, next);
+        // Leaving a continuous strip that wandered into another chapter:
+        // paged mode is bound to the routed chapter, so re-route there.
+        if next == ReaderMode::Paged {
+            let current = current_chapter.get_untracked();
+            if current != chapter_id {
+                navigate(
+                    &format!("/read/{manga_id}/{current}?page={}", page.get_untracked()),
+                    Default::default(),
+                );
+            }
+        }
     };
     let cycle_fit = move |_| {
         let next = match fit.get_untracked() {
@@ -247,6 +271,14 @@ fn ReaderInner() -> impl IntoView {
         dir.set(next);
         offline::set_reader_direction(manga_id, next);
     };
+    let toggle_fullscreen = move |_| {
+        let doc = document();
+        if doc.fullscreen_element().is_some() {
+            doc.exit_fullscreen();
+        } else if let Some(root) = doc.document_element() {
+            let _ = root.request_fullscreen();
+        }
+    };
 
     let turn_paged = turn.clone();
     let report_scroll = report.clone();
@@ -254,42 +286,59 @@ fn ReaderInner() -> impl IntoView {
     let client_vertical = use_client();
 
     view! {
-        <div class="reader-overlay" class:chrome-hidden=move || !chrome.get()>
+        <div
+            class="reader-overlay"
+            class:chrome-hidden=move || !chrome.get()
+            class:flow=move || mode.get() == ReaderMode::Vertical
+        >
             <div class="reader-chrome reader-top">
                 <a href=format!("/manga/{manga_id}")>"← back"</a>
                 <span class="reader-title">{chapter_title}</span>
-                <button class="mode-btn" title="Toggle paged / vertical" on:click=toggle_mode>
-                    {move || match mode.get() {
-                        ReaderMode::Paged => "⇅ vertical",
-                        ReaderMode::Vertical => "⇆ paged",
+                <div class="reader-tools">
+                    <button class="mode-btn" title="Toggle paged / vertical" on:click=toggle_mode>
+                        {move || match mode.get() {
+                            ReaderMode::Paged => "⇅ vertical",
+                            ReaderMode::Vertical => "⇆ paged",
+                        }}
+                    </button>
+                    {move || {
+                        (mode.get() == ReaderMode::Paged)
+                            .then(|| {
+                                view! {
+                                    <button class="mode-btn" title="Page fit" on:click=cycle_fit>
+                                        {move || match fit.get() {
+                                            ReaderFit::Screen => "fit: screen",
+                                            ReaderFit::Width => "fit: width",
+                                            ReaderFit::Original => "fit: 1:1",
+                                        }}
+                                    </button>
+                                    <button
+                                        class="mode-btn"
+                                        title="Reading direction (which side is the next page)"
+                                        on:click=toggle_dir
+                                    >
+                                        {move || match dir.get() {
+                                            ReaderDirection::Ltr => "ltr →",
+                                            ReaderDirection::Rtl => "← rtl",
+                                        }}
+                                    </button>
+                                }
+                            })
                     }}
-                </button>
-                {move || {
-                    (mode.get() == ReaderMode::Paged)
-                        .then(|| {
-                            view! {
-                                <button class="mode-btn" title="Page fit" on:click=cycle_fit>
-                                    {move || match fit.get() {
-                                        ReaderFit::Screen => "fit: screen",
-                                        ReaderFit::Width => "fit: width",
-                                        ReaderFit::Original => "fit: 1:1",
-                                    }}
-                                </button>
-                                <button
-                                    class="mode-btn"
-                                    title="Reading direction (which side is the next page)"
-                                    on:click=toggle_dir
-                                >
-                                    {move || match dir.get() {
-                                        ReaderDirection::Ltr => "ltr →",
-                                        ReaderDirection::Rtl => "← rtl",
-                                    }}
-                                </button>
-                            }
-                        })
-                }}
+                    <button class="mode-btn" title="Fullscreen" on:click=toggle_fullscreen>
+                        "⛶"
+                    </button>
+                </div>
                 <span class="muted">
-                    {move || format!("{} / {}", page.get() + 1, page_count().max(1))}
+                    {move || {
+                        let count = segments
+                            .get()
+                            .iter()
+                            .find(|(id, _)| *id == current_chapter.get())
+                            .map(|(_, c)| *c)
+                            .unwrap_or_else(page_count);
+                        format!("{} / {}", page.get() + 1, count.max(1))
+                    }}
                 </span>
             </div>
 
@@ -509,13 +558,26 @@ fn ReaderInner() -> impl IntoView {
                                 .into_any()
                         }
                         ReaderMode::Vertical => {
+                            // Continuous strip: starts with the routed chapter
+                            // and appends the next one when the reader nears
+                            // the bottom. The document itself scrolls (`.flow`
+                            // in styles.css) — mobile browsers only collapse
+                            // their address bar for the root scroller.
+                            if segments.with_untracked(|s| s.is_empty()) {
+                                segments.set(vec![(chapter_id, meta.page_count)]);
+                            }
                             let strip = NodeRef::<leptos::html::Div>::new();
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
                             // rewind the saved position.
                             Effect::new(move |_| {
                                 let Some(el) = strip.get() else { return };
-                                if let Some(child) = el.children().item(page.get_untracked()) {
+                                let selector = format!(
+                                    "img[data-chapter='{}'][data-page='{}']",
+                                    current_chapter.get_untracked(),
+                                    page.get_untracked(),
+                                );
+                                if let Ok(Some(child)) = el.query_selector(&selector) {
                                     child.scroll_into_view();
                                 }
                             });
@@ -525,58 +587,170 @@ fn ReaderInner() -> impl IntoView {
                             // placeholder-height they would map to a wrong
                             // page and overwrite the saved position.
                             let interacted = RwSignal::new(false);
-                            let on_scroll = move |ev: leptos::ev::Event| {
-                                if !interacted.get_untracked() {
+                            let loading_next = StoredValue::new(false);
+                            let client_next = client_vertical.clone();
+                            let load_next = move || {
+                                if loading_next.get_value() {
                                     return;
                                 }
-                                let el = event_target::<web_sys::Element>(&ev);
-                                // The page under the viewport's midline; per
-                                // element offsets, so uneven page heights and
-                                // still-loading images don't skew the index.
-                                let middle = el.scroll_top() as f64
-                                    + el.client_height() as f64 / 2.0;
-                                let children = el.children();
-                                let mut index = 0;
-                                for i in 0..children.length() {
-                                    let Some(child) = children
-                                        .item(i)
-                                        .and_then(|c| c.dyn_into::<web_sys::HtmlElement>().ok())
-                                    else {
-                                        continue;
+                                let Some(chapters) =
+                                    detail.get_untracked().and_then(|r| r.ok()).map(|d| d.chapters)
+                                else {
+                                    return;
+                                };
+                                let Some(last) =
+                                    segments.with_untracked(|s| s.last().map(|(id, _)| *id))
+                                else {
+                                    return;
+                                };
+                                let Some(index) = chapters.iter().position(|c| c.id == last)
+                                else {
+                                    return;
+                                };
+                                let Some(next) = chapters.get(index + 1).map(|c| c.id) else {
+                                    return; // already at the last chapter
+                                };
+                                loading_next.set_value(true);
+                                let client = client_next.clone();
+                                spawn_local(async move {
+                                    let count = match client.chapter_pages(next).await {
+                                        Ok(meta) => Some(meta.page_count),
+                                        Err(_) => offline::device_chapter_pages(next),
                                     };
-                                    if (child.offset_top() as f64) <= middle {
-                                        index = i;
+                                    if let Some(count) = count {
+                                        segments.update(|s| s.push((next, count)));
                                     }
-                                }
-                                if index != page.get_untracked() {
-                                    page.set(index);
-                                    report(index);
-                                }
+                                    loading_next.set_value(false);
+                                });
                             };
+                            let scroll_handle = window_event_listener(
+                                leptos::ev::scroll,
+                                move |_| {
+                                    let Some(el) = strip.get_untracked() else { return };
+                                    let viewport = window()
+                                        .inner_height()
+                                        .ok()
+                                        .and_then(|h| h.as_f64())
+                                        .unwrap_or(0.0);
+                                    // the page under the viewport's midline
+                                    let middle = viewport / 2.0;
+                                    let mut at: Option<(uuid::Uuid, u32)> = None;
+                                    if let Ok(imgs) = el.query_selector_all("img[data-page]") {
+                                        for i in 0..imgs.length() {
+                                            let Some(img) = imgs
+                                                .item(i)
+                                                .and_then(|n| {
+                                                    n.dyn_into::<web_sys::Element>().ok()
+                                                })
+                                            else {
+                                                continue;
+                                            };
+                                            if img.get_bounding_client_rect().top() > middle {
+                                                break;
+                                            }
+                                            let position = img
+                                                .get_attribute("data-chapter")
+                                                .and_then(|c| c.parse::<uuid::Uuid>().ok())
+                                                .zip(
+                                                    img.get_attribute("data-page")
+                                                        .and_then(|p| p.parse::<u32>().ok()),
+                                                );
+                                            if position.is_some() {
+                                                at = position;
+                                            }
+                                        }
+                                    }
+                                    if interacted.get_untracked()
+                                        && let Some((chapter, p)) = at
+                                        && (chapter != current_chapter.get_untracked()
+                                            || p != page.get_untracked())
+                                    {
+                                        current_chapter.set(chapter);
+                                        page.set(p);
+                                        report(chapter, p);
+                                        // keep the URL honest for a refresh,
+                                        // without waking the router (which
+                                        // would remount the reader and lose
+                                        // the strip)
+                                        if let Ok(history) = window().history() {
+                                            let _ = history.replace_state_with_url(
+                                                &leptos::wasm_bindgen::JsValue::NULL,
+                                                "",
+                                                Some(&format!(
+                                                    "/read/{manga_id}/{chapter}?page={p}"
+                                                )),
+                                            );
+                                        }
+                                    }
+                                    // near the bottom: extend the strip
+                                    if el.get_bounding_client_rect().bottom()
+                                        < viewport * 3.0
+                                    {
+                                        load_next();
+                                    }
+                                },
+                            );
+                            on_cleanup(move || scroll_handle.remove());
+                            let client = client_vertical.clone();
                             view! {
                                 <div
                                     class="reader-scroll"
                                     node_ref=strip
-                                    on:scroll=on_scroll
                                     on:wheel=move |_| interacted.set(true)
                                     on:touchstart=move |_| interacted.set(true)
                                     on:pointerdown=move |_| interacted.set(true)
                                     on:click=move |_| chrome.update(|c| *c = !*c)
                                 >
-                                    {(0..meta.page_count)
-                                        .map(|n| {
-                                            let src =
-                                                page_source(&client_vertical, chapter_id, n);
+                                    <For
+                                        each=move || {
+                                            segments.get().into_iter().enumerate().collect::<Vec<_>>()
+                                        }
+                                        key=|(_, (chapter, _))| *chapter
+                                        children=move |(i, (chapter, count))| {
+                                            let title = move || {
+                                                detail
+                                                    .get()
+                                                    .and_then(|r| r.ok())
+                                                    .and_then(|d| {
+                                                        d.chapters
+                                                            .into_iter()
+                                                            .find(|c| c.id == chapter)
+                                                    })
+                                                    .map(|c| c.title)
+                                                    .unwrap_or_default()
+                                            };
+                                            let images = (0..count)
+                                                .map(|n| {
+                                                    let src = page_source(&client, chapter, n);
+                                                    view! {
+                                                        <img
+                                                            class="reader-strip-page"
+                                                            src=src
+                                                            data-chapter=chapter.to_string()
+                                                            data-page=n.to_string()
+                                                            loading=if i == 0 && n < 3 {
+                                                                "eager"
+                                                            } else {
+                                                                "lazy"
+                                                            }
+                                                            alt=""
+                                                        />
+                                                    }
+                                                })
+                                                .collect_view();
                                             view! {
-                                                <img
-                                                    class="reader-strip-page"
-                                                    src=src
-                                                    loading=if n < 3 { "eager" } else { "lazy" }
-                                                    alt=""
-                                                />
+                                                {(i > 0)
+                                                    .then(|| {
+                                                        view! {
+                                                            <div class="strip-chapter-break">
+                                                                {title}
+                                                            </div>
+                                                        }
+                                                    })}
+                                                {images}
                                             }
-                                        })
-                                        .collect_view()}
+                                        }
+                                    />
                                 </div>
                             }
                                 .into_any()
