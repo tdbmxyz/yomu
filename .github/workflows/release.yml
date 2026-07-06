@@ -1,0 +1,99 @@
+# Release build: runs when a semver tag (v*) is pushed on main, builds
+# the web bundle and the portable desktop AppImage with Nix, and
+# attaches them to a GitHub Release.
+#
+# The server is consumed through the Nix flake on the host
+# (`nix build .#yomu-server` or the NixOS module) instead of a prebuilt
+# binary. The Android APK is signed with a keystore that never leaves
+# the developer machine, so it is built and attached manually.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Check tag matches workspace version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          shell_version="$(jq -r .version crates/yomu-shell/tauri.conf.json)"
+          echo "tag=$tag cargo=$cargo_version shell=$shell_version"
+          test "$tag" = "$cargo_version"
+          test "$tag" = "$shell_version"
+
+      - name: Build web bundle
+        run: |
+          nix build .#yomu-web
+          version="${GITHUB_REF_NAME#v}"
+          artifact="yomu-web-${version}.tar.gz"
+          tar -czf "$artifact" -C "$(readlink -f result)" .
+          sha256sum "$artifact" > "$artifact.sha256"
+          echo "WEB_ARTIFACT=$artifact" >> "$GITHUB_ENV"
+
+      - name: Build desktop AppImage
+        run: |
+          nix bundle --bundler github:ralismark/nix-appimage \
+            .#yomu-desktop -o desktop-bundle
+          version="${GITHUB_REF_NAME#v}"
+          artifact="yomu-desktop-${version}-x86_64.AppImage"
+          cp -L desktop-bundle "$artifact"
+          chmod +x "$artifact"
+          sha256sum "$artifact" > "$artifact.sha256"
+          echo "DESKTOP_ARTIFACT=$artifact" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ env.WEB_ARTIFACT }}
+            ${{ env.WEB_ARTIFACT }}.sha256
+            ${{ env.DESKTOP_ARTIFACT }}
+            ${{ env.DESKTOP_ARTIFACT }}.sha256
+          body: |
+            ## Server
+
+            The backend is built from the Nix flake (a NixOS module is
+            included):
+
+            ```bash
+            nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-server
+            ```
+
+            ## Web frontend
+
+            `yomu-web-*.tar.gz` is the static trunk dist; point the
+            server's `static_dir` at the unpacked directory (the flake's
+            `yomu-web` output is the same thing, pre-wired).
+
+            ## Desktop
+
+            `yomu-desktop-*.AppImage` is a self-contained x86_64 Linux
+            build of the Tauri shell (WebKitGTK bundled). Make it
+            executable and run it; it asks for your server address on
+            first launch:
+
+            ```bash
+            chmod +x yomu-desktop-*.AppImage
+            ./yomu-desktop-*.AppImage
+            ```
+
+            On NixOS, prefer the flake output instead:
+            `nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop`.
+
+            ## Android
+
+            The APK is signed locally (the release keystore stays off
+            CI); it is attached to the release manually when available.

@@ -1,0 +1,50 @@
+# CI: format, lint, and test on every push/PR to the long-lived
+# branches (Git flow: develop = integration, main = releases).
+#
+# yomu-shell is excluded from the cargo jobs: it needs the Linux webview
+# stack and a baked-in web dist, both of which the `packages` job covers
+# through `nix build .#yomu-desktop`.
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: cargo fmt
+        run: nix develop -c cargo fmt --check
+
+      - name: cargo clippy
+        run: |
+          nix develop -c cargo clippy --workspace --exclude yomu-shell \
+            --all-targets -- -D warnings
+
+      - name: cargo clippy (wasm)
+        # The UI actually ships as wasm; lint it for its real target.
+        run: |
+          nix develop -c cargo clippy -p yomu-ui -p yomu-web \
+            --target wasm32-unknown-unknown -- -D warnings
+
+      - name: cargo test
+        run: nix develop -c cargo test --workspace --exclude yomu-shell
+
+  # Everything a release ships must build from the flake, including the
+  # desktop shell (the one workspace member the cargo jobs skip).
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: nix build
+        run: nix build .#yomu-server .#yomu-web .#yomu-desktop

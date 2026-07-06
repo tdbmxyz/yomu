@@ -63,6 +63,20 @@ site), restart the server.
 First checkout: enter the shell, `cargo generate-lockfile`,
 `git add Cargo.lock`, re-enter (wasm-bindgen-cli pinning, as in chaos).
 
+## Branching & releases
+
+Git flow, enforced by CI on the long-lived branches:
+
+- `main` — protected; only receives merges from `develop`, every commit
+  on it is releasable.
+- `develop` — integration branch; feature branches (`feat/…`, `fix/…`)
+  target it through pull requests.
+- Releases: bump the workspace version (`Cargo.toml` +
+  `crates/yomu-shell/tauri.conf.json`), merge `develop` into `main`, tag
+  `vX.Y.Z`. The release workflow checks the tag against the manifests,
+  then builds and attaches the web bundle and the desktop AppImage. The
+  Android APK is signed locally and attached by hand.
+
 ## License
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE). yomu is a self-hosted reader;
