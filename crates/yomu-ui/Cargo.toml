@@ -3,6 +3,7 @@ name = "yomu-ui"
 description = "Leptos components and pages shared by web (and later desktop)"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 yomu-domain.workspace = true

@@ -62,3 +62,8 @@ site), restart the server.
 
 First checkout: enter the shell, `cargo generate-lockfile`,
 `git add Cargo.lock`, re-enter (wasm-bindgen-cli pinning, as in chaos).
+
+## License
+
+AGPL-3.0-or-later — see [LICENSE](LICENSE). yomu is a self-hosted reader;
+it ships no content and no site-specific source definitions.

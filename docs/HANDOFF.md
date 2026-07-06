@@ -93,12 +93,12 @@ amended: sync paging is by server `seq`, not event id).
    affordances (hide "download"/auto-download for local manga, covers in
    local search results); category QoL (user-defined categories, rename,
    reorder — schema is ready, only CRUD endpoints/UI missing).
-3. **Sources**: native JSON-API source, per-source health in UI, hot-reload
-   of sources.d. Real-site selector definitions exist (site-a,
-   site-b — kept out of the repo in `/var/lib/yomu/sources.d`, staging
-   copies in `~/.config/yomu/sources.d`); Site A premium/tile-scrambled
-   chapters are out of selector reach. `chapter_order = "oldest_first"`
-   exists for sites that list oldest-first.
+3. **Sources**: native JSON-API source implementations, per-source health
+   in UI, hot-reload of sources.d. Site-specific selector definitions are
+   deliberately kept out of the repo (deployed in
+   `/var/lib/yomu/sources.d`, staging copies in `~/.config/yomu/sources.d`);
+   sites with premium or scrambled chapters are out of selector reach.
+   `chapter_order = "oldest_first"` exists for sites that list oldest-first.
 4. **Offline hardening**: quota awareness (Cache API eviction), download
    whole-manga button, offline indicator in the topbar, surface the
    "save to device" no-SW error in the UI (it's only a console warn).

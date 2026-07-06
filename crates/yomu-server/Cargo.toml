@@ -3,6 +3,7 @@ name = "yomu-server"
 description = "yomu backend: manga library, downloader, progress tracking"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 yomu-domain.workspace = true

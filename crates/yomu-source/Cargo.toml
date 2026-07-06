@@ -3,6 +3,7 @@ name = "yomu-source"
 description = "Scan-site source abstraction: trait + selector-driven implementation"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 yomu-domain.workspace = true

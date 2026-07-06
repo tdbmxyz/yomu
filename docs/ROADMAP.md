@@ -20,7 +20,7 @@
 
 ## Phase 2 — Sources
 
-- [ ] Native JSON-API sites source (clean JSON API) as the first non-selector source
+- [ ] Native JSON-API source implementations as the first non-selector sources
 - [ ] Per-source health surface (last error, last success) in the UI
 - [ ] Hot-reload of sources.d without restart
 - [ ] Selector spec: pagination for search results, multi-page chapter lists
