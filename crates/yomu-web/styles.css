@@ -70,6 +70,26 @@
   --font-body: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+[data-theme="campbell"] {
+  --bg: #0c0c0c;
+  --surface: #171717;
+  --border: #2e2e2e;
+  --text: #cccccc;
+  --muted: #767676;
+  --accent: #3b78ff;
+  --accent-contrast: #f2f6ff;
+}
+
+[data-theme="github"] {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --accent-contrast: #081524;
+}
+
 * {
   box-sizing: border-box;
 }

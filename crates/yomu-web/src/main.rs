@@ -49,6 +49,17 @@ fn api_base() -> Url {
 fn main() {
     console_error_panic_hook::set_once();
 
+    // Embedded in chaos: the host forwards its palette as ?chaos-theme=;
+    // adopt (and persist) the closest yomu theme so the looks stay in sync
+    // - also for later standalone visits from the same browser.
+    if let Some(search) = web_sys::window().and_then(|w| w.location().search().ok())
+        && let Some(theme) = url::form_urlencoded::parse(search.trim_start_matches('?').as_bytes())
+            .find(|(k, _)| k == "chaos-theme")
+            .and_then(|(_, v)| yomu_ui::offline::Theme::from_chaos(&v))
+    {
+        yomu_ui::offline::set_theme(theme);
+    }
+
     // Offline support: the service worker caches the app shell, page images
     // and API responses (see sw.js). Registered from index.html so it's in
     // place before this bundle runs; this is a fallback for exotic loads.

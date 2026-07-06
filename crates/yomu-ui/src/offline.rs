@@ -360,16 +360,22 @@ pub enum Theme {
     Plum,
     /// Terminal green-on-black, monospace.
     Phosphor,
+    /// Windows Terminal scheme: near-black, primary blue (chaos default).
+    Campbell,
+    /// GitHub dark mode: blue-tinted greys.
+    Github,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 6] = [
+    pub const ALL: [Theme; 8] = [
         Theme::Charcoal,
         Theme::Rose,
         Theme::Paper,
         Theme::Ink,
         Theme::Plum,
         Theme::Phosphor,
+        Theme::Campbell,
+        Theme::Github,
     ];
 
     pub fn key(self) -> &'static str {
@@ -380,6 +386,8 @@ impl Theme {
             Theme::Ink => "ink",
             Theme::Plum => "plum",
             Theme::Phosphor => "phosphor",
+            Theme::Campbell => "campbell",
+            Theme::Github => "github",
         }
     }
 
@@ -391,6 +399,22 @@ impl Theme {
             Theme::Ink => "Ink",
             Theme::Plum => "Plum",
             Theme::Phosphor => "Phosphor",
+            Theme::Campbell => "Campbell",
+            Theme::Github => "GitHub Dark",
+        }
+    }
+
+    /// Closest yomu theme for a chaos palette id (`?chaos-theme=` from the
+    /// embedding chaos app), so the two stay visually in sync.
+    pub fn from_chaos(key: &str) -> Option<Theme> {
+        match key {
+            "campbell" => Some(Theme::Campbell),
+            "github" => Some(Theme::Github),
+            "midnight" => Some(Theme::Rose),
+            "daylight" => Some(Theme::Paper),
+            "glass" => Some(Theme::Plum),
+            "terminal" => Some(Theme::Phosphor),
+            _ => None,
         }
     }
 
