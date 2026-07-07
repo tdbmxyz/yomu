@@ -32,11 +32,13 @@ pub fn MangaPage() -> impl IntoView {
                 match client.manga(id).await {
                     Ok(detail) => {
                         offline::cache_put(&key, &detail);
-                        Ok(detail)
+                        Ok((detail, false))
                     }
                     // last-known-good: keeps the chapter list (and thus
-                    // device-saved chapters) reachable offline in the shell
-                    Err(err) => offline::cache_get(&key).ok_or(err),
+                    // device-saved chapters) reachable offline in the shell.
+                    // The flag marks the list as served-from-cache so rows
+                    // can show which chapters won't open without the server.
+                    Err(err) => offline::cache_get(&key).map(|d| (d, true)).ok_or(err),
                 }
             }
         }
@@ -81,7 +83,7 @@ pub fn MangaPage() -> impl IntoView {
     // buttons flip to "downloaded" without a manual reload. Each completed
     // fetch schedules at most one follow-up, so this stops by itself.
     Effect::new(move |_| {
-        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|d| {
+        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|(d, _)| {
             d.chapters.iter().any(|c| {
                 matches!(
                     c.download,
@@ -100,8 +102,8 @@ pub fn MangaPage() -> impl IntoView {
     view! {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-            Some(Ok(detail)) => {
-                view! { <MangaDetail detail refresh status selected anchor/> }.into_any()
+            Some(Ok((detail, offline))) => {
+                view! { <MangaDetail detail offline refresh status selected anchor/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -113,6 +115,9 @@ pub fn MangaPage() -> impl IntoView {
 #[component]
 fn MangaDetail(
     detail: MangaDetailResponse,
+    /// The detail came from the offline cache: the server is unreachable,
+    /// so chapters not saved on this device won't open.
+    offline: bool,
     refresh: RwSignal<u32>,
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
@@ -290,6 +295,7 @@ fn MangaDetail(
             <ChapterList
                 manga_id=id
                 chapters=detail.chapters
+                offline
                 position_chapter=position.map(|p| p.chapter_id)
                 refresh
                 status
@@ -304,6 +310,7 @@ fn MangaDetail(
 fn ChapterList(
     manga_id: Uuid,
     chapters: Vec<Chapter>,
+    offline: bool,
     position_chapter: Option<Uuid>,
     refresh: RwSignal<u32>,
     status: RwSignal<Option<String>>,
@@ -398,6 +405,7 @@ fn ChapterList(
                         <ChapterItem
                             manga_id
                             chapter
+                            offline
                             current
                             refresh
                             index
@@ -429,6 +437,7 @@ fn ChapterList(
 fn ChapterItem(
     manga_id: Uuid,
     chapter: Chapter,
+    offline: bool,
     current: bool,
     refresh: RwSignal<u32>,
     index: usize,
@@ -570,6 +579,12 @@ fn ChapterItem(
             class:current=current
             class:read=read
             class:selected=move || is_selected.get()
+            // Served from the offline cache: chapters that aren't on this
+            // device can't open until the server is reachable again.
+            class:unavailable=move || offline && !on_device.get()
+            title=move || {
+                (offline && !on_device.get()).then_some("Not available offline")
+            }
             on:pointerdown=pointer_down
             on:pointermove=pointer_move
             on:pointerup=move |_| cancel()

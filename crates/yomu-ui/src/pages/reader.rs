@@ -351,8 +351,26 @@ fn ReaderInner() -> impl IntoView {
                 match pages.get() {
                     None => view! { <p class="muted reader-msg">"Loading pages…"</p> }.into_any(),
                     Some(Err(err)) => {
+                        // A chapter that isn't stored on this device needs
+                        // the server — when that's what failed, say so and
+                        // point at the connect form instead of dumping a
+                        // bare transport error.
                         view! {
-                            <p class="error reader-msg">"Cannot load chapter: " {err.to_string()}</p>
+                            <div class="reader-msg reader-unavailable">
+                                <p class="error">"This chapter isn't available"</p>
+                                <p class="muted">
+                                    "It isn't stored on this device and the server "
+                                    "couldn't be reached (" {err.to_string()} ")."
+                                </p>
+                                <p class="reader-unavailable-actions">
+                                    <a class="button" href=format!("/manga/{manga_id}")>
+                                        "Back to the chapter list"
+                                    </a>
+                                    <a class="button primary" href="/more">
+                                        "Connect to a server"
+                                    </a>
+                                </p>
+                            </div>
                         }
                             .into_any()
                     }
