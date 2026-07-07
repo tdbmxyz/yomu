@@ -469,17 +469,23 @@ fn ChapterItem(
         }
     };
 
-    let (download_label, downloadable) = match &chapter.download {
-        DownloadState::None => ("download", true),
-        DownloadState::Pending => ("queued…", false),
-        DownloadState::Downloading => ("downloading…", false),
-        DownloadState::Downloaded { .. } => ("downloaded", false),
-        DownloadState::Failed { .. } => ("retry download", true),
+    // Tachidesk-style state icons: one arrow-in-a-circle per storage tier,
+    // told apart by color (accent = on the server, green = on this device).
+    let (server_glyph, server_title, downloadable) = match &chapter.download {
+        DownloadState::None => ("↓", "Download to the server".to_string(), true),
+        DownloadState::Pending => ("↻", "Queued for download…".to_string(), false),
+        DownloadState::Downloading => ("↻", "Downloading…".to_string(), false),
+        DownloadState::Downloaded { .. } => ("✓", "On the server".to_string(), false),
+        DownloadState::Failed { reason, .. } => {
+            ("!", format!("Download failed: {reason} — retry"), true)
+        }
     };
-    let failed_reason = match &chapter.download {
-        DownloadState::Failed { reason, .. } => Some(reason.clone()),
-        _ => None,
-    };
+    let server_busy = matches!(
+        chapter.download,
+        DownloadState::Pending | DownloadState::Downloading
+    );
+    let server_done = matches!(chapter.download, DownloadState::Downloaded { .. });
+    let server_failed = matches!(chapter.download, DownloadState::Failed { .. });
 
     let download = move |_| {
         let client = client.clone();
@@ -547,34 +553,43 @@ fn ChapterItem(
             </a>
             {chapter
                 .page_count
-                .map(|c| view! { <span class="muted">{c} " p."</span> })}
-            {failed_reason
-                .map(|reason| {
-                    view! {
-                        <span class="error" title=reason>
-                            "✕"
-                        </span>
-                    }
-                })}
+                .map(|c| view! { <span class="muted chapter-pages">{c} " p."</span> })}
             <span class="grow"></span>
             <Show when=move || !selection_active.get()>
                 <button
-                    title="Store on this device for offline reading"
+                    class="icon-btn device-dl"
+                    class:done=move || on_device.get()
+                    class:busy=move || device_busy.get()
+                    title=move || {
+                        if on_device.get() {
+                            "Saved on this device"
+                        } else {
+                            "Store on this device for offline reading"
+                        }
+                    }
                     disabled=move || device_busy.get() || on_device.get()
                     on:click=device_download.clone()
                 >
                     {move || {
                         if on_device.get() {
-                            "on device ✓"
+                            "✓"
                         } else if device_busy.get() {
-                            "saving…"
+                            "↻"
                         } else {
-                            "save to device"
+                            "↓"
                         }
                     }}
                 </button>
-                <button disabled=!downloadable on:click=download.clone()>
-                    {download_label}
+                <button
+                    class="icon-btn server-dl"
+                    class:done=server_done
+                    class:busy=server_busy
+                    class:failed=server_failed
+                    title=server_title.clone()
+                    disabled=!downloadable
+                    on:click=download.clone()
+                >
+                    {server_glyph}
                 </button>
             </Show>
         </li>
