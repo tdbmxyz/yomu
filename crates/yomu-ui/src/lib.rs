@@ -61,6 +61,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                         <Route path=path!("/sources") view=pages::Sources/>
                         <Route path=path!("/sources/:source") view=pages::SourceCatalog/>
                         <Route path=path!("/more") view=pages::More/>
+                        <Route path=path!("/about") view=pages::About/>
                         <Route path=path!("/manga/:id") view=pages::MangaPage/>
                         <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
                     </Routes>

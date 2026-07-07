@@ -62,6 +62,10 @@ pub fn More() -> impl IntoView {
                 }}
             </p>
             <crate::ConnectForm/>
+
+            <p class="home-more">
+                <a href="/about">"About yomu →"</a>
+            </p>
         </section>
     }
 }
