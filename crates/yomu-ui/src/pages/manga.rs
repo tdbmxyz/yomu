@@ -42,6 +42,41 @@ pub fn MangaPage() -> impl IntoView {
         }
     });
 
+    // Coming back from the reader must land where the list was left, not
+    // at the top. The browser can't restore the position itself: the page
+    // is empty until the detail fetch resolves. The position is recorded
+    // from scroll events as they happen — not in on_cleanup, which runs
+    // after navigation has already reset the scroll to 0 (that reset's own
+    // scroll event fires asynchronously, past the listener's removal, so
+    // it can't clobber the recording).
+    let scroll_key = format!("yomu-scroll:manga:{id}");
+    {
+        let key = scroll_key.clone();
+        let save_handle = window_event_listener(leptos::ev::scroll, move |_| {
+            if let Some(storage) = window().session_storage().ok().flatten() {
+                let y = window().scroll_y().unwrap_or(0.0);
+                let _ = storage.set_item(&key, &y.to_string());
+            }
+        });
+        on_cleanup(move || save_handle.remove());
+    }
+    let restored = StoredValue::new(false);
+    Effect::new(move |_| {
+        if detail.get().and_then(|r| r.ok()).is_none() || restored.get_value() {
+            return;
+        }
+        restored.set_value(true);
+        let key = scroll_key.clone();
+        request_animation_frame(move || {
+            if let Some(storage) = window().session_storage().ok().flatten()
+                && let Ok(Some(saved)) = storage.get_item(&key)
+                && let Ok(y) = saved.parse::<f64>()
+            {
+                window().scroll_to_with_x_and_y(0.0, y);
+            }
+        });
+    });
+
     // While a download is queued or running, keep refetching so the chapter
     // buttons flip to "downloaded" without a manual reload. Each completed
     // fetch schedules at most one follow-up, so this stops by itself.
