@@ -649,6 +649,12 @@ a.source-card:hover {
   color: var(--muted);
 }
 
+/* offline and not saved on this device: visibly not openable */
+.chapter-item.unavailable {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
 .select-box {
   color: var(--accent);
   flex-shrink: 0;
@@ -914,6 +920,19 @@ a.source-card:hover {
 
 .reader-msg {
   margin: auto;
+}
+
+.reader-unavailable {
+  text-align: center;
+  max-width: 26rem;
+  padding: 1rem;
+}
+
+.reader-unavailable-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 /* ---- paged mode ---- */

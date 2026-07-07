@@ -61,6 +61,7 @@ pub fn More() -> impl IntoView {
                     None => "checking…".into(),
                 }}
             </p>
+            <crate::ConnectForm/>
         </section>
     }
 }
