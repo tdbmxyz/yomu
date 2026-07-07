@@ -32,21 +32,58 @@ pub fn MangaPage() -> impl IntoView {
                 match client.manga(id).await {
                     Ok(detail) => {
                         offline::cache_put(&key, &detail);
-                        Ok(detail)
+                        Ok((detail, false))
                     }
                     // last-known-good: keeps the chapter list (and thus
-                    // device-saved chapters) reachable offline in the shell
-                    Err(err) => offline::cache_get(&key).ok_or(err),
+                    // device-saved chapters) reachable offline in the shell.
+                    // The flag marks the list as served-from-cache so rows
+                    // can show which chapters won't open without the server.
+                    Err(err) => offline::cache_get(&key).map(|d| (d, true)).ok_or(err),
                 }
             }
         }
+    });
+
+    // Coming back from the reader must land where the list was left, not
+    // at the top. The browser can't restore the position itself: the page
+    // is empty until the detail fetch resolves. The position is recorded
+    // from scroll events as they happen — not in on_cleanup, which runs
+    // after navigation has already reset the scroll to 0 (that reset's own
+    // scroll event fires asynchronously, past the listener's removal, so
+    // it can't clobber the recording).
+    let scroll_key = format!("yomu-scroll:manga:{id}");
+    {
+        let key = scroll_key.clone();
+        let save_handle = window_event_listener(leptos::ev::scroll, move |_| {
+            if let Some(storage) = window().session_storage().ok().flatten() {
+                let y = window().scroll_y().unwrap_or(0.0);
+                let _ = storage.set_item(&key, &y.to_string());
+            }
+        });
+        on_cleanup(move || save_handle.remove());
+    }
+    let restored = StoredValue::new(false);
+    Effect::new(move |_| {
+        if detail.get().and_then(|r| r.ok()).is_none() || restored.get_value() {
+            return;
+        }
+        restored.set_value(true);
+        let key = scroll_key.clone();
+        request_animation_frame(move || {
+            if let Some(storage) = window().session_storage().ok().flatten()
+                && let Ok(Some(saved)) = storage.get_item(&key)
+                && let Ok(y) = saved.parse::<f64>()
+            {
+                window().scroll_to_with_x_and_y(0.0, y);
+            }
+        });
     });
 
     // While a download is queued or running, keep refetching so the chapter
     // buttons flip to "downloaded" without a manual reload. Each completed
     // fetch schedules at most one follow-up, so this stops by itself.
     Effect::new(move |_| {
-        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|d| {
+        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|(d, _)| {
             d.chapters.iter().any(|c| {
                 matches!(
                     c.download,
@@ -65,8 +102,8 @@ pub fn MangaPage() -> impl IntoView {
     view! {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-            Some(Ok(detail)) => {
-                view! { <MangaDetail detail refresh status selected anchor/> }.into_any()
+            Some(Ok((detail, offline))) => {
+                view! { <MangaDetail detail offline refresh status selected anchor/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -78,6 +115,9 @@ pub fn MangaPage() -> impl IntoView {
 #[component]
 fn MangaDetail(
     detail: MangaDetailResponse,
+    /// The detail came from the offline cache: the server is unreachable,
+    /// so chapters not saved on this device won't open.
+    offline: bool,
     refresh: RwSignal<u32>,
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
@@ -255,6 +295,7 @@ fn MangaDetail(
             <ChapterList
                 manga_id=id
                 chapters=detail.chapters
+                offline
                 position_chapter=position.map(|p| p.chapter_id)
                 refresh
                 status
@@ -269,6 +310,7 @@ fn MangaDetail(
 fn ChapterList(
     manga_id: Uuid,
     chapters: Vec<Chapter>,
+    offline: bool,
     position_chapter: Option<Uuid>,
     refresh: RwSignal<u32>,
     status: RwSignal<Option<String>>,
@@ -363,6 +405,7 @@ fn ChapterList(
                         <ChapterItem
                             manga_id
                             chapter
+                            offline
                             current
                             refresh
                             index
@@ -394,6 +437,7 @@ fn ChapterList(
 fn ChapterItem(
     manga_id: Uuid,
     chapter: Chapter,
+    offline: bool,
     current: bool,
     refresh: RwSignal<u32>,
     index: usize,
@@ -469,17 +513,23 @@ fn ChapterItem(
         }
     };
 
-    let (download_label, downloadable) = match &chapter.download {
-        DownloadState::None => ("download", true),
-        DownloadState::Pending => ("queued…", false),
-        DownloadState::Downloading => ("downloading…", false),
-        DownloadState::Downloaded { .. } => ("downloaded", false),
-        DownloadState::Failed { .. } => ("retry download", true),
+    // Tachidesk-style state icons: one arrow-in-a-circle per storage tier,
+    // told apart by color (accent = on the server, green = on this device).
+    let (server_glyph, server_title, downloadable) = match &chapter.download {
+        DownloadState::None => ("↓", "Download to the server".to_string(), true),
+        DownloadState::Pending => ("↻", "Queued for download…".to_string(), false),
+        DownloadState::Downloading => ("↻", "Downloading…".to_string(), false),
+        DownloadState::Downloaded { .. } => ("✓", "On the server".to_string(), false),
+        DownloadState::Failed { reason, .. } => {
+            ("!", format!("Download failed: {reason} — retry"), true)
+        }
     };
-    let failed_reason = match &chapter.download {
-        DownloadState::Failed { reason, .. } => Some(reason.clone()),
-        _ => None,
-    };
+    let server_busy = matches!(
+        chapter.download,
+        DownloadState::Pending | DownloadState::Downloading
+    );
+    let server_done = matches!(chapter.download, DownloadState::Downloaded { .. });
+    let server_failed = matches!(chapter.download, DownloadState::Failed { .. });
 
     let download = move |_| {
         let client = client.clone();
@@ -529,6 +579,12 @@ fn ChapterItem(
             class:current=current
             class:read=read
             class:selected=move || is_selected.get()
+            // Served from the offline cache: chapters that aren't on this
+            // device can't open until the server is reachable again.
+            class:unavailable=move || offline && !on_device.get()
+            title=move || {
+                (offline && !on_device.get()).then_some("Not available offline")
+            }
             on:pointerdown=pointer_down
             on:pointermove=pointer_move
             on:pointerup=move |_| cancel()
@@ -547,34 +603,43 @@ fn ChapterItem(
             </a>
             {chapter
                 .page_count
-                .map(|c| view! { <span class="muted">{c} " p."</span> })}
-            {failed_reason
-                .map(|reason| {
-                    view! {
-                        <span class="error" title=reason>
-                            "✕"
-                        </span>
-                    }
-                })}
+                .map(|c| view! { <span class="muted chapter-pages">{c} " p."</span> })}
             <span class="grow"></span>
             <Show when=move || !selection_active.get()>
                 <button
-                    title="Store on this device for offline reading"
+                    class="icon-btn device-dl"
+                    class:done=move || on_device.get()
+                    class:busy=move || device_busy.get()
+                    title=move || {
+                        if on_device.get() {
+                            "Saved on this device"
+                        } else {
+                            "Store on this device for offline reading"
+                        }
+                    }
                     disabled=move || device_busy.get() || on_device.get()
                     on:click=device_download.clone()
                 >
                     {move || {
                         if on_device.get() {
-                            "on device ✓"
+                            "✓"
                         } else if device_busy.get() {
-                            "saving…"
+                            "↻"
                         } else {
-                            "save to device"
+                            "↓"
                         }
                     }}
                 </button>
-                <button disabled=!downloadable on:click=download.clone()>
-                    {download_label}
+                <button
+                    class="icon-btn server-dl"
+                    class:done=server_done
+                    class:busy=server_busy
+                    class:failed=server_failed
+                    title=server_title.clone()
+                    disabled=!downloadable
+                    on:click=download.clone()
+                >
+                    {server_glyph}
                 </button>
             </Show>
         </li>

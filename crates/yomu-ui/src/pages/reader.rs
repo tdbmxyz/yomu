@@ -302,6 +302,29 @@ fn ReaderInner() -> impl IntoView {
     };
     let menu_open = RwSignal::new(false);
 
+    // ‹ › on the pill turn a single page in both modes. In the vertical
+    // strip a "turn" is a scroll to the adjacent page image — the scroll
+    // handler then journals the new position like any user scroll.
+    let go_page = {
+        let turn = turn.clone();
+        move |delta: i64| match mode.get_untracked() {
+            ReaderMode::Paged => turn(delta),
+            ReaderMode::Vertical => {
+                let chapter = current_chapter.get_untracked();
+                let count = shown_count().max(1) as i64;
+                let current = page.get_untracked() as i64;
+                let target = (current + delta).clamp(0, count - 1);
+                if target == current {
+                    return;
+                }
+                let selector = format!("img[data-chapter='{chapter}'][data-page='{target}']");
+                if let Ok(Some(img)) = document().query_selector(&selector) {
+                    img.scroll_into_view();
+                }
+            }
+        }
+    };
+
     view! {
         <div
             class="reader-overlay"
@@ -328,8 +351,26 @@ fn ReaderInner() -> impl IntoView {
                 match pages.get() {
                     None => view! { <p class="muted reader-msg">"Loading pages…"</p> }.into_any(),
                     Some(Err(err)) => {
+                        // A chapter that isn't stored on this device needs
+                        // the server — when that's what failed, say so and
+                        // point at the connect form instead of dumping a
+                        // bare transport error.
                         view! {
-                            <p class="error reader-msg">"Cannot load chapter: " {err.to_string()}</p>
+                            <div class="reader-msg reader-unavailable">
+                                <p class="error">"This chapter isn't available"</p>
+                                <p class="muted">
+                                    "It isn't stored on this device and the server "
+                                    "couldn't be reached (" {err.to_string()} ")."
+                                </p>
+                                <p class="reader-unavailable-actions">
+                                    <a class="button" href=format!("/manga/{manga_id}")>
+                                        "Back to the chapter list"
+                                    </a>
+                                    <a class="button primary" href="/more">
+                                        "Connect to a server"
+                                    </a>
+                                </p>
+                            </div>
                         }
                             .into_any()
                     }
@@ -559,6 +600,11 @@ fn ReaderInner() -> impl IntoView {
                             // keyboards page with the arrows, neither of
                             // which touches the strip element.
                             let positioned = StoredValue::new(false);
+                            // Which way the reader is travelling — decides
+                            // whether a straddling image load may compensate
+                            // the scroll (see on_load below).
+                            let scroll_up = StoredValue::new(false);
+                            let last_scroll_y = StoredValue::new(0.0f64);
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
                             // rewind the saved position.
@@ -719,6 +765,12 @@ fn ReaderInner() -> impl IntoView {
                                         .ok()
                                         .and_then(|h| h.as_f64())
                                         .unwrap_or(0.0);
+                                    let y = window().scroll_y().unwrap_or(0.0);
+                                    let previous = last_scroll_y.get_value();
+                                    if (y - previous).abs() > 0.5 {
+                                        scroll_up.set_value(y < previous);
+                                        last_scroll_y.set_value(y);
+                                    }
                                     // the page under the viewport's midline
                                     let middle = viewport / 2.0;
                                     let mut at: Option<(uuid::Uuid, u32)> = None;
@@ -889,6 +941,21 @@ fn ReaderInner() -> impl IntoView {
                                                 if rect.top() >= 0.0 {
                                                     return;
                                                 }
+                                                // An image straddling the top
+                                                // edge is the one a fast fling
+                                                // just carried the reader into:
+                                                // compensating would jump them
+                                                // a page ahead, over and over —
+                                                // runaway scrolling. Only glue
+                                                // the view when travelling
+                                                // upwards (backward reading);
+                                                // an image *fully* above the
+                                                // viewport is always safe.
+                                                if rect.bottom() > 0.0
+                                                    && !scroll_up.get_value()
+                                                {
+                                                    return;
+                                                }
                                                 let placeholder = window()
                                                     .get_computed_style(&img)
                                                     .ok()
@@ -996,6 +1063,8 @@ fn ReaderInner() -> impl IntoView {
                     })
             }}
 
+            // ‹ › turn pages; the bar-style |‹ ›| jump chapters, so the
+            // controls around the page counter actually act on pages.
             <div class="reader-chrome reader-bottom">
                 {move || {
                     neighbours()
@@ -1007,14 +1076,34 @@ fn ReaderInner() -> impl IntoView {
                                     title="Previous chapter"
                                     href=format!("/read/{manga_id}/{prev}")
                                 >
-                                    "‹"
+                                    "|‹"
                                 </a>
                             }
                         })
                 }}
+                <button
+                    class="pill-btn"
+                    title="Previous page"
+                    on:click={
+                        let go_page = go_page.clone();
+                        move |_| go_page(-1)
+                    }
+                >
+                    "‹"
+                </button>
                 <span class="pill-counter">
                     {move || format!("{} / {}", page.get() + 1, shown_count().max(1))}
                 </span>
+                <button
+                    class="pill-btn"
+                    title="Next page"
+                    on:click={
+                        let go_page = go_page.clone();
+                        move |_| go_page(1)
+                    }
+                >
+                    "›"
+                </button>
                 {move || {
                     neighbours()
                         .and_then(|(_, next)| next)
@@ -1025,7 +1114,7 @@ fn ReaderInner() -> impl IntoView {
                                     title="Next chapter"
                                     href=format!("/read/{manga_id}/{next}")
                                 >
-                                    "›"
+                                    "›|"
                                 </a>
                             }
                         })

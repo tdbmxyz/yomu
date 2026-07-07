@@ -12,6 +12,10 @@
   --accent: #4fd1c5;
   --accent-contrast: #06211e;
   --down: #f87171;
+  /* "saved on this device" tier in chapter state icons, across all themes
+     (the server tier uses the theme accent) */
+  --saved: #4ade80;
+  --saved-contrast: #06210f;
   --font-body: system-ui, sans-serif;
   --font-display: inherit;
 }
@@ -645,6 +649,12 @@ a.source-card:hover {
   color: var(--muted);
 }
 
+/* offline and not saved on this device: visibly not openable */
+.chapter-item.unavailable {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
 .select-box {
   color: var(--accent);
   flex-shrink: 0;
@@ -696,6 +706,62 @@ a.source-card:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chapter-pages {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* chapter state icons: round, compact, color-coded per storage tier */
+.icon-btn {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* a filled icon *is* the state display; don't wash it out because the
+   button happens to be disabled */
+.icon-btn.done:disabled {
+  opacity: 1;
+  border-color: transparent;
+}
+
+.icon-btn.server-dl.done {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.icon-btn.device-dl.done {
+  background: var(--saved);
+  color: var(--saved-contrast);
+}
+
+.icon-btn.device-dl:not(.done):not(:disabled) {
+  color: var(--saved);
+}
+
+.icon-btn.failed {
+  border-color: var(--down);
+  color: var(--down);
+}
+
+.icon-btn.busy {
+  opacity: 1;
+  animation: icon-spin 1.2s linear infinite;
+}
+
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .chapter-title:hover {
@@ -806,6 +872,17 @@ a.source-card:hover {
   border: none;
 }
 
+/* chapter jumps (|‹ ›|) sit outermost and read as secondary next to the
+   page arrows around the counter */
+.reader-bottom a.pill-btn {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.reader-bottom a.pill-btn:hover {
+  color: var(--accent);
+}
+
 .pill-counter {
   color: var(--accent);
   font-weight: 600;
@@ -843,6 +920,19 @@ a.source-card:hover {
 
 .reader-msg {
   margin: auto;
+}
+
+.reader-unavailable {
+  text-align: center;
+  max-width: 26rem;
+  padding: 1rem;
+}
+
+.reader-unavailable-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 /* ---- paged mode ---- */

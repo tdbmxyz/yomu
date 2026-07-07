@@ -61,6 +61,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                         <Route path=path!("/sources") view=pages::Sources/>
                         <Route path=path!("/sources/:source") view=pages::SourceCatalog/>
                         <Route path=path!("/more") view=pages::More/>
+                        <Route path=path!("/about") view=pages::About/>
                         <Route path=path!("/manga/:id") view=pages::MangaPage/>
                         <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
                     </Routes>
@@ -105,6 +106,36 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
         }
     });
 
+    view! {
+        {move || match gate.get() {
+            GateState::Checking => view! { <p class="muted gate-msg">"Connecting…"</p> }.into_any(),
+            GateState::Ready => children().into_any(),
+            GateState::Unreachable => {
+                view! {
+                    <section class="server-gate">
+                        <h2>"Cannot reach the yomu server"</h2>
+                        <p class="muted">
+                            "Enter the address of your server (for example "
+                            <code>"http://192.168.1.128:4700"</code> ")."
+                        </p>
+                        <ConnectForm>
+                            <button on:click=move |_| gate.set(GateState::Ready)>
+                                "Continue anyway"
+                            </button>
+                        </ConnectForm>
+                    </section>
+                }
+                    .into_any()
+            }
+        }}
+    }
+}
+
+/// Server address form: stores the `yomu-api-base` override the API-base
+/// resolution honors and reloads. Used by the startup gate and by the
+/// More page (so an offline reader has somewhere to point at a server).
+#[component]
+pub(crate) fn ConnectForm(#[prop(optional)] children: Option<ChildrenFn>) -> impl IntoView {
     let current = use_client().base().to_string();
     let input = RwSignal::new(current.clone());
     let save = move |_| {
@@ -121,35 +152,17 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
     };
 
     view! {
-        {move || match gate.get() {
-            GateState::Checking => view! { <p class="muted gate-msg">"Connecting…"</p> }.into_any(),
-            GateState::Ready => children().into_any(),
-            GateState::Unreachable => {
-                view! {
-                    <section class="server-gate">
-                        <h2>"Cannot reach the yomu server"</h2>
-                        <p class="muted">
-                            "Enter the address of your server (for example "
-                            <code>"http://192.168.1.128:4700"</code> ")."
-                        </p>
-                        <div class="gate-form">
-                            <input
-                                type="url"
-                                prop:value=move || input.get()
-                                on:input=move |ev| input.set(event_target_value(&ev))
-                            />
-                            <button class="primary" on:click=save>
-                                "Connect"
-                            </button>
-                            <button on:click=move |_| gate.set(GateState::Ready)>
-                                "Continue anyway"
-                            </button>
-                        </div>
-                    </section>
-                }
-                    .into_any()
-            }
-        }}
+        <div class="gate-form">
+            <input
+                type="url"
+                prop:value=move || input.get()
+                on:input=move |ev| input.set(event_target_value(&ev))
+            />
+            <button class="primary" on:click=save>
+                "Connect"
+            </button>
+            {children.map(|c| c())}
+        </div>
     }
 }
 

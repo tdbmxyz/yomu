@@ -10,6 +10,9 @@ use crate::{Chapter, Manga, Position};
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    /// Short commit hash the server was built from, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// Uniform error body returned by the API for non-2xx responses.
