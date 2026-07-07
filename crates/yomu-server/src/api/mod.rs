@@ -79,5 +79,6 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
+        commit: option_env!("YOMU_BUILD_COMMIT").map(Into::into),
     })
 }

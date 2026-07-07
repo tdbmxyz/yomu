@@ -1,3 +1,4 @@
+mod about;
 mod home;
 mod library;
 mod manga;
@@ -6,6 +7,7 @@ mod reader;
 mod search;
 mod sources;
 
+pub use about::About;
 pub use home::Home;
 pub use library::Library;
 pub use manga::MangaPage;

@@ -33,6 +33,9 @@
     };
 
     version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+    # The flake source has no .git for the build scripts to ask; hand the
+    # commit over explicitly (shown on the About page / health endpoint).
+    buildCommit = self.shortRev or self.dirtyShortRev or "unknown";
 
     rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
     rustPlatform = pkgs.makeRustPlatform {
@@ -89,6 +92,7 @@
       cargoLock.lockFile = ./Cargo.lock;
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
+      env.YOMU_BUILD_COMMIT = buildCommit;
 
       meta = {
         description = "yomu backend: manga library, downloader, progress tracking";
@@ -102,6 +106,7 @@
       src = self;
 
       cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
+      YOMU_BUILD_COMMIT = buildCommit;
 
       nativeBuildInputs = [
         rustToolchain
@@ -142,6 +147,7 @@
 
       cargoBuildFlags = ["-p" "yomu-shell"];
       cargoTestFlags = ["-p" "yomu-shell"];
+      env.YOMU_BUILD_COMMIT = buildCommit;
 
       nativeBuildInputs = with pkgs; [pkg-config wrapGAppsHook3];
       buildInputs = tauriLibs ++ [pkgs.glib-networking];
