@@ -302,6 +302,29 @@ fn ReaderInner() -> impl IntoView {
     };
     let menu_open = RwSignal::new(false);
 
+    // ‹ › on the pill turn a single page in both modes. In the vertical
+    // strip a "turn" is a scroll to the adjacent page image — the scroll
+    // handler then journals the new position like any user scroll.
+    let go_page = {
+        let turn = turn.clone();
+        move |delta: i64| match mode.get_untracked() {
+            ReaderMode::Paged => turn(delta),
+            ReaderMode::Vertical => {
+                let chapter = current_chapter.get_untracked();
+                let count = shown_count().max(1) as i64;
+                let current = page.get_untracked() as i64;
+                let target = (current + delta).clamp(0, count - 1);
+                if target == current {
+                    return;
+                }
+                let selector = format!("img[data-chapter='{chapter}'][data-page='{target}']");
+                if let Ok(Some(img)) = document().query_selector(&selector) {
+                    img.scroll_into_view();
+                }
+            }
+        }
+    };
+
     view! {
         <div
             class="reader-overlay"
@@ -1022,6 +1045,8 @@ fn ReaderInner() -> impl IntoView {
                     })
             }}
 
+            // ‹ › turn pages; the bar-style |‹ ›| jump chapters, so the
+            // controls around the page counter actually act on pages.
             <div class="reader-chrome reader-bottom">
                 {move || {
                     neighbours()
@@ -1033,14 +1058,34 @@ fn ReaderInner() -> impl IntoView {
                                     title="Previous chapter"
                                     href=format!("/read/{manga_id}/{prev}")
                                 >
-                                    "‹"
+                                    "|‹"
                                 </a>
                             }
                         })
                 }}
+                <button
+                    class="pill-btn"
+                    title="Previous page"
+                    on:click={
+                        let go_page = go_page.clone();
+                        move |_| go_page(-1)
+                    }
+                >
+                    "‹"
+                </button>
                 <span class="pill-counter">
                     {move || format!("{} / {}", page.get() + 1, shown_count().max(1))}
                 </span>
+                <button
+                    class="pill-btn"
+                    title="Next page"
+                    on:click={
+                        let go_page = go_page.clone();
+                        move |_| go_page(1)
+                    }
+                >
+                    "›"
+                </button>
                 {move || {
                     neighbours()
                         .and_then(|(_, next)| next)
@@ -1051,7 +1096,7 @@ fn ReaderInner() -> impl IntoView {
                                     title="Next chapter"
                                     href=format!("/read/{manga_id}/{next}")
                                 >
-                                    "›"
+                                    "›|"
                                 </a>
                             }
                         })
