@@ -559,6 +559,11 @@ fn ReaderInner() -> impl IntoView {
                             // keyboards page with the arrows, neither of
                             // which touches the strip element.
                             let positioned = StoredValue::new(false);
+                            // Which way the reader is travelling — decides
+                            // whether a straddling image load may compensate
+                            // the scroll (see on_load below).
+                            let scroll_up = StoredValue::new(false);
+                            let last_scroll_y = StoredValue::new(0.0f64);
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
                             // rewind the saved position.
@@ -719,6 +724,12 @@ fn ReaderInner() -> impl IntoView {
                                         .ok()
                                         .and_then(|h| h.as_f64())
                                         .unwrap_or(0.0);
+                                    let y = window().scroll_y().unwrap_or(0.0);
+                                    let previous = last_scroll_y.get_value();
+                                    if (y - previous).abs() > 0.5 {
+                                        scroll_up.set_value(y < previous);
+                                        last_scroll_y.set_value(y);
+                                    }
                                     // the page under the viewport's midline
                                     let middle = viewport / 2.0;
                                     let mut at: Option<(uuid::Uuid, u32)> = None;
@@ -887,6 +898,21 @@ fn ReaderInner() -> impl IntoView {
                                                 };
                                                 let rect = img.get_bounding_client_rect();
                                                 if rect.top() >= 0.0 {
+                                                    return;
+                                                }
+                                                // An image straddling the top
+                                                // edge is the one a fast fling
+                                                // just carried the reader into:
+                                                // compensating would jump them
+                                                // a page ahead, over and over —
+                                                // runaway scrolling. Only glue
+                                                // the view when travelling
+                                                // upwards (backward reading);
+                                                // an image *fully* above the
+                                                // viewport is always safe.
+                                                if rect.bottom() > 0.0
+                                                    && !scroll_up.get_value()
+                                                {
                                                     return;
                                                 }
                                                 let placeholder = window()
