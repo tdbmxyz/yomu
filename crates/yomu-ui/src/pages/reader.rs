@@ -317,8 +317,7 @@ fn ReaderInner() -> impl IntoView {
                 if target == current {
                     return;
                 }
-                let selector =
-                    format!("img[data-chapter='{chapter}'][data-page='{target}']");
+                let selector = format!("img[data-chapter='{chapter}'][data-page='{target}']");
                 if let Ok(Some(img)) = document().query_selector(&selector) {
                     img.scroll_into_view();
                 }
