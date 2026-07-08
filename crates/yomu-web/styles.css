@@ -1042,6 +1042,24 @@ body:has(.reader-overlay.flow) main {
   text-align: center;
 }
 
+/* Non-blocking "server unreachable, showing saved content" hint. Fixed,
+   out of the way, and it never intercepts taps. */
+.offline-banner {
+  position: fixed;
+  top: calc(0.4rem + env(safe-area-inset-top, 0px));
+  right: 0.5rem;
+  z-index: 40;
+  pointer-events: none;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+}
+
 .server-gate {
   max-width: 32rem;
   margin: 15vh auto 0;

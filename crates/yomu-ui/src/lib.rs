@@ -83,33 +83,80 @@ pub fn App(config: AppConfig) -> impl IntoView {
 #[derive(Clone, Copy, PartialEq)]
 enum GateState {
     Checking,
+    /// Server answered: render normally.
     Ready,
+    /// Server unreachable but reached before: render the cached UI with a
+    /// non-blocking offline indicator. Reading downloaded chapters is the
+    /// expected behaviour here, so the connect form must not block it.
+    Offline,
+    /// Server unreachable and never reached from this address: genuine
+    /// first-run or a wrong address — show the connect form.
     Unreachable,
 }
 
-/// Blocks the app behind a health check so a shell (Tauri, or a fresh
-/// PWA install) pointing at the wrong place gets a "connect to your
-/// server" form instead of a wall of failed requests. The chosen URL is
-/// the `yomu-api-base` localStorage override the API-base resolution
-/// already honors. Offline is NOT unreachable: the cached UI must stay
-/// usable, so the gate opens and the offline plumbing takes over.
+/// Blocks the app behind a health check so a shell (Tauri, or a fresh PWA
+/// install) pointing at the wrong place gets a "connect to your server"
+/// form instead of a wall of failed requests. The chosen URL is the
+/// `yomu-api-base` localStorage override the API-base resolution already
+/// honors.
+///
+/// The decision is "have we ever reached *this* address?", not
+/// `navigator.onLine`: away from a self-hosted server the device still has
+/// connectivity (`onLine` is true) with no route home, and blocking there
+/// would hide the downloaded library. A server that answered before is
+/// treated as merely offline (gate opens, cached UI + offline hint); one
+/// that never answered is treated as misconfigured (connect form).
 #[component]
 fn ServerGate(children: ChildrenFn) -> impl IntoView {
     let gate = RwSignal::new(GateState::Checking);
     let client = use_client();
-    spawn_local(async move {
-        let online = web_sys::window().is_none_or(|w| w.navigator().on_line());
-        match client.health().await {
-            Ok(_) => gate.set(GateState::Ready),
-            Err(_) if !online => gate.set(GateState::Ready),
-            Err(_) => gate.set(GateState::Unreachable),
+    let base = client.base().to_string();
+    spawn_local({
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            match client.health().await {
+                Ok(_) => {
+                    offline::mark_server_seen(&base);
+                    gate.set(GateState::Ready);
+                }
+                Err(_) if offline::server_seen(&base) => gate.set(GateState::Offline),
+                Err(_) => gate.set(GateState::Unreachable),
+            }
         }
     });
+
+    // When the browser regains connectivity, re-check: a server that comes
+    // back clears the offline banner without a reload. Only promotes
+    // towards Ready — it never throws an offline reader back to the gate.
+    let online_handle = window_event_listener(leptos::ev::online, move |_| {
+        if gate.get_untracked() == GateState::Ready {
+            return;
+        }
+        let client = client.clone();
+        let base = base.clone();
+        spawn_local(async move {
+            if client.health().await.is_ok() {
+                offline::mark_server_seen(&base);
+                gate.set(GateState::Ready);
+            }
+        });
+    });
+    on_cleanup(move || online_handle.remove());
 
     view! {
         {move || match gate.get() {
             GateState::Checking => view! { <p class="muted gate-msg">"Connecting…"</p> }.into_any(),
             GateState::Ready => children().into_any(),
+            GateState::Offline => {
+                view! {
+                    <div class="offline-banner" title="The server is unreachable — showing saved content.">
+                        "offline"
+                    </div>
+                    {children()}
+                }
+                    .into_any()
+            }
             GateState::Unreachable => {
                 view! {
                     <section class="server-gate">
@@ -119,7 +166,7 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
                             <code>"http://192.168.1.128:4700"</code> ")."
                         </p>
                         <ConnectForm>
-                            <button on:click=move |_| gate.set(GateState::Ready)>
+                            <button on:click=move |_| gate.set(GateState::Offline)>
                                 "Continue anyway"
                             </button>
                         </ConnectForm>

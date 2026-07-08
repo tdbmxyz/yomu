@@ -317,6 +317,13 @@ fn ChapterList(
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
 ) -> impl IntoView {
+    // Display newest chapter first. Only the on-page list is reversed —
+    // `list_chapters` stays in reading order (Chapter 1 → N), which the
+    // reader relies on for prev/next navigation, the continuous strip, and
+    // the server's prefix "mark read" logic. Reversing here keeps this
+    // component's indices (ids, selection range, rendering) consistent
+    // among themselves.
+    let chapters: Vec<Chapter> = chapters.into_iter().rev().collect();
     let ids = StoredValue::new(chapters.iter().map(|c| c.id).collect::<Vec<_>>());
 
     // Long-press: the first one starts a selection; while one is active,

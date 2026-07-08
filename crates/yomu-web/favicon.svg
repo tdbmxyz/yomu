@@ -1,0 +1,31 @@
+<svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="yomu — open book logo">
+  <!-- Open-book mark: blue gradient fan over a black disc, gold page edges.
+       Colours resolved to literals (no CSS var()) so every rasteriser
+       renders it identically at any size. Source of truth for the web
+       favicon and the desktop/Android app icons (see cargo tauri icon). -->
+  <defs>
+    <radialGradient id="blueShell" cx="50%" cy="74%" r="72%">
+      <stop offset="0%" stop-color="#cdd2e6"></stop>
+      <stop offset="42%" stop-color="#a3abcc"></stop>
+      <stop offset="100%" stop-color="#767fa8"></stop>
+    </radialGradient>
+    <linearGradient id="goldEdge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f6d3a4"></stop>
+      <stop offset="52%" stop-color="#e6ac70"></stop>
+      <stop offset="100%" stop-color="#c98c4f"></stop>
+    </linearGradient>
+  </defs>
+
+  <circle cx="300" cy="300" r="291" fill="#080808"></circle>
+
+  <path d="M 52 305
+           A 248 248 0 0 1 548 305
+           C 452 482, 308 472, 300 560
+           C 292 472, 148 482, 52 305 Z"
+        fill="url(#blueShell)"></path>
+
+  <path d="M 52 305 C 148 482, 292 470, 294 556"
+        fill="none" stroke="url(#goldEdge)" stroke-width="13" stroke-linecap="round"></path>
+  <path d="M 548 305 C 452 482, 308 470, 306 556"
+        fill="none" stroke="url(#goldEdge)" stroke-width="13" stroke-linecap="round"></path>
+</svg>
