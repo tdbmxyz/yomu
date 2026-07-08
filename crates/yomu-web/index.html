@@ -6,10 +6,16 @@
     <title>yomu</title>
     <meta name="theme-color" content="#14161c" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/icon-192.png" />
+    <!-- Scalable SVG favicon first (crisp at any tab/bookmark size), PNG
+         fallback for browsers that don't take SVG icons; apple-touch-icon
+         for iOS home-screen installs. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
     <link data-trunk rel="css" href="styles.css" />
     <link data-trunk rel="copy-file" href="sw.js" />
     <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="favicon.svg" />
     <link data-trunk rel="copy-file" href="icon-192.png" />
     <link data-trunk rel="copy-file" href="icon-512.png" />
     <!-- Register before the wasm bundle loads: the worker precaches the
