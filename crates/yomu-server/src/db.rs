@@ -246,11 +246,14 @@ impl Db {
         // A scraped listing can contain the same chapter twice; keep the
         // first occurrence, otherwise the second upsert discards an id we
         // just recorded as new.
-        let mut seen = std::collections::HashSet::new();
-        let listing = listing.iter().filter(|c| seen.insert(c.key.as_str()));
+        let mut current_keys = std::collections::HashSet::new();
+        let listing: Vec<&ChapterRef> = listing
+            .iter()
+            .filter(|c| current_keys.insert(c.key.clone()))
+            .collect();
 
         let mut new_ids = Vec::new();
-        for chapter in listing {
+        for chapter in &listing {
             let id = Uuid::now_v7();
             sqlx::query(
                 "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
@@ -272,6 +275,30 @@ impl Db {
             .await?;
             if !existing.contains(&chapter.key) {
                 new_ids.push(id);
+            }
+        }
+
+        // Reconcile: a source can move a chapter to a new URL (a re-upload),
+        // leaving the old row behind next to its twin — a duplicate the user
+        // sees ("Episode 45" twice, different keys). The insert/update above
+        // never removes it, so it accumulates across updater runs in a
+        // long-lived library. Drop rows that fell out of the listing — but
+        // only ones with nothing saved locally (state 'none'/'failed', never
+        // downloaded, not in flight), so downloaded content is never
+        // discarded here. Guarded by a non-empty listing so a transient
+        // empty/failed scrape can't wipe a manga (selector sources already
+        // error on an empty chapter list, but be defensive).
+        if !current_keys.is_empty() {
+            for stale in existing.difference(&current_keys) {
+                sqlx::query(
+                    "DELETE FROM chapters
+                     WHERE manga_id = ? AND source_key = ?
+                       AND download_state IN ('none', 'failed')",
+                )
+                .bind(manga_id.to_string())
+                .bind(stale)
+                .execute(&mut *tx)
+                .await?;
             }
         }
         tx.commit().await?;
@@ -973,6 +1000,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_prunes_chapters_that_left_the_listing() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details(
+                    "m1",
+                    &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c3", Some(3.0))],
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 3);
+
+        // c3 leaves the listing (re-uploaded as c4). Without reconciliation
+        // the old row would linger next to its twin — the duplicate bug.
+        db.sync_chapters(
+            manga.id,
+            &details(
+                "m1",
+                &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c4", Some(3.0))],
+            )
+            .chapters,
+        )
+        .await
+        .unwrap();
+        let keys: Vec<String> = db
+            .list_chapters(manga.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.source_key)
+            .collect();
+        assert_eq!(keys, ["c1", "c2", "c4"], "c3 pruned, c4 kept");
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_downloaded_chapters_and_never_wipes_on_empty() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c1", Some(1.0)), ("c2", Some(2.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        // c2 is downloaded — it must survive falling out of the listing
+        // (its saved pages would otherwise be orphaned).
+        let c2 = db
+            .list_chapters(manga.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.source_key == "c2")
+            .unwrap();
+        db.mark_pending(&[c2.id]).await.unwrap();
+        db.set_downloading(c2.id).await.unwrap();
+        db.finish_download(c2.id, Ok(5)).await.unwrap();
+
+        db.sync_chapters(manga.id, &details("m1", &[("c1", Some(1.0))]).chapters)
+            .await
+            .unwrap();
+        let keys: Vec<String> = db
+            .list_chapters(manga.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.source_key)
+            .collect();
+        assert_eq!(
+            keys,
+            ["c1", "c2"],
+            "downloaded c2 kept despite leaving listing"
+        );
+
+        // An empty listing must never wipe the library (bad/blocked scrape).
+        db.sync_chapters(manga.id, &[]).await.unwrap();
+        assert_eq!(
+            db.list_chapters(manga.id).await.unwrap().len(),
+            2,
+            "empty listing left the chapters untouched"
+        );
+    }
+
+    #[tokio::test]
     async fn progress_journal_merge_and_idempotency() {
         let db = Db::in_memory().await.unwrap();
         let manga = db
@@ -1217,11 +1331,17 @@ mod tests {
             .unwrap();
 
         // The same chapter listed twice (scraped page quirk): one row, one
-        // "new chapter", and the sync must not error after commit.
+        // "new chapter", and the sync must not error after commit. c1 is
+        // kept in the listing so reconciliation doesn't prune it — this test
+        // is about de-duplicating the doubled c2, not about pruning.
         let new = db
             .sync_chapters(
                 manga.id,
-                &details("m1", &[("c2", Some(2.0)), ("c2", Some(2.0))]).chapters,
+                &details(
+                    "m1",
+                    &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c2", Some(2.0))],
+                )
+                .chapters,
             )
             .await
             .unwrap();
