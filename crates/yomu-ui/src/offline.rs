@@ -321,6 +321,30 @@ pub async fn shell_save_chapter(
     Ok(meta.page_count)
 }
 
+// ---- server-seen (offline gate) ----
+
+const SERVERS_SEEN_KEY: &str = "yomu-servers-seen";
+
+/// Record that a server address answered a health check. Scoped by base
+/// URL so pointing the app at a new address still shows the first-run
+/// connect form for *that* address if it can't be reached.
+pub fn mark_server_seen(base: &str) {
+    let mut seen: Vec<String> = read_json(SERVERS_SEEN_KEY);
+    if !seen.iter().any(|s| s == base) {
+        seen.push(base.to_string());
+        write_json(SERVERS_SEEN_KEY, &seen);
+    }
+}
+
+/// Whether this server address has ever answered a health check. When it
+/// has, an unreachable server means "offline", not "misconfigured", so the
+/// boot gate proceeds to the cached UI instead of the connect form.
+pub fn server_seen(base: &str) -> bool {
+    read_json::<Vec<String>>(SERVERS_SEEN_KEY)
+        .iter()
+        .any(|s| s == base)
+}
+
 // ---- last-known-good cache (offline browsing without a service worker) ----
 
 const CACHE_KEY_PREFIX: &str = "yomu-cache:";
