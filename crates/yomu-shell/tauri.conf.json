@@ -5,7 +5,7 @@
   "identifier": "xyz.tdbm.yomu",
   "build": {
     "beforeDevCommand": "",
-    "beforeBuildCommand": "trunk build --release --dist ../yomu-web/dist ../yomu-web/index.html",
+    "beforeBuildCommand": "cd $(git rev-parse --show-toplevel)/crates/yomu-web && trunk build --release",
     "frontendDist": "../yomu-web/dist"
   },
   "app": {
