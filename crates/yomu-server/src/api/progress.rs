@@ -70,7 +70,7 @@ async fn auto_mark_read(state: &AppState, user_id: Uuid, events: &[ProgressEvent
             ids.extend(chapters[..idx].iter().map(|c| c.id));
             if chapters[idx]
                 .page_count
-                .is_some_and(|n| event.page + 1 >= n)
+                .is_some_and(|n| event.page.saturating_add(1) >= n)
             {
                 ids.insert(event.chapter_id);
             }

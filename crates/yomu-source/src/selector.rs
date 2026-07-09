@@ -348,6 +348,18 @@ impl SelectorSource {
             .timeout(Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) yomu/0.1")
             .default_headers(headers)
+            // Cover/page image URLs come from parsed site HTML, so a redirect
+            // could aim the server at an internal address. Cap the hops and
+            // refuse any that land on a private/loopback target (SSRF guard).
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many redirects")
+                } else if is_private_target(attempt.url()) {
+                    attempt.error("redirect to a private address blocked")
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(|e| SourceError::Http(e.to_string()))?;
 
@@ -655,21 +667,67 @@ impl Source for SelectorSource {
     }
 
     async fn image(&self, url: &Url) -> Result<ImageData> {
-        let resp = self.get(url).await?;
+        if is_private_target(url) {
+            return Err(SourceError::Parse(format!(
+                "refusing to fetch a private address: {url}"
+            )));
+        }
+        let mut resp = self.get(url).await?;
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
-        let bytes = resp
-            .bytes()
+        // Bounded read: a hostile or broken upstream must not OOM the server
+        // by streaming an unbounded body (a lying/absent Content-Length can't
+        // get past the running total).
+        let mut bytes: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(|e| SourceError::Http(e.to_string()))?
+        {
+            if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
+                return Err(SourceError::Http(format!(
+                    "image exceeds {MAX_IMAGE_BYTES} byte cap: {url}"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         Ok(ImageData {
-            bytes,
+            bytes: bytes.into(),
             content_type,
         })
+    }
+}
+
+/// Upper bound on a proxied image, so a hostile/broken upstream can't OOM the
+/// server. Generous for manga pages (large webtoon strips run a few MiB).
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Whether a URL targets a private/loopback/link-local address — the cheap
+/// SSRF guard for proxied image URLs, which come from parsed site HTML and
+/// could otherwise aim the server at cloud metadata (169.254.169.254) or LAN
+/// hosts. A *hostname* that resolves to a private address (DNS rebinding) is
+/// out of scope here; that needs a connection-pinning resolver.
+fn is_private_target(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.octets()[0] == 0
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local  fe80::/10
+        }
+        _ => false,
     }
 }
 
@@ -840,6 +898,31 @@ mod tests {
             listing_url(&source.spec, listing, 3).unwrap().as_str(),
             "https://site.test/list?limit=32&offset=64"
         );
+    }
+
+    #[test]
+    fn private_targets_are_blocked() {
+        let blocked = [
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata
+            "http://127.0.0.1/admin",
+            "http://192.168.1.10/x",
+            "http://10.0.0.5/x",
+            "http://[::1]/x",
+            "http://[fd00::1]/x",
+        ];
+        for u in blocked {
+            assert!(
+                is_private_target(&Url::parse(u).unwrap()),
+                "should block {u}"
+            );
+        }
+        let allowed = ["https://cdn.example.com/a.jpg", "http://93.184.216.34/x"];
+        for u in allowed {
+            assert!(
+                !is_private_target(&Url::parse(u).unwrap()),
+                "should allow {u}"
+            );
+        }
     }
 
     #[test]
