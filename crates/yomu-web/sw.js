@@ -12,7 +12,7 @@
 //
 // Bump CACHE when the caching logic changes, or when a fixed-name asset
 // (favicon/app icons) changes so the old cache-first copy is purged.
-const CACHE = "yomu-v3";
+const CACHE = "yomu-v4";
 const SHELL = "/";
 
 // Hashed assets referenced by a shell document (href/src/import of

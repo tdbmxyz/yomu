@@ -1,0 +1,5 @@
+{
+  "default": "../yomu-web/icon.svg",
+  "bg_color": "#080808",
+  "android_fg_scale": 100
+}
