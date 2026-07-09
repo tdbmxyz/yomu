@@ -28,18 +28,9 @@ pub fn MangaPage() -> impl IntoView {
             refresh.track();
             let client = client.clone();
             async move {
-                let key = format!("manga:{id}");
-                match client.manga(id).await {
-                    Ok(detail) => {
-                        offline::cache_put(&key, &detail);
-                        Ok((detail, false))
-                    }
-                    // last-known-good: keeps the chapter list (and thus
-                    // device-saved chapters) reachable offline in the shell.
-                    // The flag marks the list as served-from-cache so rows
-                    // can show which chapters won't open without the server.
-                    Err(err) => offline::cache_get(&key).map(|d| (d, true)).ok_or(err),
-                }
+                // The flag marks the detail as served-from-cache (server
+                // unreachable) so rows can show which chapters won't open.
+                offline::with_cache_flagged(&format!("manga:{id}"), client.manga(id).await)
             }
         }
     });
@@ -80,8 +71,12 @@ pub fn MangaPage() -> impl IntoView {
     });
 
     // While a download is queued or running, keep refetching so the chapter
-    // buttons flip to "downloaded" without a manual reload. Each completed
-    // fetch schedules at most one follow-up, so this stops by itself.
+    // buttons flip to "downloaded" without a manual reload. At most one poll
+    // is ever in flight: the effect re-runs on any `refresh` (a user clicking
+    // Download/Refresh), and without this guard each such re-run would start
+    // a second concurrent 2s chain. The handle is cleared on unmount so a
+    // pending tick can't fire `refresh` on a disposed signal after navigation.
+    let poll = StoredValue::new(None::<TimeoutHandle>);
     Effect::new(move |_| {
         let busy = detail.get().and_then(|r| r.ok()).is_some_and(|(d, _)| {
             d.chapters.iter().any(|c| {
@@ -91,11 +86,21 @@ pub fn MangaPage() -> impl IntoView {
                 )
             })
         });
-        if busy {
-            set_timeout(
-                move || refresh.update(|n| *n += 1),
+        if busy && poll.with_value(Option::is_none) {
+            let handle = set_timeout_with_handle(
+                move || {
+                    poll.set_value(None);
+                    refresh.update(|n| *n += 1);
+                },
                 std::time::Duration::from_millis(2000),
-            );
+            )
+            .ok();
+            poll.set_value(handle);
+        }
+    });
+    on_cleanup(move || {
+        if let Some(handle) = poll.try_update_value(Option::take).flatten() {
+            handle.clear();
         }
     });
 

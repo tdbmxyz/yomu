@@ -17,15 +17,7 @@ pub fn Home() -> impl IntoView {
         let client = client.clone();
         move || {
             let client = client.clone();
-            async move {
-                match client.library().await {
-                    Ok(list) => {
-                        offline::cache_put("library", &list);
-                        Ok(list)
-                    }
-                    Err(err) => offline::cache_get("library").ok_or(err),
-                }
-            }
+            async move { offline::with_cache("library", client.library().await) }
         }
     });
 
