@@ -1,6 +1,7 @@
 //! What a scan-site source exposes, before anything enters the library.
 //! Keys are source-scoped opaque identifiers (usually the page URL path).
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -76,4 +77,7 @@ pub struct ChapterRef {
     pub source_order: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scanlator: Option<String>,
+    /// Release date as printed by the site's listing; best-effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<DateTime<Utc>>,
 }
