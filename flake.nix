@@ -200,6 +200,7 @@
             trunk
             binaryen
             just
+            cargo-nextest
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
       };

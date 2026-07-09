@@ -35,4 +35,4 @@ fmt:
     cargo fmt --all
 
 test:
-    cargo test --workspace --exclude yomu-shell
+    cargo nextest run --workspace --exclude yomu-shell
