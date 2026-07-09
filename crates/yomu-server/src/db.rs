@@ -971,6 +971,8 @@ impl TryFrom<ChapterRow> for Chapter {
             source_order: row.source_order as u32,
             scanlator: row.scanlator,
             fetched_at: row.fetched_at,
+            // Column arrives in the storage task of the dates feature.
+            published_at: None,
             download,
             page_count: row.page_count.map(|c| c as u32),
             // Per-user; filled at the API layer from `read_ids`.
@@ -1030,6 +1032,7 @@ mod tests {
                     number: *number,
                     source_order: i as u32,
                     scanlator: None,
+                    published_at: None,
                 })
                 .collect(),
         }

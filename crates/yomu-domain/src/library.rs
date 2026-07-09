@@ -58,6 +58,9 @@ pub struct Chapter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scanlator: Option<String>,
     pub fetched_at: DateTime<Utc>,
+    /// Release date scraped from the source listing, when it prints one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<DateTime<Utc>>,
     pub download: DownloadState,
     /// Known once pages have been listed (on download or first live read).
     #[serde(default, skip_serializing_if = "Option::is_none")]

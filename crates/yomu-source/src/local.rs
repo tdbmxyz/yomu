@@ -144,6 +144,7 @@ impl LocalSource {
                 number: chapter_number(title),
                 source_order: 0, // recency rank, assigned after sorting
                 scanlator: None,
+                published_at: None,
             });
         }
         if chapters.is_empty() {

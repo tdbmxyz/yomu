@@ -472,6 +472,7 @@ impl SelectorSource {
                 number,
                 source_order: index as u32,
                 scanlator: None,
+                published_at: None,
             });
         }
         // source_order is a recency rank (0 = newest); flip it for sites
