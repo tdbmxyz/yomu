@@ -1,0 +1,31 @@
+<svg viewBox="0 0 600 600" width="440" height="440" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Open book logo" style="display:block; width:min(80vmin,520px); height:auto; --blue-lo:#cdd2e6; --blue-mid:#a3abcc; --blue-hi:#767fa8; --gold-lo:#f6d3a4; --gold-mid:#e6ac70; --gold-hi:#c98c4f; --ring:#080808;">
+   <defs>
+	     <radialGradient id="blueShell" cx="50%" cy="88%" r="78%">
+			       <stop offset="0%" stop-color="var(--blue-lo)"></stop>
+						       <stop offset="45%" stop-color="var(--blue-mid)"></stop>
+									       <stop offset="100%" stop-color="var(--blue-hi)"></stop>
+												     </radialGradient>
+														     <linearGradient id="goldEdge" x1="0" y1="0" x2="0" y2="1">
+										      <stop offset="0%" stop-color="var(--gold-lo)"></stop>
+													      <stop offset="52%" stop-color="var(--gold-mid)"></stop>
+																      <stop offset="100%" stop-color="var(--gold-hi)"></stop>
+																			    </linearGradient>
+																					  </defs>
+
+																						  <!-- black disc -->
+																							  <circle cx="300" cy="300" r="291" fill="var(--ring)"></circle>
+
+																								  <!-- blue fan: wide top arc, bottom edge sweeps in to a narrow spine -->
+																									  <path d="M 92 355
+																	           A 232 232 0 0 1 508 355
+																	           C 400 375, 322 430, 306 545
+																	           L 294 545
+																	           C 278 430, 200 375, 92 355 Z"
+																	        fill="url(#blueShell)"></path>
+
+																					  <!-- gold page edges -->
+																						  <path d="M 92 355 C 200 375, 278 430, 294 545"
+															         fill="none" stroke="url(#goldEdge)" stroke-width="20" stroke-linecap="round"></path>
+																			   <path d="M 508 355 C 400 375, 322 430, 306 545"
+														         fill="none" stroke="url(#goldEdge)" stroke-width="20" stroke-linecap="round"></path>
+																		 </svg>
