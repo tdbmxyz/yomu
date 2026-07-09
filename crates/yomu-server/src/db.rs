@@ -28,6 +28,27 @@ pub enum DbError {
 
 pub type Result<T> = std::result::Result<T, DbError>;
 
+/// What a chapter sync did, beyond upserting rows. `file_ops` are the
+/// filesystem follow-ups the caller must apply: this module only owns rows,
+/// the downloaded pages live under `data_dir/<manga>/<chapter>/` (see
+/// `AppState::chapter_dir`).
+pub struct ChapterSync {
+    /// Chapters that weren't known before, in listing order. Twins that
+    /// merely replaced a re-uploaded chapter the user already had are not
+    /// included (they must not re-notify or re-trigger auto-download).
+    pub new_chapters: Vec<Chapter>,
+    pub file_ops: Vec<ChapterFileOp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChapterFileOp {
+    /// The chapter row was deleted; drop its page directory.
+    Remove { chapter: Uuid },
+    /// A downloaded chapter was merged into its re-uploaded twin; move the
+    /// pages so the twin serves them without re-downloading.
+    Rename { from: Uuid, to: Uuid },
+}
+
 #[derive(Clone)]
 pub struct Db {
     pool: SqlitePool,
@@ -232,7 +253,7 @@ impl Db {
         &self,
         manga_id: Uuid,
         listing: &[ChapterRef],
-    ) -> Result<Vec<Chapter>> {
+    ) -> Result<ChapterSync> {
         let now = Utc::now();
         let mut tx = self.pool.begin().await?;
         let existing: std::collections::HashSet<String> =
@@ -282,32 +303,114 @@ impl Db {
         // leaving the old row behind next to its twin — a duplicate the user
         // sees ("Episode 45" twice, different keys). The insert/update above
         // never removes it, so it accumulates across updater runs in a
-        // long-lived library. Drop rows that fell out of the listing — but
-        // only ones with nothing saved locally (state 'none'/'failed', never
-        // downloaded, not in flight), so downloaded content is never
-        // discarded here. Guarded by a non-empty listing so a transient
+        // long-lived library. A stale row (fell out of the listing) with a
+        // recognizable twin still in it — same number, or same title when
+        // unnumbered — is merged into the twin: read marks and the reading
+        // journal follow, a downloaded copy is handed over, and the row goes
+        // away. Stale rows without a twin are dropped only when nothing is
+        // saved locally (state 'none'/'failed'), so downloaded content is
+        // never discarded. Guarded by a non-empty listing so a transient
         // empty/failed scrape can't wipe a manga (selector sources already
         // error on an empty chapter list, but be defensive).
+        let mut file_ops = Vec::new();
+        let mut merged_twins = std::collections::HashSet::new();
         if !current_keys.is_empty() {
-            for stale in existing.difference(&current_keys) {
-                sqlx::query(
-                    "DELETE FROM chapters
-                     WHERE manga_id = ? AND source_key = ?
-                       AND download_state IN ('none', 'failed')",
-                )
-                .bind(manga_id.to_string())
-                .bind(stale)
-                .execute(&mut *tx)
-                .await?;
+            type ChapterMergeRow = (String, String, Option<f64>, String, String, Option<i64>);
+            let rows: Vec<ChapterMergeRow> = sqlx::query_as(
+                "SELECT id, source_key, number, title, download_state, page_count
+                 FROM chapters WHERE manga_id = ?",
+            )
+            .bind(manga_id.to_string())
+            .fetch_all(&mut *tx)
+            .await?;
+            let (stale, mut live): (Vec<_>, Vec<_>) = rows
+                .into_iter()
+                .partition(|(_, key, ..)| !current_keys.contains(key));
+
+            for (id, _, number, title, state, page_count) in stale {
+                let id = parse_uuid(id)?;
+                let twins: Vec<usize> = live
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (.., n, t, _, _))| match number {
+                        Some(number) => *n == Some(number),
+                        None => n.is_none() && *t == title,
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                match twins.as_slice() {
+                    &[i] => {
+                        let twin_id = parse_uuid(live[i].0.clone())?;
+                        // Read marks and the reading journal follow the twin
+                        // (the journal's one exception to append-only: the
+                        // chapter it points at is being replaced).
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO read_chapters (user_id, chapter_id, at)
+                             SELECT user_id, ?, at FROM read_chapters WHERE chapter_id = ?",
+                        )
+                        .bind(twin_id.to_string())
+                        .bind(id.to_string())
+                        .execute(&mut *tx)
+                        .await?;
+                        sqlx::query(
+                            "UPDATE progress_events SET chapter_id = ? WHERE chapter_id = ?",
+                        )
+                        .bind(twin_id.to_string())
+                        .bind(id.to_string())
+                        .execute(&mut *tx)
+                        .await?;
+                        if state == "downloaded" && live[i].4 != "downloaded" {
+                            sqlx::query(
+                                "UPDATE chapters
+                                 SET download_state = 'downloaded', download_error = NULL,
+                                     downloaded_at = (SELECT downloaded_at FROM chapters WHERE id = ?),
+                                     page_count = ?
+                                 WHERE id = ?",
+                            )
+                            .bind(id.to_string())
+                            .bind(page_count)
+                            .bind(twin_id.to_string())
+                            .execute(&mut *tx)
+                            .await?;
+                            live[i].4 = "downloaded".into();
+                            file_ops.push(ChapterFileOp::Rename {
+                                from: id,
+                                to: twin_id,
+                            });
+                        } else {
+                            file_ops.push(ChapterFileOp::Remove { chapter: id });
+                        }
+                        sqlx::query("DELETE FROM chapters WHERE id = ?")
+                            .bind(id.to_string())
+                            .execute(&mut *tx)
+                            .await?;
+                        merged_twins.insert(twin_id);
+                    }
+                    // No twin (or an ambiguous set): keep downloaded/in-flight
+                    // rows, drop the rest.
+                    _ if state == "none" || state == "failed" => {
+                        sqlx::query("DELETE FROM chapters WHERE id = ?")
+                            .bind(id.to_string())
+                            .execute(&mut *tx)
+                            .await?;
+                        file_ops.push(ChapterFileOp::Remove { chapter: id });
+                    }
+                    _ => {}
+                }
             }
         }
         tx.commit().await?;
 
         let mut new_chapters = Vec::new();
         for id in new_ids {
-            new_chapters.push(self.get_chapter(id).await?);
+            if !merged_twins.contains(&id) {
+                new_chapters.push(self.get_chapter(id).await?);
+            }
         }
-        Ok(new_chapters)
+        Ok(ChapterSync {
+            new_chapters,
+            file_ops,
+        })
     }
 
     pub async fn get_chapter(&self, id: Uuid) -> Result<Chapter> {
@@ -967,6 +1070,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let new = new.new_chapters;
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].number, Some(3.0));
         let after = db.list_chapters(manga.id).await.unwrap();
@@ -1084,6 +1188,97 @@ mod tests {
             2,
             "empty listing left the chapters untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn reuploaded_series_merges_twins_instead_of_duplicating() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("old/1", Some(1.0)), ("old/2", Some(2.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let old1 = chapters.iter().find(|c| c.source_key == "old/1").unwrap();
+        let old2 = chapters.iter().find(|c| c.source_key == "old/2").unwrap();
+
+        // old/1 is downloaded and read, old/2 only read: both kinds of user
+        // state must survive the re-upload.
+        db.mark_pending(&[old1.id]).await.unwrap();
+        db.set_downloading(old1.id).await.unwrap();
+        db.finish_download(old1.id, Ok(9)).await.unwrap();
+        db.mark_read(SHARED, &[old1.id, old2.id]).await.unwrap();
+        db.append_event(
+            SHARED,
+            &ProgressEvent {
+                id: Uuid::now_v7(),
+                manga_id: manga.id,
+                chapter_id: old1.id,
+                page: 4,
+                device: "test".into(),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The site re-uploads the whole series under new URLs (same chapter
+        // numbers) and adds one genuinely new chapter.
+        let sync = db
+            .sync_chapters(
+                manga.id,
+                &details(
+                    "m1",
+                    &[
+                        ("new/1", Some(1.0)),
+                        ("new/2", Some(2.0)),
+                        ("new/3", Some(3.0)),
+                    ],
+                )
+                .chapters,
+            )
+            .await
+            .unwrap();
+
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let keys: Vec<&str> = chapters.iter().map(|c| c.source_key.as_str()).collect();
+        assert_eq!(keys, ["new/1", "new/2", "new/3"], "old twins merged away");
+
+        // Download carried over to the twin (pages moved on disk by the
+        // caller via the Rename op).
+        let new1 = chapters.iter().find(|c| c.source_key == "new/1").unwrap();
+        let new2 = chapters.iter().find(|c| c.source_key == "new/2").unwrap();
+        assert!(
+            matches!(new1.download, DownloadState::Downloaded { .. }),
+            "old/1's download transferred to new/1"
+        );
+        assert_eq!(new1.page_count, Some(9));
+        assert!(
+            sync.file_ops.contains(&ChapterFileOp::Rename {
+                from: old1.id,
+                to: new1.id
+            }),
+            "caller told to move old/1's pages: {:?}",
+            sync.file_ops
+        );
+
+        // Read marks and the reading journal follow the twin.
+        let read = db.read_ids(SHARED, manga.id).await.unwrap();
+        assert!(read.contains(&new1.id) && read.contains(&new2.id));
+        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        assert_eq!(position.chapter_id, new1.id);
+
+        // Only the genuinely new chapter is "new" — a re-upload must not
+        // re-notify or re-download the whole series.
+        let new_keys: Vec<&str> = sync
+            .new_chapters
+            .iter()
+            .map(|c| c.source_key.as_str())
+            .collect();
+        assert_eq!(new_keys, ["new/3"]);
     }
 
     #[tokio::test]
@@ -1345,6 +1540,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let new = new.new_chapters;
         assert_eq!(new.len(), 1);
         assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 2);
     }
