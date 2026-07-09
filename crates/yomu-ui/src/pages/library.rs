@@ -16,15 +16,7 @@ pub fn Library() -> impl IntoView {
         move || {
             refresh.track();
             let client = client.clone();
-            async move {
-                match client.library().await {
-                    Ok(list) => {
-                        offline::cache_put("library", &list);
-                        Ok(list)
-                    }
-                    Err(err) => offline::cache_get("library").ok_or(err),
-                }
-            }
+            async move { offline::with_cache("library", client.library().await) }
         }
     });
     let categories = LocalResource::new({
@@ -32,15 +24,7 @@ pub fn Library() -> impl IntoView {
         move || {
             refresh.track();
             let client = client.clone();
-            async move {
-                match client.categories().await {
-                    Ok(list) => {
-                        offline::cache_put("categories", &list);
-                        Ok(list)
-                    }
-                    Err(err) => offline::cache_get("categories").ok_or(err),
-                }
-            }
+            async move { offline::with_cache("categories", client.categories().await) }
         }
     });
     // None = "All".

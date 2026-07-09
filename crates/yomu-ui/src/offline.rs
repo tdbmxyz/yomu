@@ -363,6 +363,35 @@ pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
+/// Last-known-good wrapper for a fetch result: on success cache it under
+/// `key` and return it; on failure fall back to the cached copy, propagating
+/// the error only when there is nothing cached. Collapses the fetch → cache /
+/// cache_get pattern repeated across the pages.
+pub fn with_cache<T, E>(key: &str, result: std::result::Result<T, E>) -> std::result::Result<T, E>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    with_cache_flagged(key, result).map(|(value, _)| value)
+}
+
+/// Like [`with_cache`] but also reports whether the value came from the cache
+/// (i.e. the server was unreachable) — used to flag stale/offline views.
+pub fn with_cache_flagged<T, E>(
+    key: &str,
+    result: std::result::Result<T, E>,
+) -> std::result::Result<(T, bool), E>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    match result {
+        Ok(value) => {
+            cache_put(key, &value);
+            Ok((value, false))
+        }
+        Err(err) => cache_get(key).map(|value| (value, true)).ok_or(err),
+    }
+}
+
 // ---- theme ----
 
 const THEME_KEY: &str = "yomu-theme";
