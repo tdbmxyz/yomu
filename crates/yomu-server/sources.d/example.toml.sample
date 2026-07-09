@@ -41,7 +41,9 @@ cover = ".summary_image img@data-src"
 # chapters_url = "{url_parent}/full-chapter-list"
 chapter_item = "li.wp-manga-chapter"
 chapter_link = "a@href"
-# chapter_number_regex = "(?i)ch(?:apter)?\\.?\\s*(\\d+(?:\\.\\d+)?)"  # default
+# The default recognises Chapter/Ch and Episode/Ep titles (capture group 1
+# is the number). Override only for an unusual scheme — e.g. season+episode:
+# chapter_number_regex = "(?i)(?:chapter|chap|episode|ep|ch)\\.?\\s*(\\d+(?:\\.\\d+)?)"  # default
 # chapter_order = "newest_first"   # or "oldest_first"; only affects chapters
 #                                  # whose number can't be parsed
 
