@@ -38,8 +38,14 @@ fn relative(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     if lower == "just now" || lower == "now" {
         return Some(now);
     }
-    let rest = lower.strip_suffix(" ago")?;
-    let (amount, unit) = rest.split_once(' ')?;
+    if lower == "yesterday" {
+        return Some(now - chrono::Duration::days(1));
+    }
+    // "last week" / "last month" / "last year" reuse the unit table below.
+    let (amount, unit) = match lower.strip_prefix("last ") {
+        Some(unit) => ("1", unit),
+        None => lower.strip_suffix(" ago")?.split_once(' ')?,
+    };
     let n: i64 = match amount {
         "a" | "an" | "one" => 1,
         _ => amount.parse().ok()?,
@@ -108,6 +114,27 @@ mod tests {
         );
         assert_eq!(
             parse_chapter_date("1 year ago", None, n),
+            Some(n - chrono::Duration::days(365)),
+        );
+    }
+
+    #[test]
+    fn named_relative_phrases() {
+        let n = now();
+        assert_eq!(
+            parse_chapter_date("yesterday", None, n),
+            Some(n - chrono::Duration::days(1)),
+        );
+        assert_eq!(
+            parse_chapter_date("last week", None, n),
+            Some(n - chrono::Duration::weeks(1)),
+        );
+        assert_eq!(
+            parse_chapter_date("last month", None, n),
+            Some(n - chrono::Duration::days(30)),
+        );
+        assert_eq!(
+            parse_chapter_date("last year", None, n),
             Some(n - chrono::Duration::days(365)),
         );
     }
