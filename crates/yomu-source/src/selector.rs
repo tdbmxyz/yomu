@@ -113,6 +113,16 @@ pub struct MangaSpec {
     pub chapter_title: Option<String>,
     /// Relative to chapter item; yields the chapter page URL (chapter key).
     pub chapter_link: String,
+    /// Relative to chapter item; yields the chapter's release date as the
+    /// site prints it. Parsed as RFC 3339, then `chapter_date_format`,
+    /// then English relative phrases ("2 days ago"). Optional;
+    /// unparseable text is ignored.
+    #[serde(default)]
+    pub chapter_date: Option<String>,
+    /// chrono format string for sites printing a local absolute
+    /// convention (e.g. "%Y/%m/%d").
+    #[serde(default)]
+    pub chapter_date_format: Option<String>,
     /// Regex with one capture group extracting the chapter number from the
     /// chapter title (fallback: from the chapter URL).
     #[serde(default = "default_number_regex")]
@@ -232,6 +242,7 @@ struct CompiledSpec {
     chapter_item: Selector,
     chapter_title: Option<Rule>,
     chapter_link: Rule,
+    chapter_date: Option<Rule>,
     chapter_number: Regex,
     page_image: Rule,
 }
@@ -286,6 +297,7 @@ impl SelectorSource {
             chapter_item: sel(&spec.manga.chapter_item)?,
             chapter_title: rule_opt(&spec.manga.chapter_title)?,
             chapter_link: Rule::parse(&spec.manga.chapter_link)?,
+            chapter_date: rule_opt(&spec.manga.chapter_date)?,
             chapter_number: Regex::new(&spec.manga.chapter_number_regex)
                 .map_err(|e| SourceError::Definition(format!("chapter_number_regex: {e}")))?,
             page_image: Rule::parse(&spec.pages.image)?,
@@ -466,13 +478,25 @@ impl SelectorSource {
             let number = self
                 .extract_number(&title)
                 .or_else(|| self.extract_number(url.as_str()));
+            let published_at = self
+                .compiled
+                .chapter_date
+                .as_ref()
+                .and_then(|r| r.extract(item))
+                .and_then(|text| {
+                    crate::dates::parse_chapter_date(
+                        &text,
+                        self.spec.manga.chapter_date_format.as_deref(),
+                        chrono::Utc::now(),
+                    )
+                });
             chapters.push(ChapterRef {
                 key: url.to_string(),
                 title,
                 number,
                 source_order: index as u32,
                 scanlator: None,
-                published_at: None,
+                published_at,
             });
         }
         // source_order is a recency rank (0 = newest); flip it for sites
@@ -951,5 +975,44 @@ mod tests {
             SelectorSource::new(spec),
             Err(SourceError::Definition(_))
         ));
+    }
+
+    #[test]
+    fn chapter_date_selector_parses_absolute_dates() {
+        use chrono::TimeZone;
+
+        let spec: SelectorSpec = toml::from_str(
+            r#"
+            id = "t"
+            name = "T"
+            base_url = "https://site.test"
+            [search]
+            url = "{base}/search?q={query}"
+            item = ".card"
+            link = "a@href"
+            [manga]
+            chapter_item = "li"
+            chapter_link = "a@href"
+            chapter_date = ".cdate"
+            chapter_date_format = "%Y/%m/%d"
+            [pages]
+            image = "img@src"
+            "#,
+        )
+        .unwrap();
+        let source = SelectorSource::new(spec).unwrap();
+        let html = r#"<html><body><ul>
+            <li><a href="/c/2">Chapter 2</a><span class="cdate">2026/05/19</span></li>
+            <li><a href="/c/1">Chapter 1</a><span class="cdate">not a date</span></li>
+        </ul></body></html>"#;
+        let url = Url::parse("https://site.test/series/x").unwrap();
+        let details = source.parse_manga_parts(html, html, &url, &url).unwrap();
+
+        assert_eq!(
+            details.chapters[0].published_at,
+            Some(chrono::Utc.with_ymd_and_hms(2026, 5, 19, 0, 0, 0).unwrap()),
+        );
+        // Unparseable text degrades to no date, never an error.
+        assert_eq!(details.chapters[1].published_at, None);
     }
 }
