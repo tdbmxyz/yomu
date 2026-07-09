@@ -5,6 +5,7 @@
 use chrono::Utc;
 use yomu_domain::Manga;
 
+use crate::db::ChapterFileOp;
 use crate::state::AppState;
 
 #[derive(Debug, thiserror::Error)]
@@ -25,8 +26,26 @@ pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<u32, SyncE
         .ok_or_else(|| SyncError::UnknownSource(manga.source_id.clone()))?;
 
     let details = source.manga(&manga.source_key).await?;
-    let new_chapters = state.db.sync_chapters(manga.id, &details.chapters).await?;
+    let sync = state.db.sync_chapters(manga.id, &details.chapters).await?;
     state.db.set_last_checked(manga.id, Utc::now()).await?;
+
+    // The DB layer only moves rows; apply its page-directory follow-ups
+    // (dropped duplicates, downloads handed over to a re-uploaded twin).
+    // Best-effort like the downloader's cleanup: a leftover directory is
+    // harmless, a missing one falls back to live reading.
+    for op in &sync.file_ops {
+        match op {
+            ChapterFileOp::Remove { chapter } => {
+                let _ = tokio::fs::remove_dir_all(state.chapter_dir(manga.id, *chapter)).await;
+            }
+            ChapterFileOp::Rename { from, to } => {
+                let to_dir = state.chapter_dir(manga.id, *to);
+                let _ = tokio::fs::remove_dir_all(&to_dir).await;
+                let _ = tokio::fs::rename(state.chapter_dir(manga.id, *from), to_dir).await;
+            }
+        }
+    }
+    let new_chapters = sync.new_chapters;
 
     if manga.auto_download && !new_chapters.is_empty() {
         let ids: Vec<_> = new_chapters.iter().map(|c| c.id).collect();
