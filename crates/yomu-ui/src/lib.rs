@@ -2,6 +2,7 @@
 //! shell). Platform specifics are injected via [`AppConfig`], same seam as
 //! chaos.
 
+mod format;
 pub mod offline;
 mod pages;
 
