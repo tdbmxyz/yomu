@@ -51,7 +51,10 @@ mod tests {
             published_label(n - chrono::Duration::hours(5), n),
             "5 h. ago"
         );
-        assert_eq!(published_label(n - chrono::Duration::days(3), n), "3 d. ago");
+        assert_eq!(
+            published_label(n - chrono::Duration::days(3), n),
+            "3 d. ago"
+        );
     }
 
     #[test]
@@ -70,6 +73,9 @@ mod tests {
     #[test]
     fn future_reads_just_now() {
         let n = now();
-        assert_eq!(published_label(n + chrono::Duration::hours(2), n), "just now");
+        assert_eq!(
+            published_label(n + chrono::Duration::hours(2), n),
+            "just now"
+        );
     }
 }

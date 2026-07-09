@@ -153,6 +153,9 @@ mod tests {
         assert_eq!(parse_chapter_date("", None, now()), None);
         assert_eq!(parse_chapter_date("someday soon", None, now()), None);
         // configured format that doesn't match falls through to None
-        assert_eq!(parse_chapter_date("19-05-2026", Some("%Y/%m/%d"), now()), None);
+        assert_eq!(
+            parse_chapter_date("19-05-2026", Some("%Y/%m/%d"), now()),
+            None
+        );
     }
 }
