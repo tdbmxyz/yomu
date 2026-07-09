@@ -1,8 +1,9 @@
-<svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="yomu — open book logo">
-  <!-- Browser favicon: tight, edge-to-edge crop. Same art as the root
-       logo.svg master with its CSS custom properties resolved to literals,
-       so every rasteriser renders it identically. The padded app-icon
-       variant is icon.svg. -->
+<svg viewBox="-140 -140 880 880" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="yomu — open book logo">
+  <!-- App-icon source: the same open-book mark as favicon.svg / logo.svg,
+       centred in a padded viewBox so the whole book (blue fan + gold page
+       edges + spine) stays inside an adaptive icon's safe zone instead of
+       being cropped by the launcher's mask. The disc black matches the
+       adaptive background, so the masked result still reads full-bleed. -->
   <defs>
     <radialGradient id="blueShell" cx="50%" cy="88%" r="78%">
       <stop offset="0%" stop-color="#cdd2e6"></stop>

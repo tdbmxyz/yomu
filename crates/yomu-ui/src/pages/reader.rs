@@ -125,16 +125,9 @@ fn ReaderInner() -> impl IntoView {
         move || {
             let client = client.clone();
             async move {
-                let key = format!("manga:{manga_id}");
-                match client.manga(manga_id).await {
-                    Ok(detail) => {
-                        offline::cache_put(&key, &detail);
-                        Ok(detail)
-                    }
-                    // offline: chapter title + prev/next come from the
-                    // last-known-good copy the manga page stored
-                    Err(err) => offline::cache_get(&key).ok_or(err),
-                }
+                // offline: chapter title + prev/next come from the
+                // last-known-good copy the manga page stored
+                offline::with_cache(&format!("manga:{manga_id}"), client.manga(manga_id).await)
             }
         }
     });

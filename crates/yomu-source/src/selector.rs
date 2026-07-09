@@ -134,7 +134,13 @@ pub enum ChapterOrder {
 }
 
 fn default_number_regex() -> String {
-    r"(?i)ch(?:apter)?\.?\s*(\d+(?:\.\d+)?)".into()
+    // Recognise the common chapter-word spellings, including "Episode"/"Ep"
+    // used by most manhwa (their titles are "Episode 12", not "Chapter 12",
+    // and without this every chapter parses to a null number and sorts by
+    // listing order only). Still keyword-anchored — a bare number in a noisy
+    // title is too ambiguous to trust; a site with an unusual scheme overrides
+    // `chapter_number_regex` per source.
+    r"(?i)(?:chapter|chap|episode|ep|ch)\.?\s*(\d+(?:\.\d+)?)".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -234,8 +240,10 @@ pub struct SelectorSource {
     spec: SelectorSpec,
     compiled: CompiledSpec,
     client: reqwest::Client,
-    /// Serializes requests and enforces `min_delay_ms` between them.
-    throttle: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    /// Earliest instant the next request may *start*, advanced by
+    /// `min_delay_ms` per reserved request. `None` until the first request.
+    /// Only the reservation is under the lock — see `get`.
+    next_slot: tokio::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 impl SelectorSource {
@@ -340,6 +348,18 @@ impl SelectorSource {
             .timeout(Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) yomu/0.1")
             .default_headers(headers)
+            // Cover/page image URLs come from parsed site HTML, so a redirect
+            // could aim the server at an internal address. Cap the hops and
+            // refuse any that land on a private/loopback target (SSRF guard).
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many redirects")
+                } else if is_private_target(attempt.url()) {
+                    attempt.error("redirect to a private address blocked")
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(|e| SourceError::Http(e.to_string()))?;
 
@@ -347,7 +367,7 @@ impl SelectorSource {
             spec,
             compiled,
             client,
-            throttle: tokio::sync::Mutex::new(None),
+            next_slot: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -519,21 +539,37 @@ impl SelectorSource {
     // ---- fetching ----
 
     async fn get(&self, url: &Url) -> Result<reqwest::Response> {
-        // Politeness: one request at a time per source, spaced by min_delay.
-        let mut last = self.throttle.lock().await;
-        if let Some(previous) = *last {
-            let elapsed = previous.elapsed();
-            let min = Duration::from_millis(self.spec.min_delay_ms);
-            if elapsed < min {
-                tokio::time::sleep(min - elapsed).await;
-            }
+        // Politeness: space request *starts* by min_delay, but don't hold the
+        // lock across the request itself. The old code slept and sent while
+        // holding the mutex, so every fetch ran strictly end-to-end — the N
+        // page images of a live-read chapter loaded one at a time, each after
+        // the previous fully completed plus the delay. Instead, reserve this
+        // request's slot (advancing the next allowed start by min_delay) and
+        // release the lock before sending, so requests are rate-limited at the
+        // origin yet still overlap in flight. The reserved slot is kept even
+        // on transport error: a struggling site must not be retried with zero
+        // spacing.
+        let min = Duration::from_millis(self.spec.min_delay_ms);
+        let wait = {
+            let mut next = self.next_slot.lock().await;
+            let now = tokio::time::Instant::now();
+            let slot = match *next {
+                Some(t) => t.max(now),
+                None => now,
+            };
+            *next = Some(slot + min);
+            slot.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
         }
-        let result = self.client.get(url.clone()).send().await;
-        // Stamp even on transport errors: a struggling site must not be
-        // retried with zero spacing.
-        *last = Some(tokio::time::Instant::now());
-        let resp = result.map_err(|e| SourceError::Http(e.to_string()))?;
 
+        let resp = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|e| SourceError::Http(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(SourceError::Http(format!("{} on {url}", resp.status())));
         }
@@ -631,21 +667,67 @@ impl Source for SelectorSource {
     }
 
     async fn image(&self, url: &Url) -> Result<ImageData> {
-        let resp = self.get(url).await?;
+        if is_private_target(url) {
+            return Err(SourceError::Parse(format!(
+                "refusing to fetch a private address: {url}"
+            )));
+        }
+        let mut resp = self.get(url).await?;
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
-        let bytes = resp
-            .bytes()
+        // Bounded read: a hostile or broken upstream must not OOM the server
+        // by streaming an unbounded body (a lying/absent Content-Length can't
+        // get past the running total).
+        let mut bytes: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(|e| SourceError::Http(e.to_string()))?
+        {
+            if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
+                return Err(SourceError::Http(format!(
+                    "image exceeds {MAX_IMAGE_BYTES} byte cap: {url}"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         Ok(ImageData {
-            bytes,
+            bytes: bytes.into(),
             content_type,
         })
+    }
+}
+
+/// Upper bound on a proxied image, so a hostile/broken upstream can't OOM the
+/// server. Generous for manga pages (large webtoon strips run a few MiB).
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Whether a URL targets a private/loopback/link-local address — the cheap
+/// SSRF guard for proxied image URLs, which come from parsed site HTML and
+/// could otherwise aim the server at cloud metadata (169.254.169.254) or LAN
+/// hosts. A *hostname* that resolves to a private address (DNS rebinding) is
+/// out of scope here; that needs a connection-pinning resolver.
+fn is_private_target(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.octets()[0] == 0
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local  fe80::/10
+        }
+        _ => false,
     }
 }
 
@@ -703,6 +785,12 @@ fn listing_url(spec: &SelectorSpec, listing: &CompiledListing, page: u32) -> Res
 fn entity_url(template: &str, url: &Url) -> Result<Url> {
     let mut parent = url.clone();
     if let Ok(mut segments) = parent.path_segments_mut() {
+        // A trailing slash leaves an empty last segment; popping that only
+        // strips the slash, not the real parent — pop again so
+        // `{url_parent}` of `.../series/<id>/<slug>/` is `.../series/<id>`.
+        if url.path().ends_with('/') {
+            segments.pop();
+        }
         segments.pop();
     }
     let url_str = template
@@ -749,6 +837,36 @@ mod tests {
     }
 
     #[test]
+    fn entity_url_parent_handles_trailing_slash() {
+        // A key that kept its trailing slash must still resolve to the real
+        // parent, not one level too deep.
+        let url = Url::parse("https://site.test/series/ABC123/some-slug/").unwrap();
+        assert_eq!(
+            entity_url("{url_parent}/full-chapter-list", &url)
+                .unwrap()
+                .as_str(),
+            "https://site.test/series/ABC123/full-chapter-list"
+        );
+    }
+
+    #[test]
+    fn default_number_regex_reads_manhwa_episode_titles() {
+        let compiled = Regex::new(&default_number_regex()).unwrap();
+        let num = |t: &str| {
+            compiled
+                .captures(t)
+                .and_then(|c| c.get(1))
+                .and_then(|m| m.as_str().parse::<f64>().ok())
+        };
+        assert_eq!(num("Chapter 12"), Some(12.0));
+        assert_eq!(num("Ch. 12.5"), Some(12.5));
+        assert_eq!(num("Episode 7"), Some(7.0));
+        assert_eq!(num("Ep 3"), Some(3.0));
+        // A bare, keyword-less title stays unparsed (sorts by listing order).
+        assert_eq!(num("Prologue"), None);
+    }
+
+    #[test]
     fn listing_url_offset_pagination() {
         let spec: SelectorSpec = toml::from_str(
             r#"
@@ -780,6 +898,31 @@ mod tests {
             listing_url(&source.spec, listing, 3).unwrap().as_str(),
             "https://site.test/list?limit=32&offset=64"
         );
+    }
+
+    #[test]
+    fn private_targets_are_blocked() {
+        let blocked = [
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata
+            "http://127.0.0.1/admin",
+            "http://192.168.1.10/x",
+            "http://10.0.0.5/x",
+            "http://[::1]/x",
+            "http://[fd00::1]/x",
+        ];
+        for u in blocked {
+            assert!(
+                is_private_target(&Url::parse(u).unwrap()),
+                "should block {u}"
+            );
+        }
+        let allowed = ["https://cdn.example.com/a.jpg", "http://93.184.216.34/x"];
+        for u in allowed {
+            assert!(
+                !is_private_target(&Url::parse(u).unwrap()),
+                "should allow {u}"
+            );
+        }
     }
 
     #[test]
