@@ -20,6 +20,20 @@ fn proxy_covers(items: &mut [MangaSummary]) {
     }
 }
 
+/// Mark results that are already tracked (matched on the exact
+/// source_key the add flow stores). Decoration only — never fails the
+/// listing.
+async fn annotate_in_library(state: &AppState, source_id: &str, items: &mut [MangaSummary]) {
+    match state.db.library_keys(source_id).await {
+        Ok(keys) => {
+            for item in items {
+                item.in_library = keys.get(&item.key).copied();
+            }
+        }
+        Err(err) => tracing::warn!(%err, "in-library annotation failed"),
+    }
+}
+
 pub async fn list(State(state): State<AppState>) -> Json<Vec<SourceInfo>> {
     Json(
         state
@@ -48,6 +62,7 @@ pub async fn search(
     let source = state.sources.get(&id).ok_or(ApiError::NotFound)?;
     let mut results = source.search(&query.q).await?;
     remember(&state, &id, &results).await;
+    annotate_in_library(&state, &id, &mut results).await;
     proxy_covers(&mut results);
     Ok(Json(results))
 }
@@ -80,6 +95,7 @@ pub async fn search_all(
                 Err(err) => (Vec::new(), Some(err.to_string())),
             };
             remember(&state, source.id(), &results).await;
+            annotate_in_library(&state, source.id(), &mut results).await;
             proxy_covers(&mut results);
             SourceSearchResults {
                 source_id: source.id().to_string(),
@@ -126,6 +142,7 @@ pub async fn browse(
     match plan {
         crate::catalog::CachePlan::Fresh => {
             let (mut items, _) = cached.expect("Fresh implies cached");
+            annotate_in_library(&state, &id, &mut items).await;
             proxy_covers(&mut items);
             Ok(Json(items))
         }
@@ -154,12 +171,14 @@ pub async fn browse(
                     state.catalog_inflight.finish(&flight_key);
                 });
             }
+            annotate_in_library(&state, &id, &mut items).await;
             proxy_covers(&mut items);
             Ok(Json(items))
         }
         crate::catalog::CachePlan::Live => {
             let mut items = source.browse(query.sort, query.page).await?;
             store_page(&state, &id, sort_key, query.page, &items).await?;
+            annotate_in_library(&state, &id, &mut items).await;
             proxy_covers(&mut items);
             Ok(Json(items))
         }

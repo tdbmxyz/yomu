@@ -903,10 +903,28 @@ impl Db {
                     key: key.clone(),
                     title,
                     cover_url,
+                    in_library: None,
                 });
             }
         }
         Ok(Some((items, fetched_at)))
+    }
+
+    /// source_key → manga id for one source; backs the browse/search
+    /// "already in library" annotation.
+    pub async fn library_keys(
+        &self,
+        source_id: &str,
+    ) -> Result<std::collections::HashMap<String, Uuid>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT source_key, id FROM manga WHERE source_id = ?",
+        )
+        .bind(source_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(key, id)| Ok((key, parse_uuid(id)?)))
+            .collect()
     }
 
     /// Which source a cover URL belongs to — gate for the cover proxy
@@ -1134,6 +1152,7 @@ mod tests {
                 key: key.into(),
                 title: format!("Manga {key}"),
                 cover_url: None,
+                in_library: None,
             },
             description: Some("desc".into()),
             chapters: chapters
@@ -1152,12 +1171,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_keys_maps_source_key_to_id() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let map = db.library_keys("fixture").await.unwrap();
+        assert_eq!(map.get("m1"), Some(&manga.id));
+        assert!(db.library_keys("other-source").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn catalog_upsert_and_page_roundtrip() {
         let db = Db::in_memory().await.unwrap();
         let sum = |k: &str, t: &str| MangaSummary {
             key: k.into(),
             title: t.into(),
             cover_url: Some(format!("https://c.example/{k}.jpg").parse().unwrap()),
+            in_library: None,
         };
         let now = Utc::now();
         db.upsert_catalog_entries("src", &[sum("a", "A"), sum("b", "B")], now)
