@@ -719,7 +719,7 @@ a.source-card:hover {
 
 /* storage-state outlines: blue = on the server, green = on this device,
    split = both; pulsing blue while a download runs, red on failure.
-   Declared before .current/.selected so an active selection wins. */
+   Declared before .selected so an active selection wins. */
 .chapter-item.dl-server {
   border-color: var(--server);
 }
@@ -750,8 +750,9 @@ a.source-card:hover {
   }
 }
 
+/* accent edge bar, not a border: the border is the download-state cue */
 .chapter-item.current {
-  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .chapter-item.selected {
