@@ -163,7 +163,10 @@ impl LocalSource {
             chapter.source_order = last - index as u32;
         }
 
-        let cover_url = self.find_cover(series, &series_dir, &chapters).await;
+        let cover_url = self
+            .find_cover(series, &series_dir, &chapters)
+            .await
+            .map(|u| u.to_string());
 
         Ok(MangaDetails {
             summary: MangaSummary {
@@ -472,7 +475,7 @@ mod tests {
         assert_eq!(details.chapters[0].number, Some(1.0));
         assert_eq!(details.chapters[0].source_order, 1);
         assert_eq!(details.chapters[1].source_order, 0);
-        let cover = details.summary.cover_url.clone().unwrap();
+        let cover: Url = details.summary.cover_url.clone().unwrap().parse().unwrap();
         assert_eq!(cover.scheme(), "local");
 
         let pages = source.pages("Solo Farming/Chapter 1").await.unwrap();

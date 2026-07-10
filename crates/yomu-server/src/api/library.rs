@@ -176,7 +176,7 @@ pub async fn cover(
     ))
 }
 
-fn cover_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
+pub(crate) fn cover_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
     (
         [
             (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),

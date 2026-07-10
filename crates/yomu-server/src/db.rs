@@ -114,7 +114,7 @@ impl Db {
         .bind(&details.summary.key)
         .bind(&details.summary.title)
         .bind(&details.description)
-        .bind(details.summary.cover_url.as_ref().map(url::Url::as_str))
+        .bind(details.summary.cover_url.as_deref())
         .bind(auto_download)
         .bind(now)
         .execute(&mut *tx)
@@ -834,7 +834,7 @@ impl Db {
             .bind(source_id)
             .bind(&item.key)
             .bind(&item.title)
-            .bind(item.cover_url.as_ref().map(url::Url::as_str))
+            .bind(item.cover_url.as_deref())
             .bind(now)
             .execute(&mut *tx)
             .await?;
@@ -902,7 +902,7 @@ impl Db {
                 items.push(MangaSummary {
                     key: key.clone(),
                     title,
-                    cover_url: cover_url.and_then(|c| c.parse().ok()),
+                    cover_url,
                 });
             }
         }
@@ -912,12 +912,12 @@ impl Db {
     /// Which source a cover URL belongs to — gate for the cover proxy
     /// (the server must not fetch arbitrary URLs).
     pub async fn catalog_source_for_cover(&self, cover_url: &str) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT source_id FROM catalog_entries WHERE cover_url = ? LIMIT 1",
+        Ok(
+            sqlx::query_scalar("SELECT source_id FROM catalog_entries WHERE cover_url = ? LIMIT 1")
+                .bind(cover_url)
+                .fetch_optional(&self.pool)
+                .await?,
         )
-        .bind(cover_url)
-        .fetch_optional(&self.pool)
-        .await?)
     }
 }
 

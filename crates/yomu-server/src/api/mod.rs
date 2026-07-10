@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/sources/{id}/browse", get(sources::browse))
+        .route("/covers", get(sources::cover))
         .route("/search", get(sources::search_all))
         .route("/library", get(library::list).post(library::add))
         .route("/categories", get(categories::list))

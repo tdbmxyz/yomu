@@ -40,7 +40,10 @@ pub struct Inflight(Mutex<HashSet<String>>);
 impl Inflight {
     /// True when the caller acquired the slot (must call `finish`).
     pub fn start(&self, key: &str) -> bool {
-        self.0.lock().expect("inflight lock").insert(key.to_string())
+        self.0
+            .lock()
+            .expect("inflight lock")
+            .insert(key.to_string())
     }
 
     pub fn finish(&self, key: &str) {
