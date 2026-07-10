@@ -175,6 +175,31 @@ pub struct PagesSpec {
     pub images_json: Option<String>,
 }
 
+/// First capture of `re` in the page — tried on the raw HTML, then on
+/// every decoded `data:text/javascript;base64,…` script (script
+/// optimizer plugins rewrite inline payloads that way).
+fn json_blob(re: &Regex, html: &str) -> Option<String> {
+    if let Some(cap) = re.captures(html).and_then(|c| c.get(1)) {
+        return Some(cap.as_str().to_owned());
+    }
+    static DATA_URI: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"data:text/javascript;base64,([A-Za-z0-9+/=]+)").expect("static regex")
+    });
+    use base64::Engine as _;
+    for cap in DATA_URI.captures_iter(html) {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&cap[1]) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if let Some(cap) = re.captures(&text).and_then(|c| c.get(1)) {
+            return Some(cap.as_str().to_owned());
+        }
+    }
+    None
+}
+
 /// One `selector[@attr]` rule, compiled. An empty selector part (`"@href"`)
 /// addresses the matched element itself.
 struct Rule {
@@ -557,9 +582,9 @@ impl SelectorSource {
         // Script-embedded page list first; the DOM selector (when both are
         // set) covers pages the regex doesn't match.
         if let Some(re) = &self.compiled.pages_json
-            && let Some(cap) = re.captures(html).and_then(|c| c.get(1))
+            && let Some(blob) = json_blob(re, html)
         {
-            let images: Vec<String> = serde_json::from_str(cap.as_str()).map_err(|e| {
+            let images: Vec<String> = serde_json::from_str(&blob).map_err(|e| {
                 SourceError::Parse(format!(
                     "pages.images_json capture is not a JSON string array: {e}"
                 ))
@@ -1068,6 +1093,28 @@ mod tests {
                 "https://img.site.test/a/2.jpg"
             ],
         );
+    }
+
+    #[test]
+    fn images_json_reads_base64_data_uri_scripts() {
+        // Script optimizers sometimes rewrite the inline payload as
+        // <script src="data:text/javascript;base64,...">.
+        let source = SelectorSource::new(spec_with_pages(
+            r#"images_json = '"images"\s*:\s*(\[[^\]]*\])'"#,
+        ))
+        .unwrap();
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::STANDARD.encode(
+            r#"run({"post_id":1,"sources":[{"source":"S1","images":["https:\/\/img.site.test\/b\/1.jpg"]}]});"#,
+        );
+        let html = format!(
+            r#"<html><body><div id="readerarea"></div>
+            <script defer src="data:text/javascript;base64,{payload}"></script>
+            </body></html>"#
+        );
+        let url = Url::parse("https://site.test/x-chapter-2/").unwrap();
+        let pages = source.parse_pages(&html, &url).unwrap();
+        assert_eq!(pages[0].as_str(), "https://img.site.test/b/1.jpg");
     }
 
     #[test]

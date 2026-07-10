@@ -27,6 +27,10 @@ images_json = '"images"\s*:\s*(\[[^\]]*\])'
   handled for free); each string joins against the page URL like
   selector-extracted values. No matches / an empty array falls through
   to the `image` selector when present, else a Parse error.
+- Script optimizer plugins sometimes rewrite the inline payload as a
+  `<script src="data:text/javascript;base64,…">`. When the regex finds
+  nothing in the raw HTML, every such data-URI script is decoded and
+  the regex is tried on each decoded blob before giving up.
 - `pages.url` composes unchanged (the regex just runs on the fragment
   the engine fetched).
 
