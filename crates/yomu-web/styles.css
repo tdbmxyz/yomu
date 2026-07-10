@@ -764,6 +764,11 @@ a.source-card:hover {
   color: var(--muted);
 }
 
+/* the reading position stands out even in a run of read chapters */
+.chapter-item.current .chapter-title {
+  color: var(--accent);
+}
+
 /* offline and not saved on this device: visibly not openable */
 .chapter-item.unavailable {
   opacity: 0.45;
@@ -901,7 +906,7 @@ a.source-card:hover {
 /* thin always-visible progress: pages read of the current chapter */
 .reader-progress {
   position: fixed;
-  top: var(--shell-inset-top, 0px);
+  bottom: var(--shell-inset-bottom, 0px);
   left: 0;
   right: 0;
   height: 2px;
