@@ -36,3 +36,9 @@ dir = "local"
 #[notify]
 #url = "https://ntfy.example.net/yomu"
 #token = "tk_..."          # optional access token
+
+# Sources-tab catalog cache: cached listing pages are served instantly
+# and refreshed in the background once older than ttl_secs (0 = always
+# fetch live).
+#[catalog]
+#ttl_secs = 21600

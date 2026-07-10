@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod catalog;
 mod config;
 mod db;
 mod downloader;

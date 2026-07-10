@@ -47,8 +47,11 @@ pub struct MangaSummary {
     /// Source-scoped key of the manga (opaque outside the source).
     pub key: String,
     pub title: String,
+    /// Cover image address. A plain string (not `Url`): the server
+    /// rewrites it to its relative cover-proxy endpoint before results
+    /// leave the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cover_url: Option<Url>,
+    pub cover_url: Option<String>,
 }
 
 /// Full details as scraped from the source.

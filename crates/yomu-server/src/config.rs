@@ -23,6 +23,7 @@ pub struct Config {
     pub local: LocalConfig,
     pub auth: AuthConfig,
     pub notify: Option<NotifyConfig>,
+    pub catalog: CatalogConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +51,23 @@ impl Default for LocalConfig {
         Self {
             enabled: true,
             dir: PathBuf::from("local"),
+        }
+    }
+}
+
+/// Source catalog cache (Sources tab listings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CatalogConfig {
+    /// Cached browse pages older than this revalidate in the background
+    /// on access; 0 disables cached reads (listings always live).
+    pub ttl_secs: u64,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        Self {
+            ttl_secs: 6 * 60 * 60,
         }
     }
 }
@@ -101,6 +119,7 @@ impl Default for Config {
             local: LocalConfig::default(),
             auth: AuthConfig::default(),
             notify: None,
+            catalog: CatalogConfig::default(),
         }
     }
 }
