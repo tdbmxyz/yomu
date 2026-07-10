@@ -391,6 +391,31 @@ button.danger:hover {
   border-radius: 0.3rem;
 }
 
+/* chapter counts over the cover's bottom edge:
+   total · server-downloaded · device-downloaded */
+.count-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.9rem 0.4rem 0.2rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  border-radius: 0 0 0.5rem 0.5rem; /* matches .manga-cover */
+}
+
+.count-strip .count-server {
+  color: var(--accent);
+}
+
+.count-strip .count-device {
+  color: var(--saved);
+}
+
 .manga-cover {
   width: 100%;
   aspect-ratio: 2 / 3;

@@ -57,6 +57,9 @@ pub struct MangaWithPosition {
     /// Chapters the user hasn't read (no read mark).
     #[serde(default)]
     pub unread_count: u32,
+    /// Chapters fully downloaded on the server.
+    #[serde(default)]
+    pub downloaded_count: u32,
     /// When the most recently fetched chapter arrived (drives the client's
     /// "new chapters" ordering).
     #[serde(default, skip_serializing_if = "Option::is_none")]

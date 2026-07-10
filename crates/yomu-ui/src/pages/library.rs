@@ -70,12 +70,26 @@ pub fn Library() -> impl IntoView {
                         }
                             .into_any();
                     }
+                    // Chapters saved on this device, grouped per manga
+                    // (localStorage marks — a per-device notion, so counted
+                    // client-side).
+                    let device_counts: std::collections::HashMap<uuid::Uuid, u32> = {
+                        let mut counts = std::collections::HashMap::new();
+                        for mark in offline::device_chapters().values() {
+                            *counts.entry(mark.manga).or_insert(0) += 1;
+                        }
+                        counts
+                    };
                     view! {
                         <div class="manga-grid">
                             {filtered
                                 .into_iter()
                                 .map(|entry| {
                                     let cover = client.cover_url(entry.manga.id);
+                                    let device = device_counts
+                                        .get(&entry.manga.id)
+                                        .copied()
+                                        .unwrap_or(0);
                                     let meta = if entry.unread_count > 0 {
                                         format!("{} new", entry.unread_count)
                                     } else {
@@ -107,6 +121,33 @@ pub fn Library() -> impl IntoView {
                                                 {badge
                                                     .map(|b| {
                                                         view! { <span class="unread-badge">{b}</span> }
+                                                    })}
+                                                {(entry.chapter_count > 0
+                                                    || entry.downloaded_count > 0
+                                                    || device > 0)
+                                                    .then(|| {
+                                                        view! {
+                                                            <span class="count-strip">
+                                                                {(entry.chapter_count > 0)
+                                                                    .then(|| {
+                                                                        view! { <span>{entry.chapter_count}</span> }
+                                                                    })}
+                                                                {(entry.downloaded_count > 0)
+                                                                    .then(|| {
+                                                                        view! {
+                                                                            <span class="count-server">
+                                                                                "↓" {entry.downloaded_count}
+                                                                            </span>
+                                                                        }
+                                                                    })}
+                                                                {(device > 0)
+                                                                    .then(|| {
+                                                                        view! {
+                                                                            <span class="count-device">"↓" {device}</span>
+                                                                        }
+                                                                    })}
+                                                            </span>
+                                                        }
                                                     })}
                                             </span>
                                             <span class="manga-title">{entry.manga.title.clone()}</span>
