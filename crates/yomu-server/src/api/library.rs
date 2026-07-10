@@ -54,6 +54,10 @@ pub async fn list(
             None => Default::default(),
         };
         let unread_count = chapters.iter().filter(|c| !read.contains(&c.id)).count() as u32;
+        let downloaded_count = chapters
+            .iter()
+            .filter(|c| matches!(c.download, yomu_domain::DownloadState::Downloaded { .. }))
+            .count() as u32;
         let position_chapter_title = position.as_ref().and_then(|p| {
             chapters
                 .iter()
@@ -65,6 +69,7 @@ pub async fn list(
             position,
             chapter_count,
             unread_count,
+            downloaded_count,
             latest_chapter_at: chapters.iter().map(|c| c.fetched_at).max(),
             position_chapter_title,
         });
