@@ -85,6 +85,8 @@ pub struct AppState {
     /// `Some` when `[auth]` configures an OIDC provider; `None` runs the
     /// single-account mode (everyone is the shared user).
     pub oidc: Option<Arc<OidcRuntime>>,
+    /// Browse pages currently revalidating in the background.
+    pub catalog_inflight: Arc<crate::catalog::Inflight>,
 }
 
 impl AppState {
@@ -96,6 +98,7 @@ impl AppState {
             download_notify: Arc::new(Notify::new()),
             live_pages: Arc::new(LivePages::default()),
             oidc: oidc.map(Arc::new),
+            catalog_inflight: Arc::new(crate::catalog::Inflight::default()),
         }
     }
 
