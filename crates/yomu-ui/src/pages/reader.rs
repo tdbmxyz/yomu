@@ -278,6 +278,14 @@ fn ReaderInner() -> impl IntoView {
         }
     };
 
+    // Android shell: system bars follow the reader chrome (no-op
+    // elsewhere — see offline::set_immersive). Cleanup restores the bars
+    // however the reader is left, back gesture included.
+    Effect::new(move |_| {
+        offline::set_immersive(!chrome.get());
+    });
+    on_cleanup(|| offline::set_immersive(false));
+
     let turn_paged = turn.clone();
     let report_scroll = report.clone();
     let client_paged = use_client();
