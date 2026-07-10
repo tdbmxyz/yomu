@@ -7,6 +7,7 @@
 //! [`local::LocalSource`] (series already on the server's disk), or, later,
 //! native Rust implementations for API-based sites.
 
+mod dates;
 pub mod local;
 pub mod registry;
 pub mod selector;

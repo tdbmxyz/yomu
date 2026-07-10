@@ -9,6 +9,7 @@ license.workspace = true
 yomu-domain.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
 reqwest.workspace = true

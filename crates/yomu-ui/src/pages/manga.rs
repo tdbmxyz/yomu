@@ -614,8 +614,14 @@ fn ChapterItem(
                 {chapter.title.clone()}
             </a>
             {chapter
-                .page_count
-                .map(|c| view! { <span class="muted chapter-pages">{c} " p."</span> })}
+                .published_at
+                .map(|at| {
+                    view! {
+                        <span class="muted chapter-date">
+                            {crate::format::published_label(at, chrono::Utc::now())}
+                        </span>
+                    }
+                })}
             <span class="grow"></span>
             <Show when=move || !selection_active.get()>
                 <button

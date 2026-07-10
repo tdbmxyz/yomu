@@ -132,7 +132,7 @@ pub async fn refresh(
     Path(id): Path<Uuid>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
     let manga = state.db.get_manga(id).await?;
-    let new_chapters = sync::refresh_manga(&state, &manga).await?;
+    let new_chapters = sync::refresh_manga(&state, &manga).await?.len() as u32;
     Ok(Json(RefreshResponse {
         new_chapters,
         checked_at: chrono::Utc::now(),

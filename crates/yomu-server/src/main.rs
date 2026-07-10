@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod db;
 mod downloader;
+mod notifier;
 mod oidc;
 mod state;
 mod sync;

@@ -278,11 +278,13 @@ impl Db {
             let id = Uuid::now_v7();
             sqlx::query(
                 "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
-                                       scanlator, fetched_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                       scanlator, fetched_at, published_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (manga_id, source_key)
                  DO UPDATE SET title = excluded.title, number = excluded.number,
-                               source_order = excluded.source_order",
+                               source_order = excluded.source_order,
+                               published_at = COALESCE(excluded.published_at,
+                                                       chapters.published_at)",
             )
             .bind(id.to_string())
             .bind(manga_id.to_string())
@@ -292,6 +294,7 @@ impl Db {
             .bind(chapter.source_order)
             .bind(&chapter.scanlator)
             .bind(now)
+            .bind(chapter.published_at)
             .execute(&mut *tx)
             .await?;
             if !existing.contains(&chapter.key) {
@@ -818,8 +821,8 @@ async fn insert_chapters(
     for chapter in chapters {
         sqlx::query(
             "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
-                                   scanlator, fetched_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                   scanlator, fetched_at, published_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (manga_id, source_key) DO NOTHING",
         )
         .bind(Uuid::now_v7().to_string())
@@ -830,6 +833,7 @@ async fn insert_chapters(
         .bind(chapter.source_order)
         .bind(&chapter.scanlator)
         .bind(now)
+        .bind(chapter.published_at)
         .execute(&mut **tx)
         .await?;
     }
@@ -935,6 +939,7 @@ struct ChapterRow {
     source_order: i64,
     scanlator: Option<String>,
     fetched_at: DateTime<Utc>,
+    published_at: Option<DateTime<Utc>>,
     download_state: String,
     downloaded_at: Option<DateTime<Utc>>,
     download_error: Option<String>,
@@ -971,6 +976,7 @@ impl TryFrom<ChapterRow> for Chapter {
             source_order: row.source_order as u32,
             scanlator: row.scanlator,
             fetched_at: row.fetched_at,
+            published_at: row.published_at,
             download,
             page_count: row.page_count.map(|c| c as u32),
             // Per-user; filled at the API layer from `read_ids`.
@@ -1030,9 +1036,63 @@ mod tests {
                     number: *number,
                     source_order: i as u32,
                     scanlator: None,
+                    published_at: None,
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn published_at_backfills_and_never_clears() {
+        use chrono::TimeZone;
+        let day = |d: u32| Utc.with_ymd_and_hms(2026, 7, d, 0, 0, 0).unwrap();
+
+        let db = Db::in_memory().await.unwrap();
+        // 1. First sync without dates → rows have NULL published_at.
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(
+            db.list_chapters(manga.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|c| c.published_at.is_none())
+        );
+
+        // 2. Source starts printing dates → the same keys re-synced with
+        //    Some(..) backfill the existing rows.
+        let mut listing = details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]).chapters;
+        listing[0].published_at = Some(day(2));
+        listing[1].published_at = Some(day(1));
+        db.sync_chapters(manga.id, &listing).await.unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        assert_eq!(
+            chapters.iter().filter(|c| c.published_at.is_some()).count(),
+            2
+        );
+
+        // 3. Source stops printing dates → None must NOT clear stored values.
+        listing[0].published_at = None;
+        listing[1].published_at = None;
+        db.sync_chapters(manga.id, &listing).await.unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        assert_eq!(
+            chapters.iter().filter(|c| c.published_at.is_some()).count(),
+            2
+        );
+
+        // 4. A changed date wins (site-side correction).
+        listing[1].published_at = Some(day(5));
+        db.sync_chapters(manga.id, &listing).await.unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let c1 = chapters.iter().find(|c| c.source_key == "c1").unwrap();
+        assert_eq!(c1.published_at, Some(day(5)));
     }
 
     #[tokio::test]

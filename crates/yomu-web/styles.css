@@ -519,15 +519,19 @@ button.danger:hover {
 /* ---- sources tab ---- */
 
 .source-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  /* name | host | spacer | listing labels — subgrid on the cards makes
+     the columns line up across all of them */
+  grid-template-columns: max-content max-content 1fr max-content;
   gap: 0.6rem;
 }
 
 .source-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   align-items: baseline;
-  gap: 0.75rem;
+  column-gap: 0.75rem;
   padding: 0.8rem 1rem;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -708,7 +712,7 @@ a.source-card:hover {
   white-space: nowrap;
 }
 
-.chapter-pages {
+.chapter-date {
   white-space: nowrap;
   flex-shrink: 0;
 }

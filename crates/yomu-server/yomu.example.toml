@@ -29,3 +29,10 @@ dir = "local"
 #client_secret = "…"
 #public_url = "https://yomu.example.com"   # optional; derived from Host if unset
 #session_days = 90
+
+# Push notifications for new chapters found by the updater, sent to an
+# ntfy topic (https://ntfy.sh or self-hosted). Subscribe to the topic in
+# the ntfy app. Omit the section to disable.
+#[notify]
+#url = "https://ntfy.example.net/yomu"
+#token = "tk_..."          # optional access token
