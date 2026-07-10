@@ -2,6 +2,7 @@
 //! shell). Platform specifics are injected via [`AppConfig`], same seam as
 //! chaos.
 
+mod chapter_actions;
 mod format;
 pub mod offline;
 mod pages;
@@ -33,11 +34,17 @@ pub fn App(config: AppConfig) -> impl IntoView {
     let flush_client = YomuClient::new(config.api_base.clone());
     spawn_local({
         let client = flush_client.clone();
-        async move { offline::flush_outbox(&client).await }
+        async move {
+            offline::flush_outbox(&client).await;
+            offline::flush_marks(&client).await;
+        }
     });
     let online_handle = window_event_listener(leptos::ev::online, move |_| {
         let client = flush_client.clone();
-        spawn_local(async move { offline::flush_outbox(&client).await });
+        spawn_local(async move {
+            offline::flush_outbox(&client).await;
+            offline::flush_marks(&client).await;
+        });
     });
     on_cleanup(move || online_handle.remove());
 

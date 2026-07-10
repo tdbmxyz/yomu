@@ -48,6 +48,24 @@ pub async fn download_many(
     ))
 }
 
+/// Remove the server copies of the given chapters: rows reset, page
+/// directories deleted. Chapters not currently downloaded are skipped.
+pub async fn remove_downloads(
+    State(state): State<AppState>,
+    Json(req): Json<DownloadChaptersRequest>,
+) -> Result<Json<BulkChaptersResponse>, ApiError> {
+    let removed = state.db.remove_downloads(&req.chapter_ids).await?;
+    for id in &removed {
+        if let Ok(chapter) = state.db.get_chapter(*id).await {
+            let _ = tokio::fs::remove_dir_all(state.chapter_dir(chapter.manga_id, *id)).await;
+        }
+    }
+    state.live_pages.invalidate_many(&removed).await;
+    Ok(Json(BulkChaptersResponse {
+        affected: removed.len() as u32,
+    }))
+}
+
 /// Mark chapters read or unread for the current user.
 pub async fn mark(
     State(state): State<AppState>,

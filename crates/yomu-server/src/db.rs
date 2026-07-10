@@ -811,6 +811,28 @@ impl Db {
         Ok((events, next))
     }
 
+    /// Forget the server copies of these chapters: rows go back to
+    /// 'none' (page_count survives — still true knowledge). Returns the
+    /// ids that actually were downloaded, so the caller can delete their
+    /// page directories.
+    pub async fn remove_downloads(&self, chapter_ids: &[Uuid]) -> Result<Vec<Uuid>> {
+        let mut removed = Vec::new();
+        for id in chapter_ids {
+            let result = sqlx::query(
+                "UPDATE chapters SET download_state = 'none', downloaded_at = NULL,
+                                     download_error = NULL
+                 WHERE id = ? AND download_state = 'downloaded'",
+            )
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                removed.push(*id);
+            }
+        }
+        Ok(removed)
+    }
+
     // ---- source catalog cache ----
 
     /// Record summaries seen in a listing/search; the upsert keeps
@@ -1168,6 +1190,33 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn remove_downloads_resets_only_downloaded_rows() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        db.mark_pending(&[chapters[0].id]).await.unwrap();
+        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
+
+        let removed = db
+            .remove_downloads(&[chapters[0].id, chapters[1].id])
+            .await
+            .unwrap();
+        assert_eq!(removed, vec![chapters[0].id]); // the 'none' row is skipped
+
+        let after = db.list_chapters(manga.id).await.unwrap();
+        assert!(matches!(after[0].download, DownloadState::None));
+        // page_count survives: still true knowledge about the chapter
+        assert_eq!(after[0].page_count, Some(9));
     }
 
     #[tokio::test]
