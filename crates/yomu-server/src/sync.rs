@@ -3,7 +3,7 @@
 //! downloads when the manga wants them.
 
 use chrono::Utc;
-use yomu_domain::Manga;
+use yomu_domain::{Chapter, Manga};
 
 use crate::db::ChapterFileOp;
 use crate::state::AppState;
@@ -18,8 +18,9 @@ pub enum SyncError {
     Db(#[from] crate::db::DbError),
 }
 
-/// Returns the number of newly discovered chapters.
-pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<u32, SyncError> {
+/// Returns the newly discovered chapters (twins merged into re-uploads
+/// excluded — see `ChapterSync::new_chapters`).
+pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<Vec<Chapter>, SyncError> {
     let source = state
         .sources
         .get(&manga.source_id)
@@ -61,5 +62,5 @@ pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<u32, SyncE
             "new chapters found"
         );
     }
-    Ok(new_chapters.len() as u32)
+    Ok(new_chapters)
 }
