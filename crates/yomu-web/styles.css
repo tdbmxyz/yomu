@@ -170,6 +170,14 @@ h3,
   line-height: 1.2;
 }
 
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+/* After the base `main` rule: same specificity, so the padding-bottom
+   override needs to come later in source order to win. */
 @media (max-width: 40rem) {
   .topbar {
     display: none;
@@ -180,15 +188,9 @@ h3,
   }
 
   main {
-    /* room for the fixed tab bar */
-    padding-bottom: 5rem;
+    /* room for the fixed tab bar (which grows by the safe-area inset) */
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
   }
-}
-
-main {
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 1.5rem;
 }
 
 .muted {
