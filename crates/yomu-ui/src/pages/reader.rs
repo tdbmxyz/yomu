@@ -875,7 +875,21 @@ fn ReaderInner() -> impl IntoView {
                             let strip = NodeRef::<leptos::html::Div>::new();
                             // (sum, count) of loaded page heights: keeps
                             // --strip-placeholder at the average page.
-                            let loaded_avg = StoredValue::new((0.0_f64, 0_u32));
+                            // Seeded from the last session so the opening
+                            // geometry is realistic before any load.
+                            let loaded_avg = StoredValue::new(
+                                match offline::page_height_hint(manga_id) {
+                                    Some(h) => (h, 1_u32),
+                                    None => (0.0_f64, 0_u32),
+                                },
+                            );
+                            // Glue deferral: a compensation scrollBy landing
+                            // mid-fling cancels the fling on touch devices
+                            // (the "snap after release"). While scroll events
+                            // are streaming, deltas accumulate and land on
+                            // scrollend / the next idle load instead.
+                            let last_scroll_ts = StoredValue::new(0.0_f64);
+                            let pending_glue = StoredValue::new(0.0_f64);
                             // Scroll events only count once the programmatic
                             // opening scroll below has landed; before that
                             // they would map placeholder-height images to a
@@ -890,6 +904,15 @@ fn ReaderInner() -> impl IntoView {
                             // rewind the saved position.
                             Effect::new(move |_| {
                                 let Some(el) = strip.get() else { return };
+                                // placeholders at the learned page height
+                                // before positioning against them
+                                let (sum, n) = loaded_avg.get_value();
+                                if n > 0 {
+                                    let _ = web_sys::HtmlElement::style(&el).set_property(
+                                        "--strip-placeholder",
+                                        &format!("{}px", sum / n as f64),
+                                    );
+                                }
                                 let selector = format!(
                                     "img[data-chapter='{}'][data-page='{}']",
                                     current_chapter.get_untracked(),
@@ -1039,6 +1062,7 @@ fn ReaderInner() -> impl IntoView {
                             let scroll_handle = window_event_listener(
                                 leptos::ev::scroll,
                                 move |_| {
+                                    last_scroll_ts.set_value(js_sys::Date::now());
                                     let Some(el) = strip.get_untracked() else { return };
                                     let viewport = window()
                                         .inner_height()
@@ -1172,6 +1196,20 @@ fn ReaderInner() -> impl IntoView {
                                 },
                             );
                             on_cleanup(move || scroll_handle.remove());
+                            // The fling is over: land any parked glue. On
+                            // engines without scrollend the next idle load
+                            // flushes it instead.
+                            let scrollend_handle = window_event_listener(
+                                leptos::ev::Custom::<web_sys::Event>::new("scrollend"),
+                                move |_| {
+                                    let parked = pending_glue.get_value();
+                                    if parked.abs() > 1.0 {
+                                        pending_glue.set_value(0.0);
+                                        window().scroll_by_with_x_and_y(0.0, parked);
+                                    }
+                                },
+                            );
+                            on_cleanup(move || scrollend_handle.remove());
                             let client = client_vertical.clone();
                             view! {
                                 <div
@@ -1301,6 +1339,9 @@ fn ReaderInner() -> impl IntoView {
                                                 });
                                                 let new_avg = loaded_avg
                                                     .with_value(|(sum, n)| *sum / *n as f64);
+                                                offline::set_page_height_hint(
+                                                    manga_id, new_avg,
+                                                );
                                                 if let Some(el) = strip.get_untracked() {
                                                     let _ = web_sys::HtmlElement::style(&el)
                                                         .set_property(
@@ -1309,8 +1350,25 @@ fn ReaderInner() -> impl IntoView {
                                                         );
                                                 }
                                                 delta += above * (new_avg - old_avg);
-                                                if delta.abs() > 1.0 {
-                                                    window().scroll_by_with_x_and_y(0.0, delta);
+                                                // Mid-fling, a scrollBy would
+                                                // cancel the fling ("snap
+                                                // after release" on phones):
+                                                // park the correction until
+                                                // the scroll settles.
+                                                if js_sys::Date::now()
+                                                    - last_scroll_ts.get_value()
+                                                    < 150.0
+                                                {
+                                                    pending_glue
+                                                        .update_value(|p| *p += delta);
+                                                } else {
+                                                    let delta =
+                                                        delta + pending_glue.get_value();
+                                                    pending_glue.set_value(0.0);
+                                                    if delta.abs() > 1.0 {
+                                                        window()
+                                                            .scroll_by_with_x_and_y(0.0, delta);
+                                                    }
                                                 }
                                             };
                                             let images = (0..count)
@@ -1322,9 +1380,12 @@ fn ReaderInner() -> impl IntoView {
                                                             src=src
                                                             data-chapter=chapter.to_string()
                                                             data-page=n.to_string()
-                                                            loading=if chapter == chapter_id
-                                                                && n < 3
-                                                            {
+                                                            // every segment's opening
+                                                            // pages load eagerly, so a
+                                                            // chapter crossing lands on
+                                                            // real content instead of
+                                                            // racing placeholders
+                                                            loading=if n < 3 {
                                                                 "eager"
                                                             } else {
                                                                 "lazy"
