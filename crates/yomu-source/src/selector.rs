@@ -162,8 +162,42 @@ pub struct PagesSpec {
     #[serde(default)]
     pub url: Option<String>,
     /// Selector matching every page image on the chapter page (or on the
-    /// `url` fragment when that is set).
-    pub image: String,
+    /// `url` fragment when that is set). Optional when `images_json` is
+    /// set (and then the fallback for pages where the regex matches
+    /// nothing).
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Regex whose first capture group is a JSON array of image-URL
+    /// strings, applied to the raw chapter page — for sites whose reader
+    /// script injects the page list instead of rendering it into the DOM
+    /// (e.g. `run({... "images": [...]})`).
+    #[serde(default)]
+    pub images_json: Option<String>,
+}
+
+/// First capture of `re` in the page — tried on the raw HTML, then on
+/// every decoded `data:text/javascript;base64,…` script (script
+/// optimizer plugins rewrite inline payloads that way).
+fn json_blob(re: &Regex, html: &str) -> Option<String> {
+    if let Some(cap) = re.captures(html).and_then(|c| c.get(1)) {
+        return Some(cap.as_str().to_owned());
+    }
+    static DATA_URI: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"data:text/javascript;base64,([A-Za-z0-9+/=]+)").expect("static regex")
+    });
+    use base64::Engine as _;
+    for cap in DATA_URI.captures_iter(html) {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&cap[1]) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if let Some(cap) = re.captures(&text).and_then(|c| c.get(1)) {
+            return Some(cap.as_str().to_owned());
+        }
+    }
+    None
 }
 
 /// One `selector[@attr]` rule, compiled. An empty selector part (`"@href"`)
@@ -244,7 +278,8 @@ struct CompiledSpec {
     chapter_link: Rule,
     chapter_date: Option<Rule>,
     chapter_number: Regex,
-    page_image: Rule,
+    page_image: Option<Rule>,
+    pages_json: Option<Regex>,
 }
 
 pub struct SelectorSource {
@@ -300,9 +335,25 @@ impl SelectorSource {
             chapter_date: rule_opt(&spec.manga.chapter_date)?,
             chapter_number: Regex::new(&spec.manga.chapter_number_regex)
                 .map_err(|e| SourceError::Definition(format!("chapter_number_regex: {e}")))?,
-            page_image: Rule::parse(&spec.pages.image)?,
+            page_image: rule_opt(&spec.pages.image)?,
+            pages_json: spec
+                .pages
+                .images_json
+                .as_deref()
+                .map(|re| {
+                    Regex::new(re)
+                        .map_err(|e| SourceError::Definition(format!("pages.images_json: {e}")))
+                })
+                .transpose()?,
         };
-        if compiled.page_image.selector.is_none() {
+        if compiled.page_image.is_none() && compiled.pages_json.is_none() {
+            return Err(SourceError::Definition(
+                "pages needs `image` or `images_json`".into(),
+            ));
+        }
+        if let Some(rule) = &compiled.page_image
+            && rule.selector.is_none()
+        {
             return Err(SourceError::Definition(
                 "pages.image needs a selector (not just an attribute)".into(),
             ));
@@ -528,14 +579,36 @@ impl SelectorSource {
     }
 
     pub fn parse_pages(&self, html: &str, page_url: &Url) -> Result<Vec<Url>> {
+        // Script-embedded page list first; the DOM selector (when both are
+        // set) covers pages the regex doesn't match.
+        if let Some(re) = &self.compiled.pages_json
+            && let Some(blob) = json_blob(re, html)
+        {
+            let images: Vec<String> = serde_json::from_str(&blob).map_err(|e| {
+                SourceError::Parse(format!(
+                    "pages.images_json capture is not a JSON string array: {e}"
+                ))
+            })?;
+            let urls: Vec<Url> = images
+                .iter()
+                .filter_map(|s| page_url.join(s.trim()).ok())
+                .collect();
+            if !urls.is_empty() {
+                return Ok(urls);
+            }
+        }
+        let Some(rule) = &self.compiled.page_image else {
+            return Err(SourceError::Parse(format!(
+                "no script-embedded page list matched {:?} on {page_url}",
+                self.spec.pages.images_json
+            )));
+        };
         let doc = Html::parse_document(html);
-        let selector = self
-            .compiled
-            .page_image
+        let selector = rule
             .selector
             .as_ref()
             .ok_or_else(|| SourceError::Definition("pages.image needs a selector".into()))?;
-        let attr = self.compiled.page_image.attr.as_deref().unwrap_or("src");
+        let attr = rule.attr.as_deref().unwrap_or("src");
         let mut urls = Vec::new();
         for el in doc.select(selector) {
             if let Some(value) = el.value().attr(attr).map(str::trim)
@@ -979,6 +1052,91 @@ mod tests {
             SelectorSource::new(spec),
             Err(SourceError::Definition(_))
         ));
+    }
+
+    fn spec_with_pages(pages: &str) -> SelectorSpec {
+        toml::from_str(&format!(
+            r#"
+            id = "t"
+            name = "T"
+            base_url = "https://site.test"
+            [search]
+            url = "{{base}}/search?q={{query}}"
+            item = ".card"
+            link = "a@href"
+            [manga]
+            chapter_item = "li"
+            chapter_link = "a@href"
+            [pages]
+            {pages}
+            "#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn images_json_extracts_script_embedded_pages() {
+        let source = SelectorSource::new(spec_with_pages(
+            r#"images_json = '"images"\s*:\s*(\[[^\]]*\])'"#,
+        ))
+        .unwrap();
+        let html = r#"<html><body><div id="readerarea"></div>
+            <script>run({"post_id":1,"sources":[{"source":"Server 1",
+            "images":["https:\/\/img.site.test\/a\/1.jpg","https:\/\/img.site.test\/a\/2.jpg"]}]});</script>
+            </body></html>"#;
+        let url = Url::parse("https://site.test/x-chapter-1/").unwrap();
+        let pages = source.parse_pages(html, &url).unwrap();
+        assert_eq!(
+            pages.iter().map(Url::as_str).collect::<Vec<_>>(),
+            [
+                "https://img.site.test/a/1.jpg",
+                "https://img.site.test/a/2.jpg"
+            ],
+        );
+    }
+
+    #[test]
+    fn images_json_reads_base64_data_uri_scripts() {
+        // Script optimizers sometimes rewrite the inline payload as
+        // <script src="data:text/javascript;base64,...">.
+        let source = SelectorSource::new(spec_with_pages(
+            r#"images_json = '"images"\s*:\s*(\[[^\]]*\])'"#,
+        ))
+        .unwrap();
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::STANDARD.encode(
+            r#"run({"post_id":1,"sources":[{"source":"S1","images":["https:\/\/img.site.test\/b\/1.jpg"]}]});"#,
+        );
+        let html = format!(
+            r#"<html><body><div id="readerarea"></div>
+            <script defer src="data:text/javascript;base64,{payload}"></script>
+            </body></html>"#
+        );
+        let url = Url::parse("https://site.test/x-chapter-2/").unwrap();
+        let pages = source.parse_pages(&html, &url).unwrap();
+        assert_eq!(pages[0].as_str(), "https://img.site.test/b/1.jpg");
+    }
+
+    #[test]
+    fn pages_need_a_selector_or_a_json_regex() {
+        assert!(matches!(
+            SelectorSource::new(spec_with_pages("")),
+            Err(SourceError::Definition(_))
+        ));
+    }
+
+    #[test]
+    fn images_json_falls_back_to_the_selector() {
+        let source = SelectorSource::new(spec_with_pages(concat!(
+            "images_json = '\"images\"\\s*:\\s*(\\[[^\\]]*\\])'\n",
+            "image = \"img.page@src\"",
+        )))
+        .unwrap();
+        let html = r#"<img class="page" src="/p/1.jpg"><img class="page" src="/p/2.jpg">"#;
+        let url = Url::parse("https://site.test/c1/").unwrap();
+        let pages = source.parse_pages(html, &url).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].as_str(), "https://site.test/p/1.jpg");
     }
 
     #[test]
