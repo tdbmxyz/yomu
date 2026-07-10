@@ -419,7 +419,6 @@ fn ChapterList(
                             chapter
                             offline
                             current
-                            refresh
                             index
                             selected
                             selection_active
@@ -451,14 +450,12 @@ fn ChapterItem(
     chapter: Chapter,
     offline: bool,
     current: bool,
-    refresh: RwSignal<u32>,
     index: usize,
     selected: RwSignal<HashSet<Uuid>>,
     selection_active: Memo<bool>,
     press: Callback<usize>,
     toggle: Callback<usize>,
 ) -> impl IntoView {
-    let client = use_client();
     let id = chapter.id;
     let read = chapter.read;
     let is_selected = Memo::new(move |_| selected.with(|s| s.contains(&id)));
@@ -525,64 +522,19 @@ fn ChapterItem(
         }
     };
 
-    // Tachidesk-style state icons: one arrow-in-a-circle per storage tier,
-    // told apart by color (accent = on the server, green = on this device).
-    let (server_glyph, server_title, downloadable) = match &chapter.download {
-        DownloadState::None => ("↓", "Download to the server".to_string(), true),
-        DownloadState::Pending => ("↻", "Queued for download…".to_string(), false),
-        DownloadState::Downloading => ("↻", "Downloading…".to_string(), false),
-        DownloadState::Downloaded { .. } => ("✓", "On the server".to_string(), false),
-        DownloadState::Failed { reason, .. } => {
-            ("!", format!("Download failed: {reason} — retry"), true)
-        }
-    };
-    let server_busy = matches!(
+    // Storage state, shown as the row's outline color (blue = on the
+    // server, green = on this device, split = both) instead of the old
+    // per-tier buttons; actions live in the selection menu.
+    let on_device = RwSignal::new(offline::device_chapters().contains_key(&id));
+    let on_server = matches!(chapter.download, DownloadState::Downloaded { .. });
+    let dl_busy = matches!(
         chapter.download,
         DownloadState::Pending | DownloadState::Downloading
     );
-    let server_done = matches!(chapter.download, DownloadState::Downloaded { .. });
-    let server_failed = matches!(chapter.download, DownloadState::Failed { .. });
-
-    let download = move |_| {
-        let client = client.clone();
-        spawn_local(async move {
-            match client.download_chapter(id).await {
-                Ok(_) => refresh.update(|n| *n += 1),
-                Err(err) => leptos::logging::warn!("download: {err}"),
-            }
-        });
-    };
-
-    // "On this device": in the browser, walk every page through fetch so
-    // the service worker caches it; in the Tauri shell, have the shell
-    // download the pages to disk. Either way the chapter then reads with
-    // the server unreachable.
-    let on_device = RwSignal::new(offline::device_chapters().contains_key(&id));
-    let device_busy = RwSignal::new(false);
-    let device_download = {
-        let client = use_client();
-        move |_| {
-            if device_busy.get_untracked() || on_device.get_untracked() {
-                return;
-            }
-            device_busy.set(true);
-            let client = client.clone();
-            spawn_local(async move {
-                let result = if offline::shell_available() {
-                    offline::shell_save_chapter(&client, id).await
-                } else {
-                    offline::prefetch_chapter(&client, id).await
-                };
-                device_busy.set(false);
-                match result {
-                    Ok(page_count) => {
-                        offline::mark_device_chapter(manga_id, id, page_count);
-                        on_device.set(true);
-                    }
-                    Err(err) => leptos::logging::warn!("device download: {err}"),
-                }
-            });
-        }
+    let dl_failed = matches!(chapter.download, DownloadState::Failed { .. });
+    let failed_reason = match &chapter.download {
+        DownloadState::Failed { reason, .. } => Some(format!("Download failed: {reason}")),
+        _ => None,
     };
 
     view! {
@@ -594,8 +546,17 @@ fn ChapterItem(
             // Served from the offline cache: chapters that aren't on this
             // device can't open until the server is reachable again.
             class:unavailable=move || offline && !on_device.get()
+            class:dl-server=move || on_server && !on_device.get()
+            class:dl-local=move || on_device.get() && !on_server
+            class:dl-both=move || on_server && on_device.get()
+            class:dl-busy=dl_busy
+            class:dl-failed=dl_failed
             title=move || {
-                (offline && !on_device.get()).then_some("Not available offline")
+                if offline && !on_device.get() {
+                    Some("Not available offline".to_string())
+                } else {
+                    failed_reason.clone()
+                }
             }
             on:pointerdown=pointer_down
             on:pointermove=pointer_move
@@ -623,43 +584,6 @@ fn ChapterItem(
                     }
                 })}
             <span class="grow"></span>
-            <Show when=move || !selection_active.get()>
-                <button
-                    class="icon-btn device-dl"
-                    class:done=move || on_device.get()
-                    class:busy=move || device_busy.get()
-                    title=move || {
-                        if on_device.get() {
-                            "Saved on this device"
-                        } else {
-                            "Store on this device for offline reading"
-                        }
-                    }
-                    disabled=move || device_busy.get() || on_device.get()
-                    on:click=device_download.clone()
-                >
-                    {move || {
-                        if on_device.get() {
-                            "✓"
-                        } else if device_busy.get() {
-                            "↻"
-                        } else {
-                            "↓"
-                        }
-                    }}
-                </button>
-                <button
-                    class="icon-btn server-dl"
-                    class:done=server_done
-                    class:busy=server_busy
-                    class:failed=server_failed
-                    title=server_title.clone()
-                    disabled=!downloadable
-                    on:click=download.clone()
-                >
-                    {server_glyph}
-                </button>
-            </Show>
         </li>
     }
 }

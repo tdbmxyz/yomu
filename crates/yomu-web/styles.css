@@ -16,6 +16,8 @@
      (the server tier uses the theme accent) */
   --saved: #4ade80;
   --saved-contrast: #06210f;
+  /* "downloaded on the server" tier (chapter row outlines) */
+  --server: #60a5fa;
   --font-body: system-ui, sans-serif;
   --font-display: inherit;
 }
@@ -679,6 +681,39 @@ a.source-card:hover {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+}
+
+/* storage-state outlines: blue = on the server, green = on this device,
+   split = both; pulsing blue while a download runs, red on failure.
+   Declared before .current/.selected so an active selection wins. */
+.chapter-item.dl-server {
+  border-color: var(--server);
+}
+
+.chapter-item.dl-local {
+  border-color: var(--saved);
+}
+
+.chapter-item.dl-both {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    linear-gradient(90deg, var(--server) 50%, var(--saved) 50%) border-box;
+}
+
+.chapter-item.dl-busy {
+  border-color: var(--server);
+  animation: dl-pulse 1.2s ease-in-out infinite;
+}
+
+.chapter-item.dl-failed {
+  border-color: var(--down);
+}
+
+@keyframes dl-pulse {
+  50% {
+    border-color: color-mix(in srgb, var(--server) 35%, transparent);
+  }
 }
 
 .chapter-item.current {
