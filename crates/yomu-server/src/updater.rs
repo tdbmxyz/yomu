@@ -14,6 +14,9 @@ pub fn spawn(state: AppState) {
 }
 
 async fn run(state: AppState) {
+    // Only the updater notifies: manual refreshes mean the user is in the
+    // app, and adding a manga would announce its whole backlog.
+    let notifier = crate::notifier::Notifier::new(state.config.notify.clone());
     // Clamp: interval_secs = 0 would busy-loop hammering every source.
     let interval = Duration::from_secs(state.config.updater.interval_secs.max(60));
     loop {
@@ -32,9 +35,15 @@ async fn run(state: AppState) {
         };
         tracing::info!(count = manga.len(), "checking library for new chapters");
         for entry in manga {
-            if let Err(err) = sync::refresh_manga(&state, &entry).await {
-                // One broken source must not stop the sweep.
-                tracing::warn!(manga = %entry.title, %err, "update check failed");
+            match sync::refresh_manga(&state, &entry).await {
+                Ok(new) if !new.is_empty() => {
+                    notifier.notify_new_chapters(&entry.title, &new).await;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    // One broken source must not stop the sweep.
+                    tracing::warn!(manga = %entry.title, %err, "update check failed");
+                }
             }
         }
     }
