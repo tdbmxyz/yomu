@@ -1184,8 +1184,15 @@ body:has(.reader-overlay.flow) main {
   /* flex items shrink by default: without this, every page is squashed so
      the whole strip fits one viewport */
   flex-shrink: 0;
-  /* keeps scroll geometry sane before lazy images load */
-  min-height: 8rem;
+}
+
+/* Not loaded yet: hold a realistic page's worth of space — the reader
+   keeps --strip-placeholder at the rolling average of the pages loaded
+   so far (tall webtoon strips run several viewports each). Tiny
+   placeholders let one small slide cross several "pages" and turn into
+   a leap once the real images arrive. */
+.reader-strip-page:not([data-loaded]) {
+  height: var(--strip-placeholder, 85vh);
 }
 
 /* ---- server gate (shell first-run / wrong server) ---- */

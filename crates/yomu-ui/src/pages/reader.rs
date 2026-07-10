@@ -873,6 +873,9 @@ fn ReaderInner() -> impl IntoView {
                                 counts.insert(chapter_id, meta.page_count);
                             });
                             let strip = NodeRef::<leptos::html::Div>::new();
+                            // (sum, count) of loaded page heights: keeps
+                            // --strip-placeholder at the average page.
+                            let loaded_avg = StoredValue::new((0.0_f64, 0_u32));
                             // Scroll events only count once the programmatic
                             // opening scroll below has landed; before that
                             // they would map placeholder-height images to a
@@ -1193,24 +1196,30 @@ fn ReaderInner() -> impl IntoView {
                                                     .map(|c| c.title)
                                                     .unwrap_or_default()
                                             };
-                                            // A lazily loaded image grows from
-                                            // its placeholder height when it
-                                            // arrives; when that growth is
-                                            // above the reading line it pushes
-                                            // the page being read away, so the
-                                            // scroll follows by the same
-                                            // amount. Anchoring at the midline
-                                            // (where the scroll handler reads
-                                            // the position) rather than the
-                                            // viewport top matters when the
-                                            // reader outruns the image loads —
-                                            // crossing into the next chapter,
-                                            // or opening at a saved position —
-                                            // where uncompensated placeholders
-                                            // between the viewport top and the
-                                            // midline used to shove the view
-                                            // several pages back as they
-                                            // inflated.
+                                            // A lazily loaded image is held at
+                                            // the placeholder height by CSS
+                                            // until data-loaded is set, so the
+                                            // handler can measure the true
+                                            // pre-growth geometry, reveal the
+                                            // natural size, and measure again.
+                                            // When the placeholder sat fully
+                                            // above the reading line (the
+                                            // viewport midline, where the
+                                            // scroll handler reads positions)
+                                            // its growth pushes the line
+                                            // content away — the scroll
+                                            // follows by the same amount.
+                                            // Deciding on pre-growth geometry
+                                            // matters: pages can run several
+                                            // viewports tall, so a page loaded
+                                            // out of order grows from "fully
+                                            // above" into "straddling", and
+                                            // the old post-growth check read
+                                            // that as the page being read and
+                                            // skipped it — a several-page jump
+                                            // back at chapter transitions. A
+                                            // placeholder at or under the line
+                                            // grows below it: nothing to do.
                                             let on_load = move |ev: leptos::ev::Event| {
                                                 let Some(img) = ev
                                                     .target()
@@ -1220,34 +1229,86 @@ fn ReaderInner() -> impl IntoView {
                                                 else {
                                                     return;
                                                 };
-                                                let middle = window()
+                                                let viewport = window()
                                                     .inner_height()
                                                     .ok()
                                                     .and_then(|h| h.as_f64())
-                                                    .unwrap_or(0.0)
-                                                    / 2.0;
-                                                let rect = img.get_bounding_client_rect();
-                                                // Straddling the line: this is
-                                                // the page being read — gluing
-                                                // it would skip the reader over
-                                                // it, load after load (runaway
-                                                // scrolling). Fully below: its
-                                                // growth doesn't move the line.
-                                                if rect.bottom() > middle {
-                                                    return;
-                                                }
-                                                let placeholder = window()
-                                                    .get_computed_style(&img)
-                                                    .ok()
-                                                    .flatten()
-                                                    .and_then(|s| {
-                                                        s.get_property_value("min-height").ok()
-                                                    })
-                                                    .and_then(|v| {
-                                                        v.strip_suffix("px")?.parse::<f64>().ok()
-                                                    })
                                                     .unwrap_or(0.0);
-                                                let delta = rect.height() - placeholder;
+                                                let middle = viewport / 2.0;
+                                                let before = img.get_bounding_client_rect();
+                                                // Placeholders still waiting,
+                                                // fully above the line — counted
+                                                // BEFORE anything moves (the
+                                                // reveal below shifts them).
+                                                let mut above = 0.0;
+                                                if let Some(el) = strip.get_untracked()
+                                                    && let Ok(pending) = el.query_selector_all(
+                                                        "img.reader-strip-page:not([data-loaded])",
+                                                    )
+                                                {
+                                                    for i in 0..pending.length() {
+                                                        let Some(other) = pending
+                                                            .item(i)
+                                                            .and_then(|n| {
+                                                                n.dyn_into::<web_sys::Element>()
+                                                                    .ok()
+                                                            })
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        if !other.is_same_node(Some(&img))
+                                                            && other
+                                                                .get_bounding_client_rect()
+                                                                .bottom()
+                                                                <= middle
+                                                        {
+                                                            above += 1.0;
+                                                        }
+                                                    }
+                                                }
+                                                let _ =
+                                                    img.set_attribute("data-loaded", "1");
+                                                let after = img.get_bounding_client_rect();
+                                                // Own growth, when the
+                                                // placeholder sat fully above
+                                                // the line.
+                                                let mut delta = if before.bottom() <= middle {
+                                                    after.height() - before.height()
+                                                } else {
+                                                    0.0
+                                                };
+                                                // Keep the waiting placeholders
+                                                // near the average loaded page —
+                                                // and compensate that re-size
+                                                // too: every placeholder still
+                                                // fully above the line grows by
+                                                // the average's change, which
+                                                // would otherwise shove the
+                                                // line content down by pages.
+                                                let old_avg = loaded_avg.with_value(
+                                                    |(sum, n)| {
+                                                        if *n > 0 {
+                                                            *sum / *n as f64
+                                                        } else {
+                                                            // CSS fallback height
+                                                            viewport * 0.85
+                                                        }
+                                                    },
+                                                );
+                                                loaded_avg.update_value(|(sum, n)| {
+                                                    *sum += after.height();
+                                                    *n += 1;
+                                                });
+                                                let new_avg = loaded_avg
+                                                    .with_value(|(sum, n)| *sum / *n as f64);
+                                                if let Some(el) = strip.get_untracked() {
+                                                    let _ = web_sys::HtmlElement::style(&el)
+                                                        .set_property(
+                                                            "--strip-placeholder",
+                                                            &format!("{new_avg}px"),
+                                                        );
+                                                }
+                                                delta += above * (new_avg - old_avg);
                                                 if delta.abs() > 1.0 {
                                                     window().scroll_by_with_x_and_y(0.0, delta);
                                                 }

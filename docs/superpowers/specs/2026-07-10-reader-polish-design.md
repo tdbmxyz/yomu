@@ -53,13 +53,24 @@ Two symptoms, both suspected in the image-load scroll compensation:
 - crossing into the next chapter sometimes still jumps back several
   pages (second attempt works).
 
-This part is empirical: build a headless repro that scrolls at reading
-pace with monkeypatched `scrollBy`/`scrollTo` logging (same harness as
-the 1.4.0 investigation), identify the actual mis-compensation, then
-fix with a regression repro before/after. Candidate hypotheses to test,
-not assume: compensation firing for images that straddle the midline
-during momentum scrolling; double-compensation when several images load
-in one frame; the `?page=…` opening scroll racing `load_next`.
+Found empirically (instrumented headless repro, before/after):
+
+- Placeholders were 8rem (~128px) while real pages run several
+  viewports tall (~6000px on webtoon-style strips). One small slide
+  crossed several placeholder "pages" at once — the leap — and the
+  opening/transition geometry was hopeless.
+- The load glue classified images by their *post-growth* rect: a page
+  loading out of order grew from "fully above the midline" into
+  "straddling" and was skipped as "the page being read", leaving pages
+  of uncompensated growth — the jump-back.
+
+Fix: unloaded strip images are held by CSS at
+`height: var(--strip-placeholder, 85vh)`; the load handler measures the
+placeholder rect, reveals the natural size (`data-loaded`), measures
+again, and compensates by the growth when the *placeholder* sat fully
+above the midline. `--strip-placeholder` tracks the rolling average of
+loaded pages, and that re-size of pending placeholders is compensated
+the same way (counted before the reveal moves them).
 
 ## Testing
 
