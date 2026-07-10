@@ -7,6 +7,7 @@ use chrono::Utc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
+use leptos_router::NavigateOptions;
 use leptos_router::hooks::use_query_map;
 use yomu_domain::{ProgressEvent, SetPositionRequest};
 
@@ -233,6 +234,18 @@ fn ReaderInner() -> impl IntoView {
     };
 
     let navigate = leptos_router::hooks::use_navigate();
+    // Chapter-to-chapter moves inside the reader replace the history
+    // entry instead of pushing one: system back must leave the reader
+    // (to the chapter list), not walk back through every chapter read.
+    let reroute = move |url: String| {
+        navigate(
+            &url,
+            NavigateOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+    };
     let neighbour_ids = move || neighbours().unwrap_or((None, None));
 
     // Paged-mode turn requester shared by keys, tap zones, the ‹ › pill
@@ -240,7 +253,7 @@ fn ReaderInner() -> impl IntoView {
     // (pager::bounds trims missing neighbours); one more turn on a
     // transition panel crosses into the neighbouring chapter.
     let request_turn = {
-        let navigate = navigate.clone();
+        let reroute = reroute.clone();
         move |delta: i64| {
             if snap.get_untracked().is_some() {
                 return; // mid-animation
@@ -257,7 +270,7 @@ fn ReaderInner() -> impl IntoView {
                 if current == count as i64
                     && let Some(next) = next
                 {
-                    navigate(&format!("/read/{manga_id}/{next}"), Default::default());
+                    reroute(format!("/read/{manga_id}/{next}"));
                 }
                 return;
             }
@@ -265,10 +278,7 @@ fn ReaderInner() -> impl IntoView {
                 if current == -1
                     && let Some(prev) = prev
                 {
-                    navigate(
-                        &format!("/read/{manga_id}/{prev}?page=end"),
-                        Default::default(),
-                    );
+                    reroute(format!("/read/{manga_id}/{prev}?page=end"));
                 }
                 return;
             }
@@ -310,22 +320,25 @@ fn ReaderInner() -> impl IntoView {
     });
     on_cleanup(move || key_handle.remove());
 
-    let toggle_mode = move |_| {
-        let next = match mode.get_untracked() {
-            ReaderMode::Paged => ReaderMode::Vertical,
-            ReaderMode::Vertical => ReaderMode::Paged,
-        };
-        mode.set(next);
-        offline::set_reader_mode(manga_id, next);
-        // Leaving a continuous strip that wandered into another chapter:
-        // paged mode is bound to the routed chapter, so re-route there.
-        if next == ReaderMode::Paged {
-            let current = current_chapter.get_untracked();
-            if current != chapter_id {
-                navigate(
-                    &format!("/read/{manga_id}/{current}?page={}", page.get_untracked()),
-                    Default::default(),
-                );
+    let toggle_mode = {
+        let reroute = reroute.clone();
+        move |_| {
+            let next = match mode.get_untracked() {
+                ReaderMode::Paged => ReaderMode::Vertical,
+                ReaderMode::Vertical => ReaderMode::Paged,
+            };
+            mode.set(next);
+            offline::set_reader_mode(manga_id, next);
+            // Leaving a continuous strip that wandered into another chapter:
+            // paged mode is bound to the routed chapter, so re-route there.
+            if next == ReaderMode::Paged {
+                let current = current_chapter.get_untracked();
+                if current != chapter_id {
+                    reroute(format!(
+                        "/read/{manga_id}/{current}?page={}",
+                        page.get_untracked()
+                    ));
+                }
             }
         }
     };
@@ -346,22 +359,20 @@ fn ReaderInner() -> impl IntoView {
         dir.set(next);
         offline::set_reader_direction(manga_id, next);
     };
-    let toggle_fullscreen = move |_| {
-        let doc = document();
-        if doc.fullscreen_element().is_some() {
-            doc.exit_fullscreen();
-        } else if let Some(root) = doc.document_element() {
-            let _ = root.request_fullscreen();
-        }
-    };
 
-    // Android shell: system bars follow the reader chrome (no-op
-    // elsewhere — see offline::set_immersive). Cleanup restores the bars
+    // Android shell: the reader runs edge-to-edge (bars overlay the page
+    // instead of resizing the webview — no shift on chrome toggle) and
+    // the system bars follow the reader chrome (no-ops elsewhere — see
+    // offline::set_reading / set_immersive). Cleanup restores everything
     // however the reader is left, back gesture included.
+    offline::set_reading(true);
     Effect::new(move |_| {
         offline::set_immersive(!chrome.get());
     });
-    on_cleanup(|| offline::set_immersive(false));
+    on_cleanup(|| {
+        offline::set_immersive(false);
+        offline::set_reading(false);
+    });
 
     let request_view = request_turn.clone();
     let commit_view = commit_pos.clone();
@@ -1335,21 +1346,27 @@ fn ReaderInner() -> impl IntoView {
             // ‹ › turn pages; the bar-style |‹ ›| jump chapters, so the
             // controls around the page counter actually act on pages.
             <div class="reader-chrome reader-bottom">
-                {move || {
-                    neighbours()
-                        .and_then(|(previous, _)| previous)
-                        .map(|prev| {
-                            view! {
-                                <a
-                                    class="pill-btn"
-                                    title="Previous chapter"
-                                    href=format!("/read/{manga_id}/{prev}")
-                                >
-                                    "|‹"
-                                </a>
-                            }
-                        })
-                }}
+                {
+                    let reroute = reroute.clone();
+                    move || {
+                        let reroute = reroute.clone();
+                        neighbours()
+                            .and_then(|(previous, _)| previous)
+                            .map(|prev| {
+                                view! {
+                                    <button
+                                        class="pill-btn pill-jump"
+                                        title="Previous chapter"
+                                        on:click=move |_| reroute(
+                                            format!("/read/{manga_id}/{prev}"),
+                                        )
+                                    >
+                                        "|‹"
+                                    </button>
+                                }
+                            })
+                    }
+                }
                 <button
                     class="pill-btn"
                     title="Previous page"
@@ -1373,21 +1390,27 @@ fn ReaderInner() -> impl IntoView {
                 >
                     "›"
                 </button>
-                {move || {
-                    neighbours()
-                        .and_then(|(_, next)| next)
-                        .map(|next| {
-                            view! {
-                                <a
-                                    class="pill-btn"
-                                    title="Next chapter"
-                                    href=format!("/read/{manga_id}/{next}")
-                                >
-                                    "›|"
-                                </a>
-                            }
-                        })
-                }}
+                {
+                    let reroute = reroute.clone();
+                    move || {
+                        let reroute = reroute.clone();
+                        neighbours()
+                            .and_then(|(_, next)| next)
+                            .map(|next| {
+                                view! {
+                                    <button
+                                        class="pill-btn pill-jump"
+                                        title="Next chapter"
+                                        on:click=move |_| reroute(
+                                            format!("/read/{manga_id}/{next}"),
+                                        )
+                                    >
+                                        "›|"
+                                    </button>
+                                }
+                            })
+                    }
+                }
                 <span class="pill-sep"></span>
                 <button
                     class="pill-btn"
@@ -1395,9 +1418,6 @@ fn ReaderInner() -> impl IntoView {
                     on:click=move |_| menu_open.update(|o| *o = !*o)
                 >
                     "⚙"
-                </button>
-                <button class="pill-btn" title="Fullscreen" on:click=toggle_fullscreen>
-                    "⛶"
                 </button>
             </div>
         </div>

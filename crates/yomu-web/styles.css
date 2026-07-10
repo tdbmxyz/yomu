@@ -894,10 +894,14 @@ a.source-card:hover {
   flex-direction: column;
 }
 
+/* --shell-inset-top/-bottom: system-bar heights pushed in by the
+   Android shell while reading (the webview runs edge-to-edge there, so
+   the reader's own overlays dodge the system bars). 0 everywhere else. */
+
 /* thin always-visible progress: pages read of the current chapter */
 .reader-progress {
   position: fixed;
-  top: 0;
+  top: var(--shell-inset-top, 0px);
   left: 0;
   right: 0;
   height: 2px;
@@ -925,7 +929,7 @@ a.source-card:hover {
 }
 
 .reader-top {
-  top: 2px;
+  top: calc(2px + var(--shell-inset-top, 0px));
 }
 
 .chrome-hidden .reader-chrome {
@@ -960,7 +964,7 @@ a.source-card:hover {
 .reader-bottom {
   left: 50%;
   right: auto;
-  bottom: calc(0.8rem + env(safe-area-inset-bottom));
+  bottom: calc(0.8rem + env(safe-area-inset-bottom) + var(--shell-inset-bottom, 0px));
   transform: translateX(-50%);
   width: fit-content;
   max-width: calc(100vw - 1.5rem);
@@ -989,12 +993,12 @@ a.source-card:hover {
 
 /* chapter jumps (|‹ ›|) sit outermost and read as secondary next to the
    page arrows around the counter */
-.reader-bottom a.pill-btn {
+.reader-bottom .pill-jump {
   color: var(--muted);
   font-size: 0.9rem;
 }
 
-.reader-bottom a.pill-btn:hover {
+.reader-bottom .pill-jump:hover {
   color: var(--accent);
 }
 
@@ -1016,7 +1020,7 @@ a.source-card:hover {
 .reader-menu {
   left: 50%;
   right: auto;
-  bottom: calc(4rem + env(safe-area-inset-bottom));
+  bottom: calc(4rem + env(safe-area-inset-bottom) + var(--shell-inset-bottom, 0px));
   transform: translateX(-50%);
   width: fit-content;
   max-width: calc(100vw - 1.5rem);

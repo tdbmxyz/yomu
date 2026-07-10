@@ -285,6 +285,18 @@ pub fn shell_page_url(chapter_id: Uuid, n: u32) -> Option<String> {
 /// is absent (desktop shell, plain browser, an APK older than the bridge)
 /// this is a no-op.
 pub fn set_immersive(on: bool) {
+    android_bridge("setImmersive", on);
+}
+
+/// Android shell: the reader is open — go edge-to-edge so toggling the
+/// system bars overlays them over the page instead of resizing the
+/// webview (which would visibly shift the reader). Same no-op rules as
+/// [`set_immersive`].
+pub fn set_reading(on: bool) {
+    android_bridge("setReading", on);
+}
+
+fn android_bridge(name: &str, on: bool) {
     use leptos::wasm_bindgen::JsCast;
     let Some(window) = web_sys::window() else {
         return;
@@ -292,7 +304,7 @@ pub fn set_immersive(on: bool) {
     let Ok(bridge) = js_sys::Reflect::get(&window, &"YomuAndroid".into()) else {
         return;
     };
-    let Ok(method) = js_sys::Reflect::get(&bridge, &"setImmersive".into()) else {
+    let Ok(method) = js_sys::Reflect::get(&bridge, &name.into()) else {
         return;
     };
     let Ok(method) = method.dyn_into::<js_sys::Function>() else {
