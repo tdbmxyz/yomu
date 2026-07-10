@@ -520,6 +520,7 @@ impl SelectorSource {
                 key: page_url.to_string(),
                 title,
                 cover_url,
+                in_library: None,
             },
             description,
             chapters,
@@ -789,6 +790,7 @@ fn parse_cards(
             key: url.to_string(),
             title,
             cover_url,
+            in_library: None,
         });
     }
     out

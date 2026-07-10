@@ -381,6 +381,20 @@ button.danger:hover {
   display: block;
 }
 
+/* browse/search: this result is already tracked (top-left; the unread
+   badge owns the top-right corner) */
+.in-library-badge {
+  position: absolute;
+  top: 0.3rem;
+  left: 0.3rem;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.3rem;
+}
+
 .unread-badge {
   position: absolute;
   top: 0.3rem;

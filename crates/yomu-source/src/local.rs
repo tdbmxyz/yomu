@@ -173,6 +173,7 @@ impl LocalSource {
                 key: series.to_string(),
                 title: details.title.unwrap_or_else(|| series.to_string()),
                 cover_url,
+                in_library: None,
             },
             description: details.description,
             chapters,
@@ -355,6 +356,7 @@ impl Source for LocalSource {
                 key: series.clone(),
                 title: series,
                 cover_url: None,
+                in_library: None,
             });
         }
         Ok(out)
