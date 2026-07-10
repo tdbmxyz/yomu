@@ -7,6 +7,7 @@ use chrono::Utc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
+use leptos_router::NavigateOptions;
 use leptos_router::hooks::use_query_map;
 use yomu_domain::{ProgressEvent, SetPositionRequest};
 
@@ -233,6 +234,18 @@ fn ReaderInner() -> impl IntoView {
     };
 
     let navigate = leptos_router::hooks::use_navigate();
+    // Chapter-to-chapter moves inside the reader replace the history
+    // entry instead of pushing one: system back must leave the reader
+    // (to the chapter list), not walk back through every chapter read.
+    let reroute = move |url: String| {
+        navigate(
+            &url,
+            NavigateOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+    };
     let neighbour_ids = move || neighbours().unwrap_or((None, None));
 
     // Paged-mode turn requester shared by keys, tap zones, the ‹ › pill
@@ -240,7 +253,7 @@ fn ReaderInner() -> impl IntoView {
     // (pager::bounds trims missing neighbours); one more turn on a
     // transition panel crosses into the neighbouring chapter.
     let request_turn = {
-        let navigate = navigate.clone();
+        let reroute = reroute.clone();
         move |delta: i64| {
             if snap.get_untracked().is_some() {
                 return; // mid-animation
@@ -257,7 +270,7 @@ fn ReaderInner() -> impl IntoView {
                 if current == count as i64
                     && let Some(next) = next
                 {
-                    navigate(&format!("/read/{manga_id}/{next}"), Default::default());
+                    reroute(format!("/read/{manga_id}/{next}"));
                 }
                 return;
             }
@@ -265,10 +278,7 @@ fn ReaderInner() -> impl IntoView {
                 if current == -1
                     && let Some(prev) = prev
                 {
-                    navigate(
-                        &format!("/read/{manga_id}/{prev}?page=end"),
-                        Default::default(),
-                    );
+                    reroute(format!("/read/{manga_id}/{prev}?page=end"));
                 }
                 return;
             }
@@ -310,22 +320,25 @@ fn ReaderInner() -> impl IntoView {
     });
     on_cleanup(move || key_handle.remove());
 
-    let toggle_mode = move |_| {
-        let next = match mode.get_untracked() {
-            ReaderMode::Paged => ReaderMode::Vertical,
-            ReaderMode::Vertical => ReaderMode::Paged,
-        };
-        mode.set(next);
-        offline::set_reader_mode(manga_id, next);
-        // Leaving a continuous strip that wandered into another chapter:
-        // paged mode is bound to the routed chapter, so re-route there.
-        if next == ReaderMode::Paged {
-            let current = current_chapter.get_untracked();
-            if current != chapter_id {
-                navigate(
-                    &format!("/read/{manga_id}/{current}?page={}", page.get_untracked()),
-                    Default::default(),
-                );
+    let toggle_mode = {
+        let reroute = reroute.clone();
+        move |_| {
+            let next = match mode.get_untracked() {
+                ReaderMode::Paged => ReaderMode::Vertical,
+                ReaderMode::Vertical => ReaderMode::Paged,
+            };
+            mode.set(next);
+            offline::set_reader_mode(manga_id, next);
+            // Leaving a continuous strip that wandered into another chapter:
+            // paged mode is bound to the routed chapter, so re-route there.
+            if next == ReaderMode::Paged {
+                let current = current_chapter.get_untracked();
+                if current != chapter_id {
+                    reroute(format!(
+                        "/read/{manga_id}/{current}?page={}",
+                        page.get_untracked()
+                    ));
+                }
             }
         }
     };
@@ -346,22 +359,20 @@ fn ReaderInner() -> impl IntoView {
         dir.set(next);
         offline::set_reader_direction(manga_id, next);
     };
-    let toggle_fullscreen = move |_| {
-        let doc = document();
-        if doc.fullscreen_element().is_some() {
-            doc.exit_fullscreen();
-        } else if let Some(root) = doc.document_element() {
-            let _ = root.request_fullscreen();
-        }
-    };
 
-    // Android shell: system bars follow the reader chrome (no-op
-    // elsewhere — see offline::set_immersive). Cleanup restores the bars
+    // Android shell: the reader runs edge-to-edge (bars overlay the page
+    // instead of resizing the webview — no shift on chrome toggle) and
+    // the system bars follow the reader chrome (no-ops elsewhere — see
+    // offline::set_reading / set_immersive). Cleanup restores everything
     // however the reader is left, back gesture included.
+    offline::set_reading(true);
     Effect::new(move |_| {
         offline::set_immersive(!chrome.get());
     });
-    on_cleanup(|| offline::set_immersive(false));
+    on_cleanup(|| {
+        offline::set_immersive(false);
+        offline::set_reading(false);
+    });
 
     let request_view = request_turn.clone();
     let commit_view = commit_pos.clone();
@@ -862,6 +873,9 @@ fn ReaderInner() -> impl IntoView {
                                 counts.insert(chapter_id, meta.page_count);
                             });
                             let strip = NodeRef::<leptos::html::Div>::new();
+                            // (sum, count) of loaded page heights: keeps
+                            // --strip-placeholder at the average page.
+                            let loaded_avg = StoredValue::new((0.0_f64, 0_u32));
                             // Scroll events only count once the programmatic
                             // opening scroll below has landed; before that
                             // they would map placeholder-height images to a
@@ -1182,24 +1196,30 @@ fn ReaderInner() -> impl IntoView {
                                                     .map(|c| c.title)
                                                     .unwrap_or_default()
                                             };
-                                            // A lazily loaded image grows from
-                                            // its placeholder height when it
-                                            // arrives; when that growth is
-                                            // above the reading line it pushes
-                                            // the page being read away, so the
-                                            // scroll follows by the same
-                                            // amount. Anchoring at the midline
-                                            // (where the scroll handler reads
-                                            // the position) rather than the
-                                            // viewport top matters when the
-                                            // reader outruns the image loads —
-                                            // crossing into the next chapter,
-                                            // or opening at a saved position —
-                                            // where uncompensated placeholders
-                                            // between the viewport top and the
-                                            // midline used to shove the view
-                                            // several pages back as they
-                                            // inflated.
+                                            // A lazily loaded image is held at
+                                            // the placeholder height by CSS
+                                            // until data-loaded is set, so the
+                                            // handler can measure the true
+                                            // pre-growth geometry, reveal the
+                                            // natural size, and measure again.
+                                            // When the placeholder sat fully
+                                            // above the reading line (the
+                                            // viewport midline, where the
+                                            // scroll handler reads positions)
+                                            // its growth pushes the line
+                                            // content away — the scroll
+                                            // follows by the same amount.
+                                            // Deciding on pre-growth geometry
+                                            // matters: pages can run several
+                                            // viewports tall, so a page loaded
+                                            // out of order grows from "fully
+                                            // above" into "straddling", and
+                                            // the old post-growth check read
+                                            // that as the page being read and
+                                            // skipped it — a several-page jump
+                                            // back at chapter transitions. A
+                                            // placeholder at or under the line
+                                            // grows below it: nothing to do.
                                             let on_load = move |ev: leptos::ev::Event| {
                                                 let Some(img) = ev
                                                     .target()
@@ -1209,34 +1229,86 @@ fn ReaderInner() -> impl IntoView {
                                                 else {
                                                     return;
                                                 };
-                                                let middle = window()
+                                                let viewport = window()
                                                     .inner_height()
                                                     .ok()
                                                     .and_then(|h| h.as_f64())
-                                                    .unwrap_or(0.0)
-                                                    / 2.0;
-                                                let rect = img.get_bounding_client_rect();
-                                                // Straddling the line: this is
-                                                // the page being read — gluing
-                                                // it would skip the reader over
-                                                // it, load after load (runaway
-                                                // scrolling). Fully below: its
-                                                // growth doesn't move the line.
-                                                if rect.bottom() > middle {
-                                                    return;
-                                                }
-                                                let placeholder = window()
-                                                    .get_computed_style(&img)
-                                                    .ok()
-                                                    .flatten()
-                                                    .and_then(|s| {
-                                                        s.get_property_value("min-height").ok()
-                                                    })
-                                                    .and_then(|v| {
-                                                        v.strip_suffix("px")?.parse::<f64>().ok()
-                                                    })
                                                     .unwrap_or(0.0);
-                                                let delta = rect.height() - placeholder;
+                                                let middle = viewport / 2.0;
+                                                let before = img.get_bounding_client_rect();
+                                                // Placeholders still waiting,
+                                                // fully above the line — counted
+                                                // BEFORE anything moves (the
+                                                // reveal below shifts them).
+                                                let mut above = 0.0;
+                                                if let Some(el) = strip.get_untracked()
+                                                    && let Ok(pending) = el.query_selector_all(
+                                                        "img.reader-strip-page:not([data-loaded])",
+                                                    )
+                                                {
+                                                    for i in 0..pending.length() {
+                                                        let Some(other) = pending
+                                                            .item(i)
+                                                            .and_then(|n| {
+                                                                n.dyn_into::<web_sys::Element>()
+                                                                    .ok()
+                                                            })
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        if !other.is_same_node(Some(&img))
+                                                            && other
+                                                                .get_bounding_client_rect()
+                                                                .bottom()
+                                                                <= middle
+                                                        {
+                                                            above += 1.0;
+                                                        }
+                                                    }
+                                                }
+                                                let _ =
+                                                    img.set_attribute("data-loaded", "1");
+                                                let after = img.get_bounding_client_rect();
+                                                // Own growth, when the
+                                                // placeholder sat fully above
+                                                // the line.
+                                                let mut delta = if before.bottom() <= middle {
+                                                    after.height() - before.height()
+                                                } else {
+                                                    0.0
+                                                };
+                                                // Keep the waiting placeholders
+                                                // near the average loaded page —
+                                                // and compensate that re-size
+                                                // too: every placeholder still
+                                                // fully above the line grows by
+                                                // the average's change, which
+                                                // would otherwise shove the
+                                                // line content down by pages.
+                                                let old_avg = loaded_avg.with_value(
+                                                    |(sum, n)| {
+                                                        if *n > 0 {
+                                                            *sum / *n as f64
+                                                        } else {
+                                                            // CSS fallback height
+                                                            viewport * 0.85
+                                                        }
+                                                    },
+                                                );
+                                                loaded_avg.update_value(|(sum, n)| {
+                                                    *sum += after.height();
+                                                    *n += 1;
+                                                });
+                                                let new_avg = loaded_avg
+                                                    .with_value(|(sum, n)| *sum / *n as f64);
+                                                if let Some(el) = strip.get_untracked() {
+                                                    let _ = web_sys::HtmlElement::style(&el)
+                                                        .set_property(
+                                                            "--strip-placeholder",
+                                                            &format!("{new_avg}px"),
+                                                        );
+                                                }
+                                                delta += above * (new_avg - old_avg);
                                                 if delta.abs() > 1.0 {
                                                     window().scroll_by_with_x_and_y(0.0, delta);
                                                 }
@@ -1335,21 +1407,27 @@ fn ReaderInner() -> impl IntoView {
             // ‹ › turn pages; the bar-style |‹ ›| jump chapters, so the
             // controls around the page counter actually act on pages.
             <div class="reader-chrome reader-bottom">
-                {move || {
-                    neighbours()
-                        .and_then(|(previous, _)| previous)
-                        .map(|prev| {
-                            view! {
-                                <a
-                                    class="pill-btn"
-                                    title="Previous chapter"
-                                    href=format!("/read/{manga_id}/{prev}")
-                                >
-                                    "|‹"
-                                </a>
-                            }
-                        })
-                }}
+                {
+                    let reroute = reroute.clone();
+                    move || {
+                        let reroute = reroute.clone();
+                        neighbours()
+                            .and_then(|(previous, _)| previous)
+                            .map(|prev| {
+                                view! {
+                                    <button
+                                        class="pill-btn pill-jump"
+                                        title="Previous chapter"
+                                        on:click=move |_| reroute(
+                                            format!("/read/{manga_id}/{prev}"),
+                                        )
+                                    >
+                                        "|‹"
+                                    </button>
+                                }
+                            })
+                    }
+                }
                 <button
                     class="pill-btn"
                     title="Previous page"
@@ -1373,21 +1451,27 @@ fn ReaderInner() -> impl IntoView {
                 >
                     "›"
                 </button>
-                {move || {
-                    neighbours()
-                        .and_then(|(_, next)| next)
-                        .map(|next| {
-                            view! {
-                                <a
-                                    class="pill-btn"
-                                    title="Next chapter"
-                                    href=format!("/read/{manga_id}/{next}")
-                                >
-                                    "›|"
-                                </a>
-                            }
-                        })
-                }}
+                {
+                    let reroute = reroute.clone();
+                    move || {
+                        let reroute = reroute.clone();
+                        neighbours()
+                            .and_then(|(_, next)| next)
+                            .map(|next| {
+                                view! {
+                                    <button
+                                        class="pill-btn pill-jump"
+                                        title="Next chapter"
+                                        on:click=move |_| reroute(
+                                            format!("/read/{manga_id}/{next}"),
+                                        )
+                                    >
+                                        "›|"
+                                    </button>
+                                }
+                            })
+                    }
+                }
                 <span class="pill-sep"></span>
                 <button
                     class="pill-btn"
@@ -1395,9 +1479,6 @@ fn ReaderInner() -> impl IntoView {
                     on:click=move |_| menu_open.update(|o| *o = !*o)
                 >
                     "⚙"
-                </button>
-                <button class="pill-btn" title="Fullscreen" on:click=toggle_fullscreen>
-                    "⛶"
                 </button>
             </div>
         </div>
