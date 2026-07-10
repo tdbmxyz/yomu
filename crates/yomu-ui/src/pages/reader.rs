@@ -601,11 +601,6 @@ fn ReaderInner() -> impl IntoView {
                             // keyboards page with the arrows, neither of
                             // which touches the strip element.
                             let positioned = StoredValue::new(false);
-                            // Which way the reader is travelling — decides
-                            // whether a straddling image load may compensate
-                            // the scroll (see on_load below).
-                            let scroll_up = StoredValue::new(false);
-                            let last_scroll_y = StoredValue::new(0.0f64);
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
                             // rewind the saved position.
@@ -766,12 +761,6 @@ fn ReaderInner() -> impl IntoView {
                                         .ok()
                                         .and_then(|h| h.as_f64())
                                         .unwrap_or(0.0);
-                                    let y = window().scroll_y().unwrap_or(0.0);
-                                    let previous = last_scroll_y.get_value();
-                                    if (y - previous).abs() > 0.5 {
-                                        scroll_up.set_value(y < previous);
-                                        last_scroll_y.set_value(y);
-                                    }
                                     // the page under the viewport's midline
                                     let middle = viewport / 2.0;
                                     let mut at: Option<(uuid::Uuid, u32)> = None;
@@ -923,12 +912,24 @@ fn ReaderInner() -> impl IntoView {
                                                     .map(|c| c.title)
                                                     .unwrap_or_default()
                                             };
-                                            // A lazily loaded image above the
-                                            // viewport grows from its
-                                            // placeholder height when it
-                                            // arrives; shift the scroll by the
-                                            // difference so the view doesn't
-                                            // jump while reading backwards.
+                                            // A lazily loaded image grows from
+                                            // its placeholder height when it
+                                            // arrives; when that growth is
+                                            // above the reading line it pushes
+                                            // the page being read away, so the
+                                            // scroll follows by the same
+                                            // amount. Anchoring at the midline
+                                            // (where the scroll handler reads
+                                            // the position) rather than the
+                                            // viewport top matters when the
+                                            // reader outruns the image loads —
+                                            // crossing into the next chapter,
+                                            // or opening at a saved position —
+                                            // where uncompensated placeholders
+                                            // between the viewport top and the
+                                            // midline used to shove the view
+                                            // several pages back as they
+                                            // inflated.
                                             let on_load = move |ev: leptos::ev::Event| {
                                                 let Some(img) = ev
                                                     .target()
@@ -938,23 +939,20 @@ fn ReaderInner() -> impl IntoView {
                                                 else {
                                                     return;
                                                 };
+                                                let middle = window()
+                                                    .inner_height()
+                                                    .ok()
+                                                    .and_then(|h| h.as_f64())
+                                                    .unwrap_or(0.0)
+                                                    / 2.0;
                                                 let rect = img.get_bounding_client_rect();
-                                                if rect.top() >= 0.0 {
-                                                    return;
-                                                }
-                                                // An image straddling the top
-                                                // edge is the one a fast fling
-                                                // just carried the reader into:
-                                                // compensating would jump them
-                                                // a page ahead, over and over —
-                                                // runaway scrolling. Only glue
-                                                // the view when travelling
-                                                // upwards (backward reading);
-                                                // an image *fully* above the
-                                                // viewport is always safe.
-                                                if rect.bottom() > 0.0
-                                                    && !scroll_up.get_value()
-                                                {
+                                                // Straddling the line: this is
+                                                // the page being read — gluing
+                                                // it would skip the reader over
+                                                // it, load after load (runaway
+                                                // scrolling). Fully below: its
+                                                // growth doesn't move the line.
+                                                if rect.bottom() > middle {
                                                     return;
                                                 }
                                                 let placeholder = window()
