@@ -91,12 +91,15 @@ impl Flick {
         self.samples.retain(|(_, st)| t - st <= 100.0);
     }
 
-    /// px/ms over the retained window; 0 without two spaced samples.
-    pub fn velocity(&self) -> f64 {
+    /// px/ms over the retained window; 0 without two spaced samples, and
+    /// 0 when the finger held still before releasing at `t_release`
+    /// (browsers stop emitting touchmove for a stationary finger, so a
+    /// stale window would read as a flick).
+    pub fn velocity(&self, t_release: f64) -> f64 {
         let (Some((x0, t0)), Some((x1, t1))) = (self.samples.first(), self.samples.last()) else {
             return 0.0;
         };
-        if t1 - t0 <= 0.0 {
+        if t1 - t0 <= 0.0 || t_release - t1 > 100.0 {
             return 0.0;
         }
         (x1 - x0) / (t1 - t0)
@@ -153,8 +156,17 @@ mod tests {
         f.push(0.0, 0.0);
         f.push(-10.0, 1000.0); // old sample evicted by the next push
         f.push(-110.0, 1100.0);
-        assert!((f.velocity() - (-1.0)).abs() < 1e-9);
+        assert!((f.velocity(1100.0) - (-1.0)).abs() < 1e-9);
         f.clear();
-        assert_eq!(f.velocity(), 0.0);
+        assert_eq!(f.velocity(1100.0), 0.0);
+    }
+
+    #[test]
+    fn holding_still_before_release_is_not_a_flick() {
+        let mut f = Flick::default();
+        f.push(0.0, 0.0);
+        f.push(-100.0, 80.0); // fast movement…
+        assert_eq!(f.velocity(500.0), 0.0); // …but released after a hold
+        assert!((f.velocity(120.0) - (-1.25)).abs() < 1e-9);
     }
 }

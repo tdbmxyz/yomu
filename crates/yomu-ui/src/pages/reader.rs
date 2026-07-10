@@ -645,7 +645,8 @@ fn ReaderInner() -> impl IntoView {
                                     .and_then(|w| w.as_f64())
                                     .unwrap_or(0.0)
                                     .max(1.0);
-                                let velocity = flick.with_value(|f| f.velocity());
+                                let velocity =
+                                    flick.with_value(|f| f.velocity(ev.time_stamp()));
                                 let rtl = dir.get_untracked() == ReaderDirection::Rtl;
                                 if pager::verdict(dx, width, velocity)
                                     == pager::Verdict::Commit
