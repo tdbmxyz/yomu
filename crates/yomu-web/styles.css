@@ -683,6 +683,40 @@ a.source-card:hover {
   -webkit-touch-callout: none;
 }
 
+/* chapter-list header: the ⋮ actions menu hangs off it */
+.chapter-list-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.chapter-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 14rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.chapter-menu button {
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  padding: 0.6rem 1rem;
+}
+
+.chapter-menu button:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
 /* storage-state outlines: blue = on the server, green = on this device,
    split = both; pulsing blue while a download runs, red on failure.
    Declared before .current/.selected so an active selection wins. */
