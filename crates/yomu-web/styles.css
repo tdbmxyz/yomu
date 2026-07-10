@@ -98,6 +98,8 @@
 
 * {
   box-sizing: border-box;
+  /* app-like UI: no blue flash on taps (Android webview link highlight) */
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
