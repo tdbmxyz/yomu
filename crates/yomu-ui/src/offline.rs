@@ -280,6 +280,27 @@ pub fn shell_page_url(chapter_id: Uuid, n: u32) -> Option<String> {
     Some(format!("{base}chapter/{chapter_id}/{n}"))
 }
 
+/// Android shell: hide/show the system bars while reading. The bridge is
+/// installed by the Android activity as `window.YomuAndroid`; anywhere it
+/// is absent (desktop shell, plain browser, an APK older than the bridge)
+/// this is a no-op.
+pub fn set_immersive(on: bool) {
+    use leptos::wasm_bindgen::JsCast;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(bridge) = js_sys::Reflect::get(&window, &"YomuAndroid".into()) else {
+        return;
+    };
+    let Ok(method) = js_sys::Reflect::get(&bridge, &"setImmersive".into()) else {
+        return;
+    };
+    let Ok(method) = method.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let _ = method.call1(&bridge, &on.into());
+}
+
 async fn shell_invoke(
     command: &str,
     args: js_sys::Object,
