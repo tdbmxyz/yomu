@@ -604,6 +604,25 @@ a.source-card:hover {
   color: var(--muted);
 }
 
+/* Phones: the max-content columns can't shrink below the host URL's
+   width, which forces the layout viewport wider than the screen
+   (scrollbars until a pinch zoom-out). Stack instead: name + listing
+   labels on the first line, the host wrapping underneath. */
+@media (max-width: 40rem) {
+  .source-list {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .source-card {
+    row-gap: 0.15rem;
+  }
+
+  .source-card-host {
+    grid-column: 1 / -1;
+    overflow-wrap: anywhere;
+  }
+}
+
 .catalog-back {
   text-decoration: none;
   margin-right: 0.25rem;
