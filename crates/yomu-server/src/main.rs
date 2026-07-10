@@ -24,9 +24,12 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::load().context("loading configuration")?;
 
-    let mut sources = Registry::load(&config.sources_dir).map_err(|e| {
+    let (mut sources, broken) = Registry::load(&config.sources_dir).map_err(|e| {
         anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display())
     })?;
+    for definition in &broken {
+        tracing::error!(%definition, "skipping invalid source definition");
+    }
     if config.local.enabled {
         sources
             .insert(Arc::new(LocalSource::new(
