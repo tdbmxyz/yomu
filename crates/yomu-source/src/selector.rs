@@ -457,7 +457,8 @@ impl SelectorSource {
             .manga_cover
             .as_ref()
             .and_then(|r| r.extract(root))
-            .and_then(|c| page_url.join(&c).ok());
+            .and_then(|c| page_url.join(&c).ok())
+            .map(|u| u.to_string());
 
         let chapters_doc = Html::parse_document(chapters_html);
         let mut chapters = Vec::new();
@@ -519,6 +520,7 @@ impl SelectorSource {
                 key: page_url.to_string(),
                 title,
                 cover_url,
+                in_library: None,
             },
             description,
             chapters,
@@ -782,11 +784,13 @@ fn parse_cards(
         let cover_url = cover
             .as_ref()
             .and_then(|r| r.extract(card))
-            .and_then(|c| page_url.join(&c).ok());
+            .and_then(|c| page_url.join(&c).ok())
+            .map(|u| u.to_string());
         out.push(MangaSummary {
             key: url.to_string(),
             title,
             cover_url,
+            in_library: None,
         });
     }
     out

@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/sources/{id}/browse", get(sources::browse))
+        .route("/covers", get(sources::cover))
         .route("/search", get(sources::search_all))
         .route("/library", get(library::list).post(library::add))
         .route("/categories", get(categories::list))
@@ -52,6 +53,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/chapters/download",
             axum::routing::post(chapters::download_many),
+        )
+        .route(
+            "/chapters/remove-downloads",
+            axum::routing::post(chapters::remove_downloads),
         )
         .route("/chapters/mark", axum::routing::post(chapters::mark))
         .route("/chapters/{id}/pages", get(chapters::pages))

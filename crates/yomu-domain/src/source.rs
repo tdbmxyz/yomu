@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use uuid::Uuid;
 
 /// A source registered on the server (defined in `sources.d/*.toml`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,8 +48,15 @@ pub struct MangaSummary {
     /// Source-scoped key of the manga (opaque outside the source).
     pub key: String,
     pub title: String,
+    /// Cover image address. A plain string (not `Url`): the server
+    /// rewrites it to its relative cover-proxy endpoint before results
+    /// leave the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cover_url: Option<Url>,
+    pub cover_url: Option<String>,
+    /// Set by the server when this result is already tracked: the
+    /// library manga id. Sources never fill it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_library: Option<Uuid>,
 }
 
 /// Full details as scraped from the source.

@@ -177,6 +177,17 @@ impl YomuClient {
         self.send(req).await
     }
 
+    /// Remove the server copies of these chapters.
+    pub async fn remove_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+        let req = self
+            .http
+            .post(self.url("api/v1/chapters/remove-downloads")?)
+            .json(&DownloadChaptersRequest {
+                chapter_ids: ids.to_vec(),
+            });
+        self.send(req).await
+    }
+
     pub async fn mark_chapters(&self, ids: &[Uuid], read: bool) -> Result<BulkChaptersResponse> {
         let req = self
             .http

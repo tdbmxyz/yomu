@@ -342,6 +342,66 @@ pub async fn shell_save_chapter(
     Ok(meta.page_count)
 }
 
+/// Delete a device-saved chapter from the shell's storage.
+pub async fn shell_delete_chapter(chapter_id: Uuid) -> Result<(), String> {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
+    shell_invoke("device_delete_chapter", args).await?;
+    Ok(())
+}
+
+/// Drop a chapter's "on this device" mark (after deleting its files).
+pub fn unmark_device_chapter(id: Uuid) {
+    let mut marks = device_chapters();
+    marks.remove(&id);
+    write_json(DEVICE_KEY, &marks);
+}
+
+// ---- offline read marks ----
+
+const MARKS_KEY: &str = "yomu-marks-outbox";
+
+/// Read marks made while the server was unreachable: chapter → desired
+/// state, last write wins. Flushed by [`flush_marks`].
+pub fn pending_marks() -> std::collections::BTreeMap<Uuid, bool> {
+    read_json(MARKS_KEY)
+}
+
+pub fn queue_marks(ids: &[Uuid], read: bool) {
+    let mut marks = pending_marks();
+    for id in ids {
+        marks.insert(*id, read);
+    }
+    write_json(MARKS_KEY, &marks);
+}
+
+/// Replay queued read marks; entries survive failed flushes. The mark
+/// endpoint is a set operation, so replays are idempotent.
+pub async fn flush_marks(client: &yomu_client::YomuClient) {
+    let marks = pending_marks();
+    if marks.is_empty() {
+        return;
+    }
+    let (read, unread): (Vec<_>, Vec<_>) = marks.iter().partition(|(_, r)| **r);
+    let read: Vec<Uuid> = read.into_iter().map(|(id, _)| *id).collect();
+    let unread: Vec<Uuid> = unread.into_iter().map(|(id, _)| *id).collect();
+    let mut flushed: Vec<Uuid> = Vec::new();
+    if !read.is_empty() && client.mark_chapters(&read, true).await.is_ok() {
+        flushed.extend(read);
+    }
+    if !unread.is_empty() && client.mark_chapters(&unread, false).await.is_ok() {
+        flushed.extend(unread);
+    }
+    if !flushed.is_empty() {
+        let mut marks = pending_marks();
+        for id in &flushed {
+            marks.remove(id);
+        }
+        write_json(MARKS_KEY, &marks);
+        leptos::logging::log!("synced {} offline read mark(s)", flushed.len());
+    }
+}
+
 // ---- server-seen (offline gate) ----
 
 const SERVERS_SEEN_KEY: &str = "yomu-servers-seen";

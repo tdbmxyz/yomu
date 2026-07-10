@@ -21,6 +21,9 @@ pub fn MangaPage() -> impl IntoView {
     // periodic refresh while downloads run doesn't wipe an ongoing selection.
     let selected = RwSignal::new(HashSet::<Uuid>::new());
     let anchor = RwSignal::new(None::<usize>);
+    // "Download (both)": chapters queued on the server that should be
+    // pulled to this device as soon as their server download lands.
+    let pull_queue = RwSignal::new(HashSet::<Uuid>::new());
     let client = use_client();
     let detail = LocalResource::new({
         let client = client.clone();
@@ -104,11 +107,51 @@ pub fn MangaPage() -> impl IntoView {
         }
     });
 
+    // Drain the pull queue: whenever a queued chapter's server download
+    // lands (the 2s poll above keeps the detail fresh while any download
+    // runs), pull it to this device. Leaving the page abandons what
+    // hasn't been pulled yet.
+    {
+        let client = client.clone();
+        Effect::new(move |_| {
+            let Some(Ok((d, _))) = detail.get() else {
+                return;
+            };
+            let ready: Vec<Uuid> = pull_queue
+                .get_untracked()
+                .iter()
+                .copied()
+                .filter(|qid| {
+                    d.chapters.iter().any(|c| {
+                        c.id == *qid && matches!(c.download, DownloadState::Downloaded { .. })
+                    })
+                })
+                .collect();
+            if ready.is_empty() {
+                return;
+            }
+            pull_queue.update(|q| {
+                for qid in &ready {
+                    q.remove(qid);
+                }
+            });
+            let client = client.clone();
+            spawn_local(async move {
+                for qid in ready {
+                    if let Err(err) = save_locally(&client, id, qid).await {
+                        leptos::logging::warn!("local pull: {err}");
+                    }
+                }
+                refresh.update(|n| *n += 1);
+            });
+        });
+    }
+
     view! {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             Some(Ok((detail, offline))) => {
-                view! { <MangaDetail detail offline refresh status selected anchor/> }.into_any()
+                view! { <MangaDetail detail offline refresh status selected anchor pull_queue/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -127,6 +170,7 @@ fn MangaDetail(
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
+    pull_queue: RwSignal<HashSet<Uuid>>,
 ) -> impl IntoView {
     let client = use_client();
     let manga = detail.manga.clone();
@@ -306,9 +350,26 @@ fn MangaDetail(
                 status
                 selected
                 anchor
+                pull_queue
             />
         </section>
     }
+}
+
+/// Save one chapter to this device (shell storage or, in the browser,
+/// the service-worker cache) and record the mark.
+async fn save_locally(
+    client: &yomu_client::YomuClient,
+    manga_id: Uuid,
+    id: Uuid,
+) -> Result<(), String> {
+    let count = if offline::shell_available() {
+        offline::shell_save_chapter(client, id).await?
+    } else {
+        offline::prefetch_chapter(client, id).await?
+    };
+    offline::mark_device_chapter(manga_id, id, count);
+    Ok(())
 }
 
 #[component]
@@ -321,6 +382,7 @@ fn ChapterList(
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
+    pull_queue: RwSignal<HashSet<Uuid>>,
 ) -> impl IntoView {
     // Display newest chapter first. Only the on-page list is reversed —
     // `list_chapters` stays in reading order (Chapter 1 → N), which the
@@ -328,8 +390,29 @@ fn ChapterList(
     // the server's prefix "mark read" logic. Reversing here keeps this
     // component's indices (ids, selection range, rendering) consistent
     // among themselves.
-    let chapters: Vec<Chapter> = chapters.into_iter().rev().collect();
+    let mut chapters: Vec<Chapter> = chapters.into_iter().rev().collect();
+    // Read marks queued while offline overlay the server's answer, so
+    // marking works (and shows) without a connection.
+    let pending = offline::pending_marks();
+    if !pending.is_empty() {
+        for chapter in &mut chapters {
+            if let Some(read) = pending.get(&chapter.id) {
+                chapter.read = *read;
+            }
+        }
+    }
     let ids = StoredValue::new(chapters.iter().map(|c| c.id).collect::<Vec<_>>());
+    // Storage state per display index, for the selection menu's matrix.
+    let states = StoredValue::new({
+        let device = offline::device_chapters();
+        chapters
+            .iter()
+            .map(|c| crate::chapter_actions::ChapterState {
+                on_server: matches!(c.download, DownloadState::Downloaded { .. }),
+                on_device: device.contains_key(&c.id),
+            })
+            .collect::<Vec<_>>()
+    });
 
     // Long-press: the first one starts a selection; while one is active,
     // long-pressing another row selects everything between it and the last
@@ -358,55 +441,198 @@ fn ChapterList(
         anchor.set(Some(index));
     });
 
-    let selection_active = Memo::new(move |_| !selected.with(|s| s.is_empty()));
+    // "Select" from the menu enters selection mode before anything is
+    // picked; a non-empty selection keeps it active either way.
+    let forced_selection = RwSignal::new(false);
+    let selection_active =
+        Memo::new(move |_| forced_selection.get() || !selected.with(|s| s.is_empty()));
 
-    // Bulk actions run on the selection in reading order.
-    let selection_ids = move || {
+    // The selection's display indices and per-action id subsets.
+    let selected_indices = move || {
         let picked = selected.get_untracked();
         ids.with_value(|v| {
             v.iter()
-                .filter(|id| picked.contains(id))
-                .copied()
+                .enumerate()
+                .filter(|(_, id)| picked.contains(id))
+                .map(|(i, _)| i)
                 .collect::<Vec<_>>()
+        })
+    };
+    let ids_where = move |pred: fn(&crate::chapter_actions::ChapterState) -> bool| {
+        let indices = selected_indices();
+        states.with_value(|st| {
+            ids.with_value(|v| {
+                indices
+                    .iter()
+                    .filter(|i| pred(&st[**i]))
+                    .map(|i| v[*i])
+                    .collect::<Vec<Uuid>>()
+            })
         })
     };
     let clear = move || {
         selected.set(HashSet::new());
         anchor.set(None);
-    };
-    let download_selected = move |_| {
-        let ids = selection_ids();
-        let client = use_client();
-        spawn_local(async move {
-            match client.download_chapters(&ids).await {
-                Ok(r) => {
-                    status.set(Some(match r.affected {
-                        0 => "Nothing new to download".into(),
-                        n => format!("{n} chapter(s) queued — downloads run one by one"),
-                    }));
-                    refresh.update(|n| *n += 1);
-                }
-                Err(err) => status.set(Some(format!("Download failed: {err}"))),
-            }
-        });
-        clear();
-    };
-    let mark = move |read: bool| {
-        let ids = selection_ids();
-        let client = use_client();
-        spawn_local(async move {
-            match client.mark_chapters(&ids, read).await {
-                Ok(_) => refresh.update(|n| *n += 1),
-                Err(err) => status.set(Some(format!("Mark failed: {err}"))),
-            }
-        });
-        clear();
+        forced_selection.set(false);
     };
     let select_all = move |_| {
         selected.set(ids.with_value(|v| v.iter().copied().collect()));
     };
 
+    // Marks work offline: a failed server call lands in the marks outbox
+    // and the overlay shows it until the next flush syncs it.
+    let mark_ids = move |mark_ids: Vec<Uuid>, read: bool| {
+        if mark_ids.is_empty() {
+            return;
+        }
+        let client = use_client();
+        spawn_local(async move {
+            if client.mark_chapters(&mark_ids, read).await.is_err() {
+                offline::queue_marks(&mark_ids, read);
+                status.set(Some("Marked offline — will sync when back online".into()));
+            }
+            refresh.update(|n| *n += 1);
+        });
+    };
+
+    let caps = crate::chapter_actions::Caps {
+        online: !offline,
+        local_tier: offline::shell_available() || offline::service_worker_active(),
+        local_remove: offline::shell_available(),
+    };
+    let menu_open = RwSignal::new(false);
+    let run_action = move |action: crate::chapter_actions::Action| {
+        use crate::chapter_actions::Action;
+        menu_open.set(false);
+        match action {
+            Action::DownloadServer | Action::DownloadBoth => {
+                let dl = ids_where(|s| !s.on_server);
+                if action == Action::DownloadBoth {
+                    pull_queue.update(|q| q.extend(dl.iter().copied()));
+                    // Already-downloaded picks skip the queue and pull now.
+                    let now = ids_where(|s| s.on_server && !s.on_device);
+                    pull_queue.update(|q| q.extend(now.iter().copied()));
+                }
+                let client = use_client();
+                spawn_local(async move {
+                    match client.download_chapters(&dl).await {
+                        Ok(r) => {
+                            status.set(Some(match r.affected {
+                                0 => "Nothing new to download".into(),
+                                n => format!("{n} chapter(s) queued — downloads run one by one"),
+                            }));
+                            refresh.update(|n| *n += 1);
+                        }
+                        Err(err) => status.set(Some(format!("Download failed: {err}"))),
+                    }
+                });
+            }
+            Action::DownloadLocal => {
+                let pull = ids_where(|s| s.on_server && !s.on_device);
+                let client = use_client();
+                spawn_local(async move {
+                    for id in pull {
+                        if let Err(err) = save_locally(&client, manga_id, id).await {
+                            leptos::logging::warn!("local download: {err}");
+                        }
+                    }
+                    refresh.update(|n| *n += 1);
+                });
+            }
+            Action::RemoveServer => {
+                let rm = ids_where(|s| s.on_server);
+                let client = use_client();
+                spawn_local(async move {
+                    match client.remove_downloads(&rm).await {
+                        Ok(r) => {
+                            status.set(Some(format!("{} server download(s) removed", r.affected)));
+                            refresh.update(|n| *n += 1);
+                        }
+                        Err(err) => status.set(Some(format!("Remove failed: {err}"))),
+                    }
+                });
+            }
+            Action::RemoveLocal => {
+                let rm = ids_where(|s| s.on_device);
+                spawn_local(async move {
+                    for id in rm {
+                        match offline::shell_delete_chapter(id).await {
+                            Ok(()) => offline::unmark_device_chapter(id),
+                            Err(err) => leptos::logging::warn!("local remove: {err}"),
+                        }
+                    }
+                    refresh.update(|n| *n += 1);
+                });
+            }
+            Action::MarkRead => mark_ids(ids_where(|_| true), true),
+            Action::MarkUnread => mark_ids(ids_where(|_| true), false),
+            // The list displays newest first, so "before" (older) means
+            // HIGHER display indices and "after" (newer) means lower.
+            Action::MarkBeforeRead => {
+                if let Some(max) = selected_indices().into_iter().max() {
+                    let older = ids.with_value(|v| v[max + 1..].to_vec());
+                    mark_ids(older, true);
+                }
+            }
+            Action::MarkAfterUnread => {
+                if let Some(min) = selected_indices().into_iter().min() {
+                    let newer = ids.with_value(|v| v[..min].to_vec());
+                    mark_ids(newer, false);
+                }
+            }
+        }
+        clear();
+    };
+
     view! {
+        <div class="chapter-list-head">
+            <span class="grow"></span>
+            <button
+                class="icon-btn chapter-menu-btn"
+                title="Chapter actions"
+                on:click=move |_| menu_open.update(|open| *open = !*open)
+            >
+                "⋮"
+            </button>
+            <Show when=move || menu_open.get()>
+                <div class="chapter-menu">
+                    {move || {
+                        if !selection_active.get() {
+                            view! {
+                                <button on:click=move |_| {
+                                    forced_selection.set(true);
+                                    menu_open.set(false);
+                                }>"Select"</button>
+                            }
+                                .into_any()
+                        } else {
+                            // Entries from the union of the selected
+                            // chapters' states; each action only touches
+                            // the chapters it applies to.
+                            selected.track();
+                            let sel_states = {
+                                let indices = selected_indices();
+                                states
+                                    .with_value(|st| {
+                                        indices.iter().map(|i| st[*i]).collect::<Vec<_>>()
+                                    })
+                            };
+                            crate::chapter_actions::menu_actions(&sel_states, caps)
+                                .into_iter()
+                                .map(|action| {
+                                    view! {
+                                        <button on:click=move |_| run_action(
+                                            action,
+                                        )>{action.label()}</button>
+                                    }
+                                })
+                                .collect_view()
+                                .into_any()
+                        }
+                    }}
+                </div>
+            </Show>
+        </div>
         <ul class="chapter-list">
             {chapters
                 .into_iter()
@@ -419,7 +645,6 @@ fn ChapterList(
                             chapter
                             offline
                             current
-                            refresh
                             index
                             selected
                             selection_active
@@ -434,9 +659,6 @@ fn ChapterList(
             <div class="select-bar">
                 <span class="select-count">{move || selected.with(|s| s.len())}</span>
                 <button on:click=select_all>"All"</button>
-                <button on:click=download_selected>"Download"</button>
-                <button on:click=move |_| mark(true)>"Read"</button>
-                <button on:click=move |_| mark(false)>"Unread"</button>
                 <button title="Clear selection" on:click=move |_| clear()>
                     "✕"
                 </button>
@@ -451,14 +673,12 @@ fn ChapterItem(
     chapter: Chapter,
     offline: bool,
     current: bool,
-    refresh: RwSignal<u32>,
     index: usize,
     selected: RwSignal<HashSet<Uuid>>,
     selection_active: Memo<bool>,
     press: Callback<usize>,
     toggle: Callback<usize>,
 ) -> impl IntoView {
-    let client = use_client();
     let id = chapter.id;
     let read = chapter.read;
     let is_selected = Memo::new(move |_| selected.with(|s| s.contains(&id)));
@@ -525,64 +745,19 @@ fn ChapterItem(
         }
     };
 
-    // Tachidesk-style state icons: one arrow-in-a-circle per storage tier,
-    // told apart by color (accent = on the server, green = on this device).
-    let (server_glyph, server_title, downloadable) = match &chapter.download {
-        DownloadState::None => ("↓", "Download to the server".to_string(), true),
-        DownloadState::Pending => ("↻", "Queued for download…".to_string(), false),
-        DownloadState::Downloading => ("↻", "Downloading…".to_string(), false),
-        DownloadState::Downloaded { .. } => ("✓", "On the server".to_string(), false),
-        DownloadState::Failed { reason, .. } => {
-            ("!", format!("Download failed: {reason} — retry"), true)
-        }
-    };
-    let server_busy = matches!(
+    // Storage state, shown as the row's outline color (blue = on the
+    // server, green = on this device, split = both) instead of the old
+    // per-tier buttons; actions live in the selection menu.
+    let on_device = RwSignal::new(offline::device_chapters().contains_key(&id));
+    let on_server = matches!(chapter.download, DownloadState::Downloaded { .. });
+    let dl_busy = matches!(
         chapter.download,
         DownloadState::Pending | DownloadState::Downloading
     );
-    let server_done = matches!(chapter.download, DownloadState::Downloaded { .. });
-    let server_failed = matches!(chapter.download, DownloadState::Failed { .. });
-
-    let download = move |_| {
-        let client = client.clone();
-        spawn_local(async move {
-            match client.download_chapter(id).await {
-                Ok(_) => refresh.update(|n| *n += 1),
-                Err(err) => leptos::logging::warn!("download: {err}"),
-            }
-        });
-    };
-
-    // "On this device": in the browser, walk every page through fetch so
-    // the service worker caches it; in the Tauri shell, have the shell
-    // download the pages to disk. Either way the chapter then reads with
-    // the server unreachable.
-    let on_device = RwSignal::new(offline::device_chapters().contains_key(&id));
-    let device_busy = RwSignal::new(false);
-    let device_download = {
-        let client = use_client();
-        move |_| {
-            if device_busy.get_untracked() || on_device.get_untracked() {
-                return;
-            }
-            device_busy.set(true);
-            let client = client.clone();
-            spawn_local(async move {
-                let result = if offline::shell_available() {
-                    offline::shell_save_chapter(&client, id).await
-                } else {
-                    offline::prefetch_chapter(&client, id).await
-                };
-                device_busy.set(false);
-                match result {
-                    Ok(page_count) => {
-                        offline::mark_device_chapter(manga_id, id, page_count);
-                        on_device.set(true);
-                    }
-                    Err(err) => leptos::logging::warn!("device download: {err}"),
-                }
-            });
-        }
+    let dl_failed = matches!(chapter.download, DownloadState::Failed { .. });
+    let failed_reason = match &chapter.download {
+        DownloadState::Failed { reason, .. } => Some(format!("Download failed: {reason}")),
+        _ => None,
     };
 
     view! {
@@ -594,8 +769,17 @@ fn ChapterItem(
             // Served from the offline cache: chapters that aren't on this
             // device can't open until the server is reachable again.
             class:unavailable=move || offline && !on_device.get()
+            class:dl-server=move || on_server && !on_device.get()
+            class:dl-local=move || on_device.get() && !on_server
+            class:dl-both=move || on_server && on_device.get()
+            class:dl-busy=dl_busy
+            class:dl-failed=dl_failed
             title=move || {
-                (offline && !on_device.get()).then_some("Not available offline")
+                if offline && !on_device.get() {
+                    Some("Not available offline".to_string())
+                } else {
+                    failed_reason.clone()
+                }
             }
             on:pointerdown=pointer_down
             on:pointermove=pointer_move
@@ -623,43 +807,6 @@ fn ChapterItem(
                     }
                 })}
             <span class="grow"></span>
-            <Show when=move || !selection_active.get()>
-                <button
-                    class="icon-btn device-dl"
-                    class:done=move || on_device.get()
-                    class:busy=move || device_busy.get()
-                    title=move || {
-                        if on_device.get() {
-                            "Saved on this device"
-                        } else {
-                            "Store on this device for offline reading"
-                        }
-                    }
-                    disabled=move || device_busy.get() || on_device.get()
-                    on:click=device_download.clone()
-                >
-                    {move || {
-                        if on_device.get() {
-                            "✓"
-                        } else if device_busy.get() {
-                            "↻"
-                        } else {
-                            "↓"
-                        }
-                    }}
-                </button>
-                <button
-                    class="icon-btn server-dl"
-                    class:done=server_done
-                    class:busy=server_busy
-                    class:failed=server_failed
-                    title=server_title.clone()
-                    disabled=!downloadable
-                    on:click=download.clone()
-                >
-                    {server_glyph}
-                </button>
-            </Show>
         </li>
     }
 }

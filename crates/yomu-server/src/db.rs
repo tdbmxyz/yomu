@@ -8,8 +8,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 use yomu_domain::{
-    Category, Chapter, ChapterRef, DownloadState, Manga, MangaDetails, Position, ProgressEvent,
-    User,
+    Category, Chapter, ChapterRef, DownloadState, Manga, MangaDetails, MangaSummary, Position,
+    ProgressEvent, User,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -114,7 +114,7 @@ impl Db {
         .bind(&details.summary.key)
         .bind(&details.summary.title)
         .bind(&details.description)
-        .bind(details.summary.cover_url.as_ref().map(url::Url::as_str))
+        .bind(details.summary.cover_url.as_deref())
         .bind(auto_download)
         .bind(now)
         .execute(&mut *tx)
@@ -810,6 +810,155 @@ impl Db {
             .collect::<Result<_>>()?;
         Ok((events, next))
     }
+
+    /// Forget the server copies of these chapters: rows go back to
+    /// 'none' (page_count survives — still true knowledge). Returns the
+    /// ids that actually were downloaded, so the caller can delete their
+    /// page directories.
+    pub async fn remove_downloads(&self, chapter_ids: &[Uuid]) -> Result<Vec<Uuid>> {
+        let mut removed = Vec::new();
+        for id in chapter_ids {
+            let result = sqlx::query(
+                "UPDATE chapters SET download_state = 'none', downloaded_at = NULL,
+                                     download_error = NULL
+                 WHERE id = ? AND download_state = 'downloaded'",
+            )
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                removed.push(*id);
+            }
+        }
+        Ok(removed)
+    }
+
+    // ---- source catalog cache ----
+
+    /// Record summaries seen in a listing/search; the upsert keeps
+    /// changed rows current and refreshes `last_seen_at` on the rest.
+    pub async fn upsert_catalog_entries(
+        &self,
+        source_id: &str,
+        items: &[MangaSummary],
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for item in items {
+            sqlx::query(
+                "INSERT INTO catalog_entries (source_id, key, title, cover_url, last_seen_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT (source_id, key) DO UPDATE SET
+                     title = excluded.title,
+                     cover_url = excluded.cover_url,
+                     last_seen_at = excluded.last_seen_at",
+            )
+            .bind(source_id)
+            .bind(&item.key)
+            .bind(&item.title)
+            .bind(item.cover_url.as_deref())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn write_catalog_page(
+        &self,
+        source_id: &str,
+        sort: &str,
+        page: u32,
+        keys: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO catalog_pages (source_id, sort, page, keys, fetched_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (source_id, sort, page) DO UPDATE SET
+                 keys = excluded.keys, fetched_at = excluded.fetched_at",
+        )
+        .bind(source_id)
+        .bind(sort)
+        .bind(page)
+        .bind(serde_json::to_string(keys).expect("string list serializes"))
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A cached browse page, in listing order, with its fetch time.
+    pub async fn read_catalog_page(
+        &self,
+        source_id: &str,
+        sort: &str,
+        page: u32,
+    ) -> Result<Option<(Vec<MangaSummary>, DateTime<Utc>)>> {
+        let Some((keys, fetched_at)) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+            "SELECT keys, fetched_at FROM catalog_pages
+             WHERE source_id = ? AND sort = ? AND page = ?",
+        )
+        .bind(source_id)
+        .bind(sort)
+        .bind(page)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let keys: Vec<String> =
+            serde_json::from_str(&keys).map_err(|e| DbError::Corrupt(e.to_string()))?;
+        let mut items = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let row = sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT title, cover_url FROM catalog_entries
+                 WHERE source_id = ? AND key = ?",
+            )
+            .bind(source_id)
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some((title, cover_url)) = row {
+                items.push(MangaSummary {
+                    key: key.clone(),
+                    title,
+                    cover_url,
+                    in_library: None,
+                });
+            }
+        }
+        Ok(Some((items, fetched_at)))
+    }
+
+    /// source_key → manga id for one source; backs the browse/search
+    /// "already in library" annotation.
+    pub async fn library_keys(
+        &self,
+        source_id: &str,
+    ) -> Result<std::collections::HashMap<String, Uuid>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT source_key, id FROM manga WHERE source_id = ?",
+        )
+        .bind(source_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(key, id)| Ok((key, parse_uuid(id)?)))
+            .collect()
+    }
+
+    /// Which source a cover URL belongs to — gate for the cover proxy
+    /// (the server must not fetch arbitrary URLs).
+    pub async fn catalog_source_for_cover(&self, cover_url: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT source_id FROM catalog_entries WHERE cover_url = ? LIMIT 1")
+                .bind(cover_url)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
 }
 
 async fn insert_chapters(
@@ -1025,6 +1174,7 @@ mod tests {
                 key: key.into(),
                 title: format!("Manga {key}"),
                 cover_url: None,
+                in_library: None,
             },
             description: Some("desc".into()),
             chapters: chapters
@@ -1040,6 +1190,98 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn remove_downloads_resets_only_downloaded_rows() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        db.mark_pending(&[chapters[0].id]).await.unwrap();
+        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
+
+        let removed = db
+            .remove_downloads(&[chapters[0].id, chapters[1].id])
+            .await
+            .unwrap();
+        assert_eq!(removed, vec![chapters[0].id]); // the 'none' row is skipped
+
+        let after = db.list_chapters(manga.id).await.unwrap();
+        assert!(matches!(after[0].download, DownloadState::None));
+        // page_count survives: still true knowledge about the chapter
+        assert_eq!(after[0].page_count, Some(9));
+    }
+
+    #[tokio::test]
+    async fn library_keys_maps_source_key_to_id() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let map = db.library_keys("fixture").await.unwrap();
+        assert_eq!(map.get("m1"), Some(&manga.id));
+        assert!(db.library_keys("other-source").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_upsert_and_page_roundtrip() {
+        let db = Db::in_memory().await.unwrap();
+        let sum = |k: &str, t: &str| MangaSummary {
+            key: k.into(),
+            title: t.into(),
+            cover_url: Some(format!("https://c.example/{k}.jpg").parse().unwrap()),
+            in_library: None,
+        };
+        let now = Utc::now();
+        db.upsert_catalog_entries("src", &[sum("a", "A"), sum("b", "B")], now)
+            .await
+            .unwrap();
+        // A later sighting updates what changed (title here) in place.
+        db.upsert_catalog_entries("src", &[sum("a", "A2")], now)
+            .await
+            .unwrap();
+        db.write_catalog_page("src", "popular", 1, &["a".into(), "b".into()], now)
+            .await
+            .unwrap();
+        let (items, fetched_at) = db
+            .read_catalog_page("src", "popular", 1)
+            .await
+            .unwrap()
+            .expect("cached page");
+        assert_eq!(fetched_at, now);
+        assert_eq!(
+            items.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+            ["A2", "B"],
+        );
+        // Unknown page → None.
+        assert!(
+            db.read_catalog_page("src", "latest", 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Cover ownership lookup for the proxy: known URL yields its
+        // source, anything else stays unproxied.
+        assert_eq!(
+            db.catalog_source_for_cover("https://c.example/a.jpg")
+                .await
+                .unwrap(),
+            Some("src".to_string()),
+        );
+        assert_eq!(
+            db.catalog_source_for_cover("https://evil.example/x")
+                .await
+                .unwrap(),
+            None,
+        );
     }
 
     #[tokio::test]

@@ -16,6 +16,8 @@
      (the server tier uses the theme accent) */
   --saved: #4ade80;
   --saved-contrast: #06210f;
+  /* "downloaded on the server" tier (chapter row outlines) */
+  --server: #60a5fa;
   --font-body: system-ui, sans-serif;
   --font-display: inherit;
 }
@@ -170,6 +172,14 @@ h3,
   line-height: 1.2;
 }
 
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+/* After the base `main` rule: same specificity, so the padding-bottom
+   override needs to come later in source order to win. */
 @media (max-width: 40rem) {
   .topbar {
     display: none;
@@ -180,15 +190,9 @@ h3,
   }
 
   main {
-    /* room for the fixed tab bar */
-    padding-bottom: 5rem;
+    /* room for the fixed tab bar (which grows by the safe-area inset) */
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
   }
-}
-
-main {
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 1.5rem;
 }
 
 .muted {
@@ -379,6 +383,20 @@ button.danger:hover {
   display: block;
 }
 
+/* browse/search: this result is already tracked (top-left; the unread
+   badge owns the top-right corner) */
+.in-library-badge {
+  position: absolute;
+  top: 0.3rem;
+  left: 0.3rem;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.3rem;
+}
+
 .unread-badge {
   position: absolute;
   top: 0.3rem;
@@ -389,6 +407,31 @@ button.danger:hover {
   font-weight: 700;
   padding: 0.05rem 0.35rem;
   border-radius: 0.3rem;
+}
+
+/* chapter counts over the cover's bottom edge:
+   total · server-downloaded · device-downloaded */
+.count-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.9rem 0.4rem 0.2rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  border-radius: 0 0 0.5rem 0.5rem; /* matches .manga-cover */
+}
+
+.count-strip .count-server {
+  color: var(--accent);
+}
+
+.count-strip .count-device {
+  color: var(--saved);
 }
 
 .manga-cover {
@@ -638,6 +681,73 @@ a.source-card:hover {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+}
+
+/* chapter-list header: the ⋮ actions menu hangs off it */
+.chapter-list-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.chapter-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 14rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.chapter-menu button {
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  padding: 0.6rem 1rem;
+}
+
+.chapter-menu button:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+/* storage-state outlines: blue = on the server, green = on this device,
+   split = both; pulsing blue while a download runs, red on failure.
+   Declared before .current/.selected so an active selection wins. */
+.chapter-item.dl-server {
+  border-color: var(--server);
+}
+
+.chapter-item.dl-local {
+  border-color: var(--saved);
+}
+
+.chapter-item.dl-both {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    linear-gradient(90deg, var(--server) 50%, var(--saved) 50%) border-box;
+}
+
+.chapter-item.dl-busy {
+  border-color: var(--server);
+  animation: dl-pulse 1.2s ease-in-out infinite;
+}
+
+.chapter-item.dl-failed {
+  border-color: var(--down);
+}
+
+@keyframes dl-pulse {
+  50% {
+    border-color: color-mix(in srgb, var(--server) 35%, transparent);
+  }
 }
 
 .chapter-item.current {

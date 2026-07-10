@@ -176,6 +176,7 @@ fn SummaryCard(
 ) -> impl IntoView {
     let client = use_client();
     let title = hit.title.clone();
+    let in_library = hit.in_library;
 
     let add = move |auto_download: bool| {
         let client = client.clone();
@@ -197,27 +198,42 @@ fn SummaryCard(
         <div class="manga-card browse-card">
             <span class="cover-wrap">
                 {match hit.cover_url.clone() {
-                    // Covers come straight from the site here (only library
-                    // manga get the server-side cover proxy); some sites
-                    // block hotlinking, leaving the placeholder background.
+                    // Covers arrive through the server's cover proxy.
                     Some(url) => view! {
-                        <img class="manga-cover" src=url.to_string() loading="lazy" alt=""/>
+                        <img class="manga-cover" src=url loading="lazy" alt=""/>
                     }
                         .into_any(),
                     None => view! { <span class="manga-cover cover-empty"></span> }.into_any(),
                 }}
+                {in_library
+                    .map(|_| {
+                        view! {
+                            <span class="in-library-badge" title="Already in the library">
+                                "✓"
+                            </span>
+                        }
+                    })}
             </span>
             <span class="manga-title">{title}</span>
             <span class="browse-actions">
-                <button title="Track in the library" on:click=move |_| add_plain(false)>
-                    "track"
-                </button>
-                <button
-                    title="Track and auto-download new chapters"
-                    on:click=move |_| add(true)
-                >
-                    "+ auto"
-                </button>
+                {match in_library {
+                    Some(id) => view! {
+                        <a class="button" href=format!("/manga/{id}")>"open"</a>
+                    }
+                        .into_any(),
+                    None => view! {
+                        <button title="Track in the library" on:click=move |_| add_plain(false)>
+                            "track"
+                        </button>
+                        <button
+                            title="Track and auto-download new chapters"
+                            on:click=move |_| add(true)
+                        >
+                            "+ auto"
+                        </button>
+                    }
+                        .into_any(),
+                }}
             </span>
         </div>
     }
