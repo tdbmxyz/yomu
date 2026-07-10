@@ -5,6 +5,7 @@
 mod chapter_actions;
 mod format;
 pub mod offline;
+mod pager;
 mod pages;
 
 use leptos::prelude::*;

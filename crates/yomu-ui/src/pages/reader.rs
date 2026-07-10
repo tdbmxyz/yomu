@@ -12,6 +12,7 @@ use yomu_domain::{ProgressEvent, SetPositionRequest};
 
 use super::{NotFound, param_uuid};
 use crate::offline::{self, ReaderDirection, ReaderFit, ReaderMode};
+use crate::pager;
 use crate::use_client;
 
 /// Touch-gesture bookkeeping for the paged stage (swipe / pinch / pan).
@@ -25,6 +26,8 @@ struct Gesture {
     pinch0: Option<(f64, f64)>,
     /// The finger travelled: not a tap anymore.
     moved: bool,
+    /// Horizontal intent at zoom 1: the drag drives the sliding track.
+    h_capture: bool,
     /// Eat the synthetic click that follows a swipe/pinch/pan.
     suppress_click: bool,
 }
@@ -76,12 +79,19 @@ fn ReaderInner() -> impl IntoView {
         return view! { <NotFound/> }.into_any();
     };
 
-    let initial_page: u32 = use_query_map()
-        .get_untracked()
-        .get("page")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let page_query = use_query_map().get_untracked().get("page");
+    // "?page=end" (arriving backward through a chapter transition)
+    // resolves to the last page once the page count is known.
+    let wants_end = page_query.as_deref() == Some("end");
+    let initial_page: u32 = page_query.and_then(|p| p.parse().ok()).unwrap_or(0);
     let page = RwSignal::new(initial_page);
+    // Paged mode's virtual position: -1 and page_count are the chapter
+    // transition panels; real pages mirror into `page` (which keeps
+    // driving the counter, the progress bar, and progress reports).
+    let pos = RwSignal::new(initial_page as i64);
+    // Live drag offset (px) and the turn being animated (pos + delta).
+    let drag = RwSignal::new(0.0_f64);
+    let snap = RwSignal::new(None::<i64>);
     let mode = RwSignal::new(offline::reader_mode(manga_id));
     let fit = RwSignal::new(offline::reader_fit(manga_id));
     let dir = RwSignal::new(offline::reader_direction(manga_id));
@@ -175,6 +185,11 @@ fn ReaderInner() -> impl IntoView {
         move |_| {
             if page_count() > 0 && !opened.get_value() {
                 opened.set_value(true);
+                if wants_end {
+                    let last = page_count().saturating_sub(1);
+                    page.set(last);
+                    pos.set(last as i64);
+                }
                 report(chapter_id, page.get_untracked());
             }
         }
@@ -194,21 +209,6 @@ fn ReaderInner() -> impl IntoView {
             }
         }
     };
-
-    let key_turn = turn.clone();
-    let key_handle = window_event_listener(leptos::ev::keydown, move |ev| {
-        // In RTL the previous page is on the right.
-        let forward: i64 = match dir.get_untracked() {
-            ReaderDirection::Ltr => 1,
-            ReaderDirection::Rtl => -1,
-        };
-        match ev.key().as_str() {
-            "ArrowLeft" => key_turn(-forward),
-            "ArrowRight" => key_turn(forward),
-            _ => {}
-        }
-    });
-    on_cleanup(move || key_handle.remove());
 
     let neighbours = move || {
         let chapters = detail.get().and_then(|r| r.ok()).map(|d| d.chapters)?;
@@ -233,6 +233,83 @@ fn ReaderInner() -> impl IntoView {
     };
 
     let navigate = leptos_router::hooks::use_navigate();
+    let neighbour_ids = move || neighbours().unwrap_or((None, None));
+
+    // Paged-mode turn requester shared by keys, tap zones, the ‹ › pill
+    // and drag commits. Turns land on the virtual range [-1, count]
+    // (pager::bounds trims missing neighbours); one more turn on a
+    // transition panel crosses into the neighbouring chapter.
+    let request_turn = {
+        let navigate = navigate.clone();
+        move |delta: i64| {
+            if snap.get_untracked().is_some() {
+                return; // mid-animation
+            }
+            let count = page_count();
+            if count == 0 {
+                return;
+            }
+            let (prev, next) = neighbour_ids();
+            let (lo, hi) = pager::bounds(count, prev.is_some(), next.is_some());
+            let current = pos.get_untracked();
+            let target = current + delta;
+            if target > hi {
+                if current == count as i64
+                    && let Some(next) = next
+                {
+                    navigate(&format!("/read/{manga_id}/{next}"), Default::default());
+                }
+                return;
+            }
+            if target < lo {
+                if current == -1
+                    && let Some(prev) = prev
+                {
+                    navigate(
+                        &format!("/read/{manga_id}/{prev}?page=end"),
+                        Default::default(),
+                    );
+                }
+                return;
+            }
+            snap.set(Some(delta));
+        }
+    };
+    // Lands an animated turn; transition panels don't touch `page`.
+    let commit_pos = {
+        let report = report.clone();
+        move |target: i64| {
+            pos.set(target);
+            if (0..page_count() as i64).contains(&target) {
+                let p = target as u32;
+                if p != page.get_untracked() {
+                    page.set(p);
+                    report(chapter_id, p);
+                }
+            }
+        }
+    };
+
+    let key_turn = turn.clone();
+    let key_request = request_turn.clone();
+    let key_handle = window_event_listener(leptos::ev::keydown, move |ev| {
+        // In RTL the previous page is on the right.
+        let forward: i64 = match dir.get_untracked() {
+            ReaderDirection::Ltr => 1,
+            ReaderDirection::Rtl => -1,
+        };
+        let delta = match ev.key().as_str() {
+            "ArrowLeft" => -forward,
+            "ArrowRight" => forward,
+            _ => return,
+        };
+        match mode.get_untracked() {
+            ReaderMode::Paged => key_request(delta),
+            ReaderMode::Vertical => key_turn(delta),
+        }
+    });
+    on_cleanup(move || key_handle.remove());
+
     let toggle_mode = move |_| {
         let next = match mode.get_untracked() {
             ReaderMode::Paged => ReaderMode::Vertical,
@@ -286,7 +363,8 @@ fn ReaderInner() -> impl IntoView {
     });
     on_cleanup(|| offline::set_immersive(false));
 
-    let turn_paged = turn.clone();
+    let request_view = request_turn.clone();
+    let commit_view = commit_pos.clone();
     let report_scroll = report.clone();
     let client_paged = use_client();
     let client_vertical = use_client();
@@ -307,9 +385,9 @@ fn ReaderInner() -> impl IntoView {
     // strip a "turn" is a scroll to the adjacent page image — the scroll
     // handler then journals the new position like any user scroll.
     let go_page = {
-        let turn = turn.clone();
+        let request_turn = request_turn.clone();
         move |delta: i64| match mode.get_untracked() {
-            ReaderMode::Paged => turn(delta),
+            ReaderMode::Paged => request_turn(delta),
             ReaderMode::Vertical => {
                 let chapter = current_chapter.get_untracked();
                 let count = shown_count().max(1) as i64;
@@ -347,7 +425,8 @@ fn ReaderInner() -> impl IntoView {
             </div>
 
             {move || {
-                let turn = turn_paged.clone();
+                let request = request_view.clone();
+                let commit = commit_view.clone();
                 let report = report_scroll.clone();
                 match pages.get() {
                     None => view! { <p class="muted reader-msg">"Loading pages…"</p> }.into_any(),
@@ -377,12 +456,11 @@ fn ReaderInner() -> impl IntoView {
                     }
                     Some(Ok(meta)) => match mode.get() {
                         ReaderMode::Paged => {
-                            let src = page_source(&client_paged, chapter_id, page.get());
                             let stage = NodeRef::<leptos::html::Div>::new();
                             // Width/original fits scroll; the next page must
                             // start at its top-left again.
                             Effect::new(move |_| {
-                                page.get();
+                                pos.get();
                                 if let Some(el) = stage.get() {
                                     el.set_scroll_top(0);
                                     el.set_scroll_left(0);
@@ -393,11 +471,12 @@ fn ReaderInner() -> impl IntoView {
                             let zoom = RwSignal::new(1.0_f64);
                             let pan = RwSignal::new((0.0_f64, 0.0_f64));
                             Effect::new(move |_| {
-                                page.get();
+                                pos.get();
                                 zoom.set(1.0);
                                 pan.set((0.0, 0.0));
                             });
                             let gesture = StoredValue::new(Gesture::default());
+                            let flick = StoredValue::new(pager::Flick::default());
                             let clamp_pan = move |(x, y): (f64, f64)| -> (f64, f64) {
                                 let z = zoom.get_untracked();
                                 let Some(el) = stage.get_untracked() else {
@@ -407,18 +486,10 @@ fn ReaderInner() -> impl IntoView {
                                 let max_y = (z - 1.0) * el.client_height() as f64 / 2.0;
                                 (x.clamp(-max_x, max_x), y.clamp(-max_y, max_y))
                             };
-                            // forward = next page in reading order; which
-                            // physical side that is depends on direction.
-                            let go = {
-                                let turn = turn.clone();
-                                move |forward: bool| {
-                                    turn(if forward { 1 } else { -1 });
-                                }
-                            };
                             // Tap zones by position instead of overlay
                             // buttons: buttons over the scroller would
                             // swallow touch panning once the page overflows.
-                            let click_go = go.clone();
+                            let click_request = request.clone();
                             let on_click = move |ev: leptos::ev::MouseEvent| {
                                 if gesture.with_value(|g| g.suppress_click) {
                                     gesture.update_value(|g| g.suppress_click = false);
@@ -436,9 +507,9 @@ fn ReaderInner() -> impl IntoView {
                                 let x = ev.client_x() as f64;
                                 if x < width / 3.0 {
                                     // left side: back in LTR, forward in RTL
-                                    click_go(rtl);
+                                    click_request(if rtl { 1 } else { -1 });
                                 } else if x > width * 2.0 / 3.0 {
-                                    click_go(!rtl);
+                                    click_request(if rtl { -1 } else { 1 });
                                 } else {
                                     chrome.update(|c| *c = !*c);
                                 }
@@ -454,12 +525,17 @@ fn ReaderInner() -> impl IntoView {
                                         });
                                     }
                                 } else if touches.length() == 1
-                                    && let Some(pos) = touch_xy(&touches, 0)
+                                    && let Some((x, y)) = touch_xy(&touches, 0)
                                 {
                                     gesture.update_value(|g| {
-                                        g.start = Some(pos);
+                                        g.start = Some((x, y));
                                         g.pan0 = pan.get_untracked();
                                         g.moved = false;
+                                        g.h_capture = false;
+                                    });
+                                    flick.update_value(|f| {
+                                        f.clear();
+                                        f.push(x, ev.time_stamp());
                                     });
                                 }
                             };
@@ -497,10 +573,42 @@ fn ReaderInner() -> impl IntoView {
                                         ev.prevent_default();
                                         let (px, py) = gesture.with_value(|g| g.pan0);
                                         pan.set(clamp_pan((px + dx, py + dy)));
+                                        return;
+                                    }
+                                    // horizontal intent captures the drag:
+                                    // the track follows the finger
+                                    if !gesture.with_value(|g| g.h_capture)
+                                        && dx.abs() > 10.0
+                                        && dx.abs() > dy.abs()
+                                    {
+                                        gesture.update_value(|g| g.h_capture = true);
+                                    }
+                                    if gesture.with_value(|g| g.h_capture)
+                                        && snap.get_untracked().is_none()
+                                    {
+                                        ev.prevent_default();
+                                        flick.update_value(|f| f.push(x, ev.time_stamp()));
+                                        let rtl =
+                                            dir.get_untracked() == ReaderDirection::Rtl;
+                                        let (prev, next) = neighbour_ids();
+                                        let target =
+                                            pos.get_untracked() + pager::step(dx, rtl);
+                                        // nothing (or a dead end) to reveal:
+                                        // rubber-band
+                                        let free = !matches!(
+                                            pager::panel(
+                                                target,
+                                                page_count(),
+                                                prev.is_some(),
+                                                next.is_some(),
+                                            ),
+                                            pager::Panel::Empty | pager::Panel::DeadEnd
+                                        );
+                                        drag.set(if free { dx } else { pager::damp(dx) });
                                     }
                                 }
                             };
-                            let swipe_go = go.clone();
+                            let end_request = request.clone();
                             let on_touchend = move |ev: leptos::ev::TouchEvent| {
                                 if ev.touches().length() > 0 {
                                     // finger lifted mid-pinch: wait for a
@@ -508,30 +616,53 @@ fn ReaderInner() -> impl IntoView {
                                     gesture.update_value(|g| g.start = None);
                                     return;
                                 }
-                                let (start, pinch, moved) =
-                                    gesture.with_value(|g| (g.start, g.pinch0, g.moved));
+                                let (start, pinch, moved, h_capture) = gesture
+                                    .with_value(|g| (g.start, g.pinch0, g.moved, g.h_capture));
                                 gesture.update_value(|g| {
                                     g.start = None;
                                     g.pinch0 = None;
+                                    g.h_capture = false;
                                     if moved || pinch.is_some() {
                                         g.suppress_click = true;
                                     }
                                 });
-                                if pinch.is_some() || !moved || zoom.get_untracked() > 1.0 {
+                                if pinch.is_some()
+                                    || !moved
+                                    || !h_capture
+                                    || zoom.get_untracked() > 1.0
+                                {
                                     return;
                                 }
-                                let (Some((sx, sy)), Some(touch)) =
+                                let (Some((sx, _)), Some(touch)) =
                                     (start, ev.changed_touches().item(0))
                                 else {
                                     return;
                                 };
                                 let dx = touch.client_x() as f64 - sx;
-                                let dy = touch.client_y() as f64 - sy;
-                                if dx.abs() > 60.0 && dx.abs() > 2.0 * dy.abs() {
-                                    // swiping left pulls in the page that
-                                    // sits on the right
-                                    let rtl = dir.get_untracked() == ReaderDirection::Rtl;
-                                    swipe_go(if dx < 0.0 { !rtl } else { rtl });
+                                let width = window()
+                                    .inner_width()
+                                    .ok()
+                                    .and_then(|w| w.as_f64())
+                                    .unwrap_or(0.0)
+                                    .max(1.0);
+                                let velocity =
+                                    flick.with_value(|f| f.velocity(ev.time_stamp()));
+                                let rtl = dir.get_untracked() == ReaderDirection::Rtl;
+                                if pager::verdict(dx, width, velocity)
+                                    == pager::Verdict::Commit
+                                {
+                                    end_request(pager::step(dx, rtl));
+                                }
+                                // refused (dead end / navigation) or
+                                // cancelled: spring back to center — but a
+                                // sub-pixel offset may not transition (no
+                                // transitionend), so reset it directly
+                                if snap.get_untracked().is_none() {
+                                    if drag.get_untracked().abs() > 1.0 {
+                                        snap.set(Some(0));
+                                    } else {
+                                        drag.set(0.0);
+                                    }
                                 }
                             };
                             let on_wheel = move |ev: leptos::ev::WheelEvent| {
@@ -548,33 +679,172 @@ fn ReaderInner() -> impl IntoView {
                                     pan.set(clamp_pan(pan.get_untracked()));
                                 }
                             };
+                            // titles for the transition panels
+                            let title_of = move |id: uuid::Uuid| {
+                                detail
+                                    .get()
+                                    .and_then(|r| r.ok())
+                                    .and_then(|d| {
+                                        d.chapters.into_iter().find(|c| c.id == id)
+                                    })
+                                    .map(|c| c.title)
+                                    .unwrap_or_default()
+                            };
+                            // What one slot shows. The zoom transform reads
+                            // shared signals, but neighbours sit at zoom 1
+                            // whenever they are visible (drags don't turn
+                            // while zoomed).
+                            let panel_view = {
+                                let client = client_paged.clone();
+                                move |position: i64| {
+                                    let (prev, next) = neighbour_ids();
+                                    match pager::panel(
+                                        position,
+                                        page_count(),
+                                        prev.is_some(),
+                                        next.is_some(),
+                                    ) {
+                                        pager::Panel::Page(n) => {
+                                            let src = page_source(&client, chapter_id, n);
+                                            view! {
+                                                <img
+                                                    class="reader-page"
+                                                    src=src
+                                                    alt=""
+                                                    style:transform=move || {
+                                                        let z = zoom.get();
+                                                        let (x, y) = pan.get();
+                                                        if z > 1.0 {
+                                                            format!(
+                                                                "translate({x}px, {y}px) scale({z})"
+                                                            )
+                                                        } else {
+                                                            String::new()
+                                                        }
+                                                    }
+                                                />
+                                            }
+                                                .into_any()
+                                        }
+                                        pager::Panel::TransitionNext => {
+                                            let next_title =
+                                                next.map(title_of).unwrap_or_default();
+                                            view! {
+                                                <div class="reader-transition">
+                                                    <span>"Finished:"</span>
+                                                    <strong>{chapter_title}</strong>
+                                                    <span>"Next up — keep turning:"</span>
+                                                    <strong>{next_title}</strong>
+                                                </div>
+                                            }
+                                                .into_any()
+                                        }
+                                        pager::Panel::TransitionPrev => {
+                                            let prev_title =
+                                                prev.map(title_of).unwrap_or_default();
+                                            view! {
+                                                <div class="reader-transition">
+                                                    <span>"Start of:"</span>
+                                                    <strong>{chapter_title}</strong>
+                                                    <span>"Previous — keep turning:"</span>
+                                                    <strong>{prev_title}</strong>
+                                                </div>
+                                            }
+                                                .into_any()
+                                        }
+                                        pager::Panel::DeadEnd => view! {
+                                            <div class="reader-transition">
+                                                <span>"No more chapters this way"</span>
+                                                <a
+                                                    class="button"
+                                                    href=format!("/manga/{manga_id}")
+                                                >
+                                                    "Back to the chapter list"
+                                                </a>
+                                            </div>
+                                        }
+                                            .into_any(),
+                                        pager::Panel::Empty => ().into_any(),
+                                    }
+                                }
+                            };
+                            let pv_left = panel_view.clone();
+                            let pv_center = panel_view.clone();
+                            let pv_right = panel_view;
+                            // DOM slots are physical (left / center /
+                            // right); RTL puts the next position on the left.
+                            let slot = move |physical: i64| {
+                                let rtl = dir.get() == ReaderDirection::Rtl;
+                                pos.get() + if rtl { -physical } else { physical }
+                            };
+                            let track_transform = move || {
+                                let rtl = dir.get() == ReaderDirection::Rtl;
+                                match snap.get() {
+                                    Some(delta) => {
+                                        let shift =
+                                            if rtl { -delta } else { delta } as f64;
+                                        format!(
+                                            "translateX({}%)",
+                                            -33.3333 - shift * 33.3333
+                                        )
+                                    }
+                                    None => {
+                                        let px = drag.get();
+                                        if px == 0.0 {
+                                            "translateX(-33.3333%)".to_string()
+                                        } else {
+                                            format!("translateX(calc(-33.3333% + {px}px))")
+                                        }
+                                    }
+                                }
+                            };
+                            let on_transitionend = {
+                                let commit = commit.clone();
+                                move |ev: leptos::ev::TransitionEvent| {
+                                    if ev.property_name() != "transform" {
+                                        return;
+                                    }
+                                    if let Some(delta) = snap.get_untracked() {
+                                        snap.set(None);
+                                        drag.set(0.0);
+                                        commit(pos.get_untracked() + delta);
+                                    }
+                                }
+                            };
                             view! {
                                 <div
-                                    class="reader-stage"
-                                    class:fit-screen=move || fit.get() == ReaderFit::Screen
-                                    class:fit-width=move || fit.get() == ReaderFit::Width
-                                    class:fit-original=move || fit.get() == ReaderFit::Original
-                                    node_ref=stage
+                                    class="reader-pager"
                                     on:click=on_click
                                     on:touchstart=on_touchstart
                                     on:touchmove=on_touchmove
                                     on:touchend=on_touchend
                                     on:wheel=on_wheel
                                 >
-                                    <img
-                                        class="reader-page"
-                                        src=src
-                                        alt=""
-                                        style:transform=move || {
-                                            let z = zoom.get();
-                                            let (x, y) = pan.get();
-                                            if z > 1.0 {
-                                                format!("translate({x}px, {y}px) scale({z})")
-                                            } else {
-                                                String::new()
-                                            }
+                                    <div
+                                        class="reader-track"
+                                        class:snap=move || snap.get().is_some()
+                                        class:fit-screen=move || {
+                                            fit.get() == ReaderFit::Screen
                                         }
-                                    />
+                                        class:fit-width=move || {
+                                            fit.get() == ReaderFit::Width
+                                        }
+                                        class:fit-original=move || {
+                                            fit.get() == ReaderFit::Original
+                                        }
+                                        style:transform=track_transform
+                                        on:transitionend=on_transitionend
+                                    >
+                                        <div class="reader-panel">
+                                            {move || pv_left(slot(-1))}
+                                        </div>
+                                        <div class="reader-panel" node_ref=stage>
+                                            {move || pv_center(slot(0))}
+                                        </div>
+                                        <div class="reader-panel">
+                                            {move || pv_right(slot(1))}
+                                        </div>
+                                    </div>
                                 </div>
                             }
                                 .into_any()

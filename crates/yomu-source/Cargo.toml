@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 yomu-domain.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 percent-encoding.workspace = true
