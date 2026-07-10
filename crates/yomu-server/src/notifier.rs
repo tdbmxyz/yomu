@@ -27,7 +27,10 @@ impl Notifier {
         if chapters.is_empty() {
             return;
         }
-        let mut request = self.http.post(config.url.as_str()).header("X-Tags", "books");
+        let mut request = self
+            .http
+            .post(config.url.as_str())
+            .header("X-Tags", "books");
         // HTTP header values are latin-1; a manga title beyond that moves
         // into the body instead of the X-Title header.
         match reqwest::header::HeaderValue::from_str(manga_title) {
