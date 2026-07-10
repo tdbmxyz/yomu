@@ -629,6 +629,27 @@ pub fn set_reader_mode(manga_id: Uuid, mode: ReaderMode) {
     }
 }
 
+/// Learned average page height (px) of a manga's vertical strip, from
+/// the last reading session: seeds the strip's placeholders so opening
+/// geometry is realistic before any image loads.
+pub fn page_height_hint(manga_id: Uuid) -> Option<f64> {
+    storage()?
+        .get_item(&format!("yomu-page-height:{manga_id}"))
+        .ok()
+        .flatten()?
+        .parse()
+        .ok()
+}
+
+pub fn set_page_height_hint(manga_id: Uuid, height: f64) {
+    if let Some(storage) = storage() {
+        let _ = storage.set_item(
+            &format!("yomu-page-height:{manga_id}"),
+            &format!("{height:.0}"),
+        );
+    }
+}
+
 /// How a page is scaled in paged mode. `Screen` shows the whole page at
 /// once; `Width` and `Original` trade that for readability and scroll.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]

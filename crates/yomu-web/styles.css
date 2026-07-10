@@ -604,6 +604,25 @@ a.source-card:hover {
   color: var(--muted);
 }
 
+/* Phones: the max-content columns can't shrink below the host URL's
+   width, which forces the layout viewport wider than the screen
+   (scrollbars until a pinch zoom-out). Stack instead: name + listing
+   labels on the first line, the host wrapping underneath. */
+@media (max-width: 40rem) {
+  .source-list {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .source-card {
+    row-gap: 0.15rem;
+  }
+
+  .source-card-host {
+    grid-column: 1 / -1;
+    overflow-wrap: anywhere;
+  }
+}
+
 .catalog-back {
   text-decoration: none;
   margin-right: 0.25rem;
@@ -764,6 +783,11 @@ a.source-card:hover {
   color: var(--muted);
 }
 
+/* the reading position stands out even in a run of read chapters */
+.chapter-item.current .chapter-title {
+  color: var(--accent);
+}
+
 /* offline and not saved on this device: visibly not openable */
 .chapter-item.unavailable {
   opacity: 0.45;
@@ -901,7 +925,7 @@ a.source-card:hover {
 /* thin always-visible progress: pages read of the current chapter */
 .reader-progress {
   position: fixed;
-  top: var(--shell-inset-top, 0px);
+  bottom: var(--shell-inset-bottom, 0px);
   left: 0;
   right: 0;
   height: 2px;
@@ -1068,6 +1092,9 @@ a.source-card:hover {
 .reader-track {
   display: flex;
   width: 300%;
+  /* the track is a flex item of .reader-pager: without this it gets
+     shrunk back to 100% and all three panels squeeze onto one screen */
+  flex-shrink: 0;
   transform: translateX(-33.3333%);
 }
 
