@@ -22,6 +22,7 @@ pub struct Config {
     pub updater: UpdaterConfig,
     pub local: LocalConfig,
     pub auth: AuthConfig,
+    pub notify: Option<NotifyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,17 @@ impl Default for LocalConfig {
             dir: PathBuf::from("local"),
         }
     }
+}
+
+/// Push notifications for updater-found chapters, POSTed to an ntfy
+/// topic. Absent section = feature off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifyConfig {
+    /// ntfy topic URL, e.g. `https://ntfy.example.net/yomu`.
+    pub url: url::Url,
+    /// Optional ntfy access token (sent as `Authorization: Bearer`).
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// OIDC sign-in (authentik). Leave `issuer` unset for single-account mode:
@@ -88,6 +100,7 @@ impl Default for Config {
             updater: UpdaterConfig::default(),
             local: LocalConfig::default(),
             auth: AuthConfig::default(),
+            notify: None,
         }
     }
 }
