@@ -1092,6 +1092,9 @@ a.source-card:hover {
 .reader-track {
   display: flex;
   width: 300%;
+  /* the track is a flex item of .reader-pager: without this it gets
+     shrunk back to 100% and all three panels squeeze onto one screen */
+  flex-shrink: 0;
   transform: translateX(-33.3333%);
 }
 
