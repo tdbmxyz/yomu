@@ -29,6 +29,9 @@ pub fn Library() -> impl IntoView {
     });
     // None = "All".
     let selected = RwSignal::new(None::<String>);
+    // In-library filters, applied client-side over the loaded list.
+    let search = RwSignal::new(String::new());
+    let active_genre = RwSignal::new(None::<String>);
 
     view! {
         <section>
@@ -41,6 +44,11 @@ pub fn Library() -> impl IntoView {
                         let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
                         view! { <CategoryTabs list entries selected refresh/> }
                     })
+            }}
+            {move || {
+                let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
+                (!entries.is_empty())
+                    .then(|| view! { <LibraryFilters entries search active_genre/> })
             }}
             {move || match library.get() {
                 None => view! { <p class="muted">"Loading library…"</p> }.into_any(),
@@ -55,6 +63,8 @@ pub fn Library() -> impl IntoView {
                 }
                 Some(Ok(list)) => {
                     let client = use_client();
+                    let needle = search.get().trim().to_lowercase();
+                    let genre = active_genre.get();
                     let filtered: Vec<_> = list
                         .into_iter()
                         .filter(|entry| {
@@ -63,10 +73,19 @@ pub fn Library() -> impl IntoView {
                                 .as_ref()
                                 .is_none_or(|c| entry.manga.category == *c)
                         })
+                        .filter(|entry| {
+                            needle.is_empty()
+                                || entry.manga.title.to_lowercase().contains(&needle)
+                        })
+                        .filter(|entry| {
+                            genre
+                                .as_ref()
+                                .is_none_or(|g| entry.manga.genres.contains(g))
+                        })
                         .collect();
                     if filtered.is_empty() {
                         return view! {
-                            <p class="muted">"No manga in this category."</p>
+                            <p class="muted">"No manga match these filters."</p>
                         }
                             .into_any();
                     }
@@ -166,6 +185,73 @@ pub fn Library() -> impl IntoView {
                 }
             }}
         </section>
+    }
+}
+
+/// Title search box + genre chips. Genres are the union across the loaded
+/// library (client-side, so filtering stays instant and offline-friendly).
+#[component]
+fn LibraryFilters(
+    entries: Vec<MangaWithPosition>,
+    search: RwSignal<String>,
+    active_genre: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let mut genres: Vec<String> = entries
+        .iter()
+        .flat_map(|e| e.manga.genres.iter().cloned())
+        .collect();
+    genres.sort_by_key(|g| g.to_lowercase());
+    genres.dedup();
+
+    view! {
+        <div class="library-filters">
+            <input
+                class="library-search"
+                type="search"
+                placeholder="Search library…"
+                prop:value=search
+                on:input=move |ev| search.set(event_target_value(&ev))
+            />
+            {(!genres.is_empty())
+                .then(|| {
+                    view! {
+                        <div class="genre-chips">
+                            {genres
+                                .into_iter()
+                                .map(|genre| {
+                                    let g = genre.clone();
+                                    let is_active = {
+                                        let g = g.clone();
+                                        move || active_genre.get().as_deref() == Some(g.as_str())
+                                    };
+                                    let toggle = {
+                                        let g = g.clone();
+                                        move |_| {
+                                            active_genre
+                                                .update(|cur| {
+                                                    *cur = if cur.as_deref() == Some(g.as_str()) {
+                                                        None
+                                                    } else {
+                                                        Some(g.clone())
+                                                    };
+                                                })
+                                        }
+                                    };
+                                    view! {
+                                        <button
+                                            class="genre-chip"
+                                            class:active=is_active
+                                            on:click=toggle
+                                        >
+                                            {genre}
+                                        </button>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })}
+        </div>
     }
 }
 

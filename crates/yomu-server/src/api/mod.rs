@@ -1,6 +1,7 @@
 //! HTTP API (`/api/v1`) and static frontend serving.
 
 mod auth;
+mod backup;
 mod categories;
 mod chapters;
 mod error;
@@ -8,6 +9,7 @@ mod library;
 mod progress;
 mod sources;
 
+use axum::http::{HeaderValue, Method, header};
 use axum::routing::get;
 use axum::{Json, Router};
 use tower_http::cors::CorsLayer;
@@ -65,6 +67,8 @@ pub fn router(state: AppState) -> Router {
             "/progress/events",
             get(progress::events).post(progress::push_events),
         )
+        .route("/backup", get(backup::export))
+        .route("/restore", axum::routing::post(backup::restore))
         .with_state(state.clone());
 
     let mut app = Router::new().nest("/api/v1", api);
@@ -74,10 +78,39 @@ pub fn router(state: AppState) -> Router {
         app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
     }
 
-    app
-        // LAN-only posture, like chaos; revisit with auth.
-        .layer(CorsLayer::permissive())
+    app.layer(cors_layer(&state.config.auth.allowed_origins))
         .layer(TraceLayer::new_for_http())
+}
+
+/// CORS policy. The served-frontend deployment is same-origin and needs no
+/// CORS at all; a cross-origin frontend must be named explicitly because
+/// credentialed requests (our session cookie) forbid a `*` origin. An
+/// invalid origin string is dropped with a warning rather than failing boot.
+fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    let origins: Vec<HeaderValue> = allowed_origins
+        .iter()
+        .filter_map(|o| match o.trim_end_matches('/').parse::<HeaderValue>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!(origin = %o, "ignoring unparseable allowed_origin");
+                None
+            }
+        })
+        .collect();
+    if origins.is_empty() {
+        return CorsLayer::new();
+    }
+    CorsLayer::new()
+        .allow_credentials(true)
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -86,4 +119,59 @@ async fn health() -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").into(),
         commit: option_env!("YOMU_BUILD_COMMIT").map(Into::into),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    use yomu_source::registry::Registry;
+
+    use crate::config::Config;
+    use crate::db::Db;
+    use crate::state::AppState;
+
+    /// Router in OIDC mode: `oidc_enabled()` is true, but no session is
+    /// presented, so `CurrentUser`-gated routes must reject.
+    async fn oidc_router() -> axum::Router {
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        super::router(state)
+    }
+
+    async fn status_of(method: &str, path: &str) -> StatusCode {
+        let router = oidc_router().await;
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        router.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn mutating_routes_require_a_session_in_oidc_mode() {
+        // Every write must reject an anonymous request with 401, not act on it.
+        assert_eq!(
+            status_of("POST", "/api/v1/library").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/chapters/download").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/chapters/remove-downloads").await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn health_stays_open() {
+        assert_eq!(status_of("GET", "/api/v1/health").await, StatusCode::OK);
+    }
 }

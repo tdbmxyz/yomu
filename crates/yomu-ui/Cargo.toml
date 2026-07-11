@@ -36,6 +36,15 @@ features = [
     "NodeList",
     "CssStyleDeclaration",
     "HtmlImageElement",
+    "Blob",
+    "BlobPropertyBag",
+    "File",
+    "FileList",
+    "Url",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
+    "Event",
+    "EventTarget",
 ]
 
 [dependencies.js-sys]

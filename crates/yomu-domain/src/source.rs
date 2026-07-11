@@ -65,6 +65,10 @@ pub struct MangaDetails {
     pub summary: MangaSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Genres/tags as printed by the source (verbatim, deduplicated). Empty
+    /// when the source doesn't expose them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
     /// As listed on the site; `ChapterRef::source_order` is normalized so
     /// that ordering by it *descending* gives reading order (see below).
     pub chapters: Vec<ChapterRef>,

@@ -35,6 +35,9 @@ url = "{base}/manga/?m_orderby=latest&page={page}"
 title = ".post-title h1"
 description = ".description-summary p"
 cover = ".summary_image img@data-src"
+# Optional: one element per genre/tag; the text of every match is collected
+# (deduplicated) for library filtering.
+# genres = ".genres-content a"
 # Sites that load the chapter list as a fragment from a separate endpoint
 # (htmx-style) instead of rendering it into the manga page: `{url}` is the
 # manga page URL, `{url_parent}` the same URL minus its last path segment.

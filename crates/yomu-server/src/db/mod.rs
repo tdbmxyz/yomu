@@ -4,13 +4,10 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
-use yomu_domain::{
-    Category, Chapter, ChapterRef, DownloadState, Manga, MangaDetails, MangaSummary, Position,
-    ProgressEvent, User,
-};
+use yomu_domain::{Category, Chapter, ChapterRef, DownloadState, Manga, ProgressEvent, User};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -38,6 +35,15 @@ pub struct ChapterSync {
     /// included (they must not re-notify or re-trigger auto-download).
     pub new_chapters: Vec<Chapter>,
     pub file_ops: Vec<ChapterFileOp>,
+}
+
+/// Per-manga chapter aggregates for the library list (see `library_rollups`).
+#[derive(Debug, Clone, Default)]
+pub struct LibraryRollup {
+    pub chapter_count: u32,
+    pub downloaded_count: u32,
+    pub unread_count: u32,
+    pub latest_chapter_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,875 +97,17 @@ impl Db {
         .await?;
         Ok(Self { pool })
     }
-
-    // ---- manga ----
-
-    /// Insert a manga with its chapters as freshly fetched from the source.
-    pub async fn insert_manga(
-        &self,
-        source_id: &str,
-        details: &MangaDetails,
-        auto_download: bool,
-    ) -> Result<Manga> {
-        let id = Uuid::now_v7();
-        let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO manga (id, source_id, source_key, title, description, cover_url,
-                                auto_download, added_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(id.to_string())
-        .bind(source_id)
-        .bind(&details.summary.key)
-        .bind(&details.summary.title)
-        .bind(&details.description)
-        .bind(details.summary.cover_url.as_deref())
-        .bind(auto_download)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(db) if db.is_unique_violation() => {
-                DbError::Constraint("manga already in library".into())
-            }
-            _ => DbError::Sqlx(e),
-        })?;
-        insert_chapters(&mut tx, id, &details.chapters, now).await?;
-        tx.commit().await?;
-        self.get_manga(id).await
-    }
-
-    pub async fn get_manga(&self, id: Uuid) -> Result<Manga> {
-        let row = sqlx::query_as::<_, MangaRow>("SELECT * FROM manga WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(DbError::NotFound)?;
-        Manga::try_from(row)
-    }
-
-    pub async fn list_manga(&self) -> Result<Vec<Manga>> {
-        let rows =
-            sqlx::query_as::<_, MangaRow>("SELECT * FROM manga ORDER BY title COLLATE NOCASE")
-                .fetch_all(&self.pool)
-                .await?;
-        rows.into_iter().map(Manga::try_from).collect()
-    }
-
-    pub async fn set_auto_download(&self, id: Uuid, auto_download: bool) -> Result<Manga> {
-        let result = sqlx::query("UPDATE manga SET auto_download = ? WHERE id = ?")
-            .bind(auto_download)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
-        }
-        self.get_manga(id).await
-    }
-
-    /// Move a manga to a category. The category must exist (manga.category
-    /// has no FK — SQLite can't ALTER-ADD one — so membership is enforced
-    /// here).
-    pub async fn set_category(&self, id: Uuid, category: &str) -> Result<Manga> {
-        let known: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM categories WHERE id = ?)")
-                .bind(category)
-                .fetch_one(&self.pool)
-                .await?;
-        if !known {
-            return Err(DbError::Constraint(format!(
-                "unknown category {category:?}"
-            )));
-        }
-        let result = sqlx::query("UPDATE manga SET category = ? WHERE id = ?")
-            .bind(category)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
-        }
-        self.get_manga(id).await
-    }
-
-    // ---- categories ----
-
-    pub async fn list_categories(&self) -> Result<Vec<Category>> {
-        let rows =
-            sqlx::query_as::<_, CategoryRow>("SELECT * FROM categories ORDER BY position, id")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.into_iter().map(Category::from).collect())
-    }
-
-    pub async fn set_category_update(&self, id: &str, update_enabled: bool) -> Result<Category> {
-        let result = sqlx::query("UPDATE categories SET update_enabled = ? WHERE id = ?")
-            .bind(update_enabled)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
-        }
-        let row = sqlx::query_as::<_, CategoryRow>("SELECT * FROM categories WHERE id = ?")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(Category::from(row))
-    }
-
-    /// Manga the periodic updater should check: only categories with
-    /// `update_enabled`.
-    pub async fn list_manga_for_update(&self) -> Result<Vec<Manga>> {
-        let rows = sqlx::query_as::<_, MangaRow>(
-            "SELECT m.* FROM manga m
-             JOIN categories c ON c.id = m.category
-             WHERE c.update_enabled = 1
-             ORDER BY m.title COLLATE NOCASE",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(Manga::try_from).collect()
-    }
-
-    pub async fn set_last_checked(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
-        sqlx::query("UPDATE manga SET last_checked_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn delete_manga(&self, id: Uuid) -> Result<()> {
-        let result = sqlx::query("DELETE FROM manga WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound);
-        }
-        Ok(())
-    }
-
-    // ---- chapters ----
-
-    /// Merge a fresh chapter listing from the source: new chapters are
-    /// inserted, existing ones keep their id and download state. Returns
-    /// the newly inserted chapters.
-    pub async fn sync_chapters(
-        &self,
-        manga_id: Uuid,
-        listing: &[ChapterRef],
-    ) -> Result<ChapterSync> {
-        let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
-        let existing: std::collections::HashSet<String> =
-            sqlx::query_scalar::<_, String>("SELECT source_key FROM chapters WHERE manga_id = ?")
-                .bind(manga_id.to_string())
-                .fetch_all(&mut *tx)
-                .await?
-                .into_iter()
-                .collect();
-
-        // A scraped listing can contain the same chapter twice; keep the
-        // first occurrence, otherwise the second upsert discards an id we
-        // just recorded as new.
-        let mut current_keys = std::collections::HashSet::new();
-        let listing: Vec<&ChapterRef> = listing
-            .iter()
-            .filter(|c| current_keys.insert(c.key.clone()))
-            .collect();
-
-        let mut new_ids = Vec::new();
-        for chapter in &listing {
-            let id = Uuid::now_v7();
-            sqlx::query(
-                "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
-                                       scanlator, fetched_at, published_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT (manga_id, source_key)
-                 DO UPDATE SET title = excluded.title, number = excluded.number,
-                               source_order = excluded.source_order,
-                               published_at = COALESCE(excluded.published_at,
-                                                       chapters.published_at)",
-            )
-            .bind(id.to_string())
-            .bind(manga_id.to_string())
-            .bind(&chapter.key)
-            .bind(&chapter.title)
-            .bind(chapter.number)
-            .bind(chapter.source_order)
-            .bind(&chapter.scanlator)
-            .bind(now)
-            .bind(chapter.published_at)
-            .execute(&mut *tx)
-            .await?;
-            if !existing.contains(&chapter.key) {
-                new_ids.push(id);
-            }
-        }
-
-        // Reconcile: a source can move a chapter to a new URL (a re-upload),
-        // leaving the old row behind next to its twin — a duplicate the user
-        // sees ("Episode 45" twice, different keys). The insert/update above
-        // never removes it, so it accumulates across updater runs in a
-        // long-lived library. A stale row (fell out of the listing) with a
-        // recognizable twin still in it — same number, or same title when
-        // unnumbered — is merged into the twin: read marks and the reading
-        // journal follow, a downloaded copy is handed over, and the row goes
-        // away. Stale rows without a twin are dropped only when nothing is
-        // saved locally (state 'none'/'failed'), so downloaded content is
-        // never discarded. Guarded by a non-empty listing so a transient
-        // empty/failed scrape can't wipe a manga (selector sources already
-        // error on an empty chapter list, but be defensive).
-        let mut file_ops = Vec::new();
-        let mut merged_twins = std::collections::HashSet::new();
-        if !current_keys.is_empty() {
-            type ChapterMergeRow = (String, String, Option<f64>, String, String, Option<i64>);
-            let rows: Vec<ChapterMergeRow> = sqlx::query_as(
-                "SELECT id, source_key, number, title, download_state, page_count
-                 FROM chapters WHERE manga_id = ?",
-            )
-            .bind(manga_id.to_string())
-            .fetch_all(&mut *tx)
-            .await?;
-            let (stale, mut live): (Vec<_>, Vec<_>) = rows
-                .into_iter()
-                .partition(|(_, key, ..)| !current_keys.contains(key));
-
-            for (id, _, number, title, state, page_count) in stale {
-                let id = parse_uuid(id)?;
-                let twins: Vec<usize> = live
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (.., n, t, _, _))| match number {
-                        Some(number) => *n == Some(number),
-                        None => n.is_none() && *t == title,
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
-                match twins.as_slice() {
-                    &[i] => {
-                        let twin_id = parse_uuid(live[i].0.clone())?;
-                        // Read marks and the reading journal follow the twin
-                        // (the journal's one exception to append-only: the
-                        // chapter it points at is being replaced).
-                        sqlx::query(
-                            "INSERT OR IGNORE INTO read_chapters (user_id, chapter_id, at)
-                             SELECT user_id, ?, at FROM read_chapters WHERE chapter_id = ?",
-                        )
-                        .bind(twin_id.to_string())
-                        .bind(id.to_string())
-                        .execute(&mut *tx)
-                        .await?;
-                        sqlx::query(
-                            "UPDATE progress_events SET chapter_id = ? WHERE chapter_id = ?",
-                        )
-                        .bind(twin_id.to_string())
-                        .bind(id.to_string())
-                        .execute(&mut *tx)
-                        .await?;
-                        if state == "downloaded" && live[i].4 != "downloaded" {
-                            sqlx::query(
-                                "UPDATE chapters
-                                 SET download_state = 'downloaded', download_error = NULL,
-                                     downloaded_at = (SELECT downloaded_at FROM chapters WHERE id = ?),
-                                     page_count = ?
-                                 WHERE id = ?",
-                            )
-                            .bind(id.to_string())
-                            .bind(page_count)
-                            .bind(twin_id.to_string())
-                            .execute(&mut *tx)
-                            .await?;
-                            live[i].4 = "downloaded".into();
-                            file_ops.push(ChapterFileOp::Rename {
-                                from: id,
-                                to: twin_id,
-                            });
-                        } else {
-                            file_ops.push(ChapterFileOp::Remove { chapter: id });
-                        }
-                        sqlx::query("DELETE FROM chapters WHERE id = ?")
-                            .bind(id.to_string())
-                            .execute(&mut *tx)
-                            .await?;
-                        merged_twins.insert(twin_id);
-                    }
-                    // No twin (or an ambiguous set): keep downloaded/in-flight
-                    // rows, drop the rest.
-                    _ if state == "none" || state == "failed" => {
-                        sqlx::query("DELETE FROM chapters WHERE id = ?")
-                            .bind(id.to_string())
-                            .execute(&mut *tx)
-                            .await?;
-                        file_ops.push(ChapterFileOp::Remove { chapter: id });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        tx.commit().await?;
-
-        let mut new_chapters = Vec::new();
-        for id in new_ids {
-            if !merged_twins.contains(&id) {
-                new_chapters.push(self.get_chapter(id).await?);
-            }
-        }
-        Ok(ChapterSync {
-            new_chapters,
-            file_ops,
-        })
-    }
-
-    pub async fn get_chapter(&self, id: Uuid) -> Result<Chapter> {
-        let row = sqlx::query_as::<_, ChapterRow>("SELECT * FROM chapters WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(DbError::NotFound)?;
-        Chapter::try_from(row)
-    }
-
-    /// Chapters in reading order: by number when present, source listing
-    /// order (reversed, sources list newest first) as fallback.
-    pub async fn list_chapters(&self, manga_id: Uuid) -> Result<Vec<Chapter>> {
-        let rows = sqlx::query_as::<_, ChapterRow>(
-            "SELECT * FROM chapters WHERE manga_id = ?
-             ORDER BY number IS NULL, number ASC, source_order DESC",
-        )
-        .bind(manga_id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(Chapter::try_from).collect()
-    }
-
-    /// Queue chapters for download; already queued/downloaded ones are left
-    /// alone. Returns how many were actually (re)queued.
-    pub async fn mark_pending(&self, chapter_ids: &[Uuid]) -> Result<u32> {
-        let mut tx = self.pool.begin().await?;
-        let mut queued = 0;
-        for id in chapter_ids {
-            let result = sqlx::query(
-                "UPDATE chapters SET download_state = 'pending', download_error = NULL
-                 WHERE id = ? AND download_state IN ('none', 'failed')",
-            )
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
-            queued += result.rows_affected() as u32;
-        }
-        tx.commit().await?;
-        Ok(queued)
-    }
-
-    pub async fn next_pending_download(&self) -> Result<Option<Chapter>> {
-        let row = sqlx::query_as::<_, ChapterRow>(
-            "SELECT * FROM chapters WHERE download_state = 'pending' ORDER BY fetched_at LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(Chapter::try_from).transpose()
-    }
-
-    pub async fn set_downloading(&self, id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE chapters SET download_state = 'downloading' WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Record a download outcome. Returns `false` when the chapter row no
-    /// longer exists (manga deleted mid-download) so the caller can discard
-    /// the files it just wrote.
-    pub async fn finish_download(
-        &self,
-        id: Uuid,
-        outcome: std::result::Result<u32, String>,
-    ) -> Result<bool> {
-        let now = Utc::now();
-        let result = match outcome {
-            Ok(page_count) => {
-                sqlx::query(
-                    "UPDATE chapters SET download_state = 'downloaded', downloaded_at = ?,
-                                         page_count = ?, download_error = NULL
-                     WHERE id = ?",
-                )
-                .bind(now)
-                .bind(page_count)
-                .bind(id.to_string())
-                .execute(&self.pool)
-                .await?
-            }
-            Err(reason) => {
-                sqlx::query(
-                    "UPDATE chapters SET download_state = 'failed', downloaded_at = ?,
-                                         download_error = ?
-                     WHERE id = ?",
-                )
-                .bind(now)
-                .bind(reason)
-                .bind(id.to_string())
-                .execute(&self.pool)
-                .await?
-            }
-        };
-        Ok(result.rows_affected() > 0)
-    }
-
-    // ---- read marks ----
-
-    /// Mark chapters read for a user. Idempotent; unknown chapter ids are a
-    /// constraint error (the FK catches stale client state).
-    pub async fn mark_read(&self, user_id: Uuid, chapter_ids: &[Uuid]) -> Result<u32> {
-        let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
-        let mut affected = 0;
-        for id in chapter_ids {
-            let result = sqlx::query(
-                "INSERT INTO read_chapters (user_id, chapter_id, at) VALUES (?, ?, ?)
-                 ON CONFLICT (user_id, chapter_id) DO NOTHING",
-            )
-            .bind(user_id.to_string())
-            .bind(id.to_string())
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| match &e {
-                sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-                    DbError::Constraint(format!("unknown chapter {id}"))
-                }
-                _ => DbError::Sqlx(e),
-            })?;
-            affected += result.rows_affected() as u32;
-        }
-        tx.commit().await?;
-        Ok(affected)
-    }
-
-    pub async fn mark_unread(&self, user_id: Uuid, chapter_ids: &[Uuid]) -> Result<u32> {
-        let mut tx = self.pool.begin().await?;
-        let mut affected = 0;
-        for id in chapter_ids {
-            let result =
-                sqlx::query("DELETE FROM read_chapters WHERE user_id = ? AND chapter_id = ?")
-                    .bind(user_id.to_string())
-                    .bind(id.to_string())
-                    .execute(&mut *tx)
-                    .await?;
-            affected += result.rows_affected() as u32;
-        }
-        tx.commit().await?;
-        Ok(affected)
-    }
-
-    /// Ids of a manga's chapters the user has read.
-    pub async fn read_ids(
-        &self,
-        user_id: Uuid,
-        manga_id: Uuid,
-    ) -> Result<std::collections::HashSet<Uuid>> {
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT r.chapter_id FROM read_chapters r
-             JOIN chapters c ON c.id = r.chapter_id
-             WHERE r.user_id = ? AND c.manga_id = ?",
-        )
-        .bind(user_id.to_string())
-        .bind(manga_id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(parse_uuid).collect()
-    }
-
-    pub async fn set_page_count(&self, id: Uuid, page_count: u32) -> Result<()> {
-        sqlx::query("UPDATE chapters SET page_count = ? WHERE id = ?")
-            .bind(page_count)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ---- users & sessions ----
-
-    pub async fn user_by_id(&self, id: Uuid) -> Result<User> {
-        let row = sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(DbError::NotFound)?;
-        User::try_from(row)
-    }
-
-    /// User for an OIDC subject, created or refreshed from the provider's
-    /// claims. The username falls back to the subject on collision (two
-    /// providers' users sharing a preferred_username).
-    pub async fn upsert_oidc_user(
-        &self,
-        subject: &str,
-        username: &str,
-        display_name: &str,
-    ) -> Result<User> {
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?;
-        if let Some(id) = existing {
-            let id = parse_uuid(id)?;
-            sqlx::query("UPDATE users SET display_name = ? WHERE id = ?")
-                .bind(display_name)
-                .bind(id.to_string())
-                .execute(&self.pool)
-                .await?;
-            return self.user_by_id(id).await;
-        }
-
-        let id = Uuid::now_v7();
-        let insert = |username: String| {
-            sqlx::query(
-                "INSERT INTO users (id, subject, username, display_name, created_at)
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(id.to_string())
-            .bind(subject.to_string())
-            .bind(username)
-            .bind(display_name.to_string())
-            .bind(Utc::now())
-        };
-        let result = insert(username.trim().to_lowercase())
-            .execute(&self.pool)
-            .await;
-        match result {
-            Ok(_) => {}
-            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
-                insert(format!("{}-{subject}", username.trim().to_lowercase()))
-                    .execute(&self.pool)
-                    .await?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        self.user_by_id(id).await
-    }
-
-    pub async fn create_session(
-        &self,
-        token_hash: &str,
-        user_id: Uuid,
-        expires_at: DateTime<Utc>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(token_hash)
-        .bind(user_id.to_string())
-        .bind(Utc::now())
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await?;
-        // Opportunistic cleanup; logins are rare enough that this is free.
-        sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
-            .bind(Utc::now())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Resolve a session token hash to its (non-expired) user.
-    pub async fn user_by_session(&self, token_hash: &str) -> Result<User> {
-        let row = sqlx::query_as::<_, UserRow>(
-            "SELECT u.* FROM users u
-             JOIN sessions s ON s.user_id = u.id
-             WHERE s.token_hash = ? AND s.expires_at >= ?",
-        )
-        .bind(token_hash)
-        .bind(Utc::now())
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(DbError::NotFound)?;
-        User::try_from(row)
-    }
-
-    pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
-            .bind(token_hash)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ---- progress journal ----
-
-    /// Append an event for a user. Idempotent on id: replaying a batch is
-    /// harmless, which makes offline sync retries safe.
-    pub async fn append_event(&self, user_id: Uuid, event: &ProgressEvent) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(event.id.to_string())
-        .bind(user_id.to_string())
-        .bind(event.manga_id.to_string())
-        .bind(event.chapter_id.to_string())
-        .bind(event.page)
-        .bind(&event.device)
-        .bind(event.at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-                DbError::Constraint("unknown manga".into())
-            }
-            _ => DbError::Sqlx(e),
-        })?;
-        Ok(())
-    }
-
-    /// Append a whole offline journal in one transaction. Events for manga
-    /// the server no longer knows (deleted meanwhile) are *skipped*, not
-    /// errors: they can never apply, and one of them must not wedge the
-    /// client's outbox behind an eternally failing batch.
-    /// Returns (accepted, skipped).
-    pub async fn append_events(
-        &self,
-        user_id: Uuid,
-        events: &[ProgressEvent],
-    ) -> Result<(u32, u32)> {
-        let mut tx = self.pool.begin().await?;
-        let (mut accepted, mut skipped) = (0, 0);
-        for event in events {
-            let known: bool =
-                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM manga WHERE id = ?)")
-                    .bind(event.manga_id.to_string())
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if !known {
-                skipped += 1;
-                continue;
-            }
-            sqlx::query(
-                "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT (id) DO NOTHING",
-            )
-            .bind(event.id.to_string())
-            .bind(user_id.to_string())
-            .bind(event.manga_id.to_string())
-            .bind(event.chapter_id.to_string())
-            .bind(event.page)
-            .bind(&event.device)
-            .bind(event.at)
-            .execute(&mut *tx)
-            .await?;
-            // Replays (id conflict) also count as accepted: the event is in.
-            accepted += 1;
-        }
-        tx.commit().await?;
-        Ok((accepted, skipped))
-    }
-
-    /// A user's merged current position (max at, id tie-break — same rule
-    /// as `yomu_domain::merge_position`).
-    pub async fn latest_position(&self, user_id: Uuid, manga_id: Uuid) -> Result<Option<Position>> {
-        let row = sqlx::query(
-            "SELECT chapter_id, page, at FROM progress_events
-             WHERE manga_id = ? AND user_id = ? ORDER BY at DESC, id DESC LIMIT 1",
-        )
-        .bind(manga_id.to_string())
-        .bind(user_id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            Ok(Position {
-                chapter_id: parse_uuid(row.get::<String, _>("chapter_id"))?,
-                page: row.get::<i64, _>("page") as u32,
-                at: row.get("at"),
-            })
-        })
-        .transpose()
-    }
-
-    /// Journal slice for incremental sync. The cursor is the row's
-    /// server-assigned arrival sequence — event ids are stamped by the
-    /// observing device and would make a cursor skip late offline pushes.
-    /// Returns the events plus the cursor for the next page (`None` when
-    /// nothing was returned).
-    pub async fn events_since(
-        &self,
-        user_id: Uuid,
-        since: Option<i64>,
-    ) -> Result<(Vec<ProgressEvent>, Option<i64>)> {
-        let rows = sqlx::query_as::<_, EventRow>(
-            "SELECT * FROM progress_events WHERE user_id = ? AND seq > ?
-             ORDER BY seq LIMIT 1000",
-        )
-        .bind(user_id.to_string())
-        .bind(since.unwrap_or(0))
-        .fetch_all(&self.pool)
-        .await?;
-        let next = rows.last().map(|row| row.seq);
-        let events = rows
-            .into_iter()
-            .map(ProgressEvent::try_from)
-            .collect::<Result<_>>()?;
-        Ok((events, next))
-    }
-
-    /// Forget the server copies of these chapters: rows go back to
-    /// 'none' (page_count survives — still true knowledge). Returns the
-    /// ids that actually were downloaded, so the caller can delete their
-    /// page directories.
-    pub async fn remove_downloads(&self, chapter_ids: &[Uuid]) -> Result<Vec<Uuid>> {
-        let mut removed = Vec::new();
-        for id in chapter_ids {
-            let result = sqlx::query(
-                "UPDATE chapters SET download_state = 'none', downloaded_at = NULL,
-                                     download_error = NULL
-                 WHERE id = ? AND download_state = 'downloaded'",
-            )
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-            if result.rows_affected() > 0 {
-                removed.push(*id);
-            }
-        }
-        Ok(removed)
-    }
-
-    // ---- source catalog cache ----
-
-    /// Record summaries seen in a listing/search; the upsert keeps
-    /// changed rows current and refreshes `last_seen_at` on the rest.
-    pub async fn upsert_catalog_entries(
-        &self,
-        source_id: &str,
-        items: &[MangaSummary],
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        for item in items {
-            sqlx::query(
-                "INSERT INTO catalog_entries (source_id, key, title, cover_url, last_seen_at)
-                 VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT (source_id, key) DO UPDATE SET
-                     title = excluded.title,
-                     cover_url = excluded.cover_url,
-                     last_seen_at = excluded.last_seen_at",
-            )
-            .bind(source_id)
-            .bind(&item.key)
-            .bind(&item.title)
-            .bind(item.cover_url.as_deref())
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn write_catalog_page(
-        &self,
-        source_id: &str,
-        sort: &str,
-        page: u32,
-        keys: &[String],
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO catalog_pages (source_id, sort, page, keys, fetched_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (source_id, sort, page) DO UPDATE SET
-                 keys = excluded.keys, fetched_at = excluded.fetched_at",
-        )
-        .bind(source_id)
-        .bind(sort)
-        .bind(page)
-        .bind(serde_json::to_string(keys).expect("string list serializes"))
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// A cached browse page, in listing order, with its fetch time.
-    pub async fn read_catalog_page(
-        &self,
-        source_id: &str,
-        sort: &str,
-        page: u32,
-    ) -> Result<Option<(Vec<MangaSummary>, DateTime<Utc>)>> {
-        let Some((keys, fetched_at)) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-            "SELECT keys, fetched_at FROM catalog_pages
-             WHERE source_id = ? AND sort = ? AND page = ?",
-        )
-        .bind(source_id)
-        .bind(sort)
-        .bind(page)
-        .fetch_optional(&self.pool)
-        .await?
-        else {
-            return Ok(None);
-        };
-        let keys: Vec<String> =
-            serde_json::from_str(&keys).map_err(|e| DbError::Corrupt(e.to_string()))?;
-        let mut items = Vec::with_capacity(keys.len());
-        for key in &keys {
-            let row = sqlx::query_as::<_, (String, Option<String>)>(
-                "SELECT title, cover_url FROM catalog_entries
-                 WHERE source_id = ? AND key = ?",
-            )
-            .bind(source_id)
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-            if let Some((title, cover_url)) = row {
-                items.push(MangaSummary {
-                    key: key.clone(),
-                    title,
-                    cover_url,
-                    in_library: None,
-                });
-            }
-        }
-        Ok(Some((items, fetched_at)))
-    }
-
-    /// source_key → manga id for one source; backs the browse/search
-    /// "already in library" annotation.
-    pub async fn library_keys(
-        &self,
-        source_id: &str,
-    ) -> Result<std::collections::HashMap<String, Uuid>> {
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT source_key, id FROM manga WHERE source_id = ?",
-        )
-        .bind(source_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|(key, id)| Ok((key, parse_uuid(id)?)))
-            .collect()
-    }
-
-    /// Which source a cover URL belongs to — gate for the cover proxy
-    /// (the server must not fetch arbitrary URLs).
-    pub async fn catalog_source_for_cover(&self, cover_url: &str) -> Result<Option<String>> {
-        Ok(
-            sqlx::query_scalar("SELECT source_id FROM catalog_entries WHERE cover_url = ? LIMIT 1")
-                .bind(cover_url)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
-    }
 }
+
+mod backup;
+mod catalog;
+mod categories;
+mod chapters;
+mod downloads;
+mod manga;
+mod progress;
+mod read_marks;
+mod users;
 
 async fn insert_chapters(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -983,6 +131,29 @@ async fn insert_chapters(
         .bind(&chapter.scanlator)
         .bind(now)
         .bind(chapter.published_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Replace a manga's genre rows within a transaction.
+async fn write_genres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    manga_id: Uuid,
+    genres: &[String],
+) -> Result<()> {
+    sqlx::query("DELETE FROM manga_genres WHERE manga_id = ?")
+        .bind(manga_id.to_string())
+        .execute(&mut **tx)
+        .await?;
+    for genre in genres {
+        sqlx::query(
+            "INSERT INTO manga_genres (manga_id, genre) VALUES (?, ?)
+             ON CONFLICT (manga_id, genre) DO NOTHING",
+        )
+        .bind(manga_id.to_string())
+        .bind(genre)
         .execute(&mut **tx)
         .await?;
     }
@@ -1030,6 +201,8 @@ impl TryFrom<MangaRow> for Manga {
             cover_url: parse_url_opt(row.cover_url)?,
             auto_download: row.auto_download,
             category: row.category,
+            // Genres live in manga_genres; accessors attach them.
+            genres: Vec::new(),
             added_at: row.added_at,
             last_checked_at: row.last_checked_at,
         })
@@ -1163,7 +336,7 @@ impl TryFrom<EventRow> for ProgressEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yomu_domain::{MangaSummary, merge_position};
+    use yomu_domain::{MangaDetails, MangaSummary, merge_position};
 
     /// The seeded single-account user (see migration 0004).
     const SHARED: Uuid = Uuid::nil();
@@ -1177,6 +350,7 @@ mod tests {
                 in_library: None,
             },
             description: Some("desc".into()),
+            genres: Vec::new(),
             chapters: chapters
                 .iter()
                 .enumerate()
@@ -1189,6 +363,17 @@ mod tests {
                     published_at: None,
                 })
                 .collect(),
+        }
+    }
+
+    fn details_with_genres(
+        key: &str,
+        chapters: &[(&str, Option<f64>)],
+        genres: &[&str],
+    ) -> MangaDetails {
+        MangaDetails {
+            genres: genres.iter().map(|g| g.to_string()).collect(),
+            ..details(key, chapters)
         }
     }
 
@@ -1217,6 +402,179 @@ mod tests {
         assert!(matches!(after[0].download, DownloadState::None));
         // page_count survives: still true knowledge about the chapter
         assert_eq!(after[0].page_count, Some(9));
+    }
+
+    #[tokio::test]
+    async fn library_rollups_and_positions_are_batched_per_manga() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        // list_chapters order: number asc → c1 then c2.
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        db.mark_pending(&[chapters[0].id]).await.unwrap();
+        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
+        db.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        db.append_event(
+            SHARED,
+            &ProgressEvent {
+                id: Uuid::from_u128(1),
+                manga_id: manga.id,
+                chapter_id: chapters[1].id,
+                page: 3,
+                device: "test".into(),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let rollups = db.library_rollups(&SHARED.to_string()).await.unwrap();
+        let rollup = rollups.get(&manga.id).unwrap();
+        assert_eq!(rollup.chapter_count, 2);
+        assert_eq!(rollup.downloaded_count, 1);
+        assert_eq!(rollup.unread_count, 1); // one of two marked read
+        assert!(rollup.latest_chapter_at.is_some());
+
+        let positions = db.latest_positions(SHARED).await.unwrap();
+        let (position, title) = positions.get(&manga.id).unwrap();
+        assert_eq!(position.chapter_id, chapters[1].id);
+        assert_eq!(position.page, 3);
+        assert_eq!(title.as_deref(), Some(chapters[1].title.as_str()));
+
+        // Signed-out scope (no matching user) counts nothing as read.
+        let anon = db.library_rollups("").await.unwrap();
+        assert_eq!(anon.get(&manga.id).unwrap().unread_count, 2);
+    }
+
+    #[tokio::test]
+    async fn backup_round_trips_into_a_fresh_instance() {
+        use yomu_domain::Backup;
+
+        let source = Db::in_memory().await.unwrap();
+        let manga = source
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                true,
+            )
+            .await
+            .unwrap();
+        let chapters = source.list_chapters(manga.id).await.unwrap();
+        source.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        source
+            .append_event(
+                SHARED,
+                &ProgressEvent {
+                    id: Uuid::from_u128(7),
+                    manga_id: manga.id,
+                    chapter_id: chapters[1].id,
+                    page: 5,
+                    device: "test".into(),
+                    at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let backup = Backup {
+            version: yomu_domain::BACKUP_VERSION,
+            exported_at: Utc::now(),
+            categories: source.list_categories().await.unwrap(),
+            manga: source.list_manga().await.unwrap(),
+            chapters: source.export_chapters().await.unwrap(),
+            read_chapter_ids: source.read_all_ids(SHARED).await.unwrap(),
+            progress: source.export_events(SHARED).await.unwrap(),
+        };
+
+        let target = Db::in_memory().await.unwrap();
+        let summary = target.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(summary.manga, 1);
+        assert_eq!(summary.chapters, 2);
+        assert_eq!(summary.read_marks, 1);
+        assert_eq!(summary.progress_events, 1);
+
+        // The restored instance mirrors the source's library and reading state.
+        let restored = target.list_manga().await.unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, manga.id);
+        assert!(restored[0].auto_download);
+        let read = target.read_ids(SHARED, manga.id).await.unwrap();
+        assert!(read.contains(&chapters[0].id));
+        let position = target
+            .latest_position(SHARED, manga.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position.chapter_id, chapters[1].id);
+        assert_eq!(position.page, 5);
+        // Restored chapters read live (no page files travelled with the backup).
+        let restored_chapters = target.list_chapters(manga.id).await.unwrap();
+        assert!(
+            restored_chapters
+                .iter()
+                .all(|c| matches!(c.download, DownloadState::None))
+        );
+
+        // Re-importing is idempotent: nothing new lands the second time.
+        let again = target.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(
+            (
+                again.manga,
+                again.chapters,
+                again.read_marks,
+                again.progress_events
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn genres_are_stored_and_batched() {
+        let db = Db::in_memory().await.unwrap();
+        let a = db
+            .insert_manga(
+                "fixture",
+                &details_with_genres("m1", &[("c1", Some(1.0))], &["Action", "Fantasy"]),
+                false,
+            )
+            .await
+            .unwrap();
+        let b = db
+            .insert_manga(
+                "fixture",
+                &details_with_genres("m2", &[("c1", Some(1.0))], &["Fantasy", "Romance"]),
+                false,
+            )
+            .await
+            .unwrap();
+
+        // insert_manga returns the genres it wrote; get_manga reloads them.
+        assert_eq!(a.genres, vec!["Action", "Fantasy"]);
+        assert_eq!(
+            db.get_manga(a.id).await.unwrap().genres,
+            vec!["Action", "Fantasy"]
+        );
+        // list_manga attaches genres per row from one grouped query.
+        let listed = db.list_manga().await.unwrap();
+        let listed_b = listed.iter().find(|m| m.id == b.id).unwrap();
+        assert_eq!(listed_b.genres, vec!["Fantasy", "Romance"]);
+
+        // set_genres is replace-all, not additive.
+        db.set_genres(a.id, &["Drama".into()]).await.unwrap();
+        assert_eq!(db.genres_for(a.id).await.unwrap(), vec!["Drama"]);
+
+        let map = db.genres_by_manga().await.unwrap();
+        assert_eq!(map.get(&a.id).unwrap(), &vec!["Drama".to_string()]);
+        assert_eq!(
+            map.get(&b.id).unwrap(),
+            &vec!["Fantasy".to_string(), "Romance".into()]
+        );
     }
 
     #[tokio::test]
@@ -1649,6 +1007,41 @@ mod tests {
         assert_eq!((accepted, skipped), (1, 1));
         let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
         assert_eq!(position.page, 9);
+    }
+
+    #[tokio::test]
+    async fn batch_append_skips_events_with_unknown_chapter() {
+        // A known manga but a garbage chapter_id (client desync) must be
+        // skipped, not stored — otherwise latest_position points at a
+        // chapter that resolves to nothing.
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let real = db.list_chapters(manga.id).await.unwrap().remove(0);
+
+        let good = ProgressEvent {
+            id: Uuid::from_u128(1),
+            manga_id: manga.id,
+            chapter_id: real.id,
+            page: 4,
+            device: "test".into(),
+            at: DateTime::from_timestamp(100, 0).unwrap(),
+        };
+        let dangling = ProgressEvent {
+            id: Uuid::from_u128(2),
+            chapter_id: Uuid::from_u128(9999),
+            at: DateTime::from_timestamp(200, 0).unwrap(),
+            ..good.clone()
+        };
+
+        let (accepted, skipped) = db.append_events(SHARED, &[good, dangling]).await.unwrap();
+        assert_eq!((accepted, skipped), (1, 1));
+        // The surviving position is the good event's chapter, not the
+        // later-dated dangling one.
+        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        assert_eq!(position.chapter_id, real.id);
     }
 
     #[tokio::test]

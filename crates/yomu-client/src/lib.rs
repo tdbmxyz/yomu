@@ -4,11 +4,11 @@
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    AddMangaRequest, ApiErrorBody, BrowseSort, BulkChaptersResponse, Category, Chapter,
+    AddMangaRequest, ApiErrorBody, Backup, BrowseSort, BulkChaptersResponse, Category, Chapter,
     DownloadChaptersRequest, EventsResponse, HealthResponse, Manga, MangaDetailResponse,
     MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse, PagesResponse, Position,
-    PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
-    SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
+    PushEventsRequest, PushEventsResponse, RefreshResponse, RestoreSummary, SetPositionRequest,
+    SourceInfo, SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -22,6 +22,22 @@ pub enum ClientError {
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// On wasm, `fetch` defaults to same-origin credentials, so a frontend
+/// pointed at a *different* host than the API (remote `yomu-api-base`)
+/// never sends the session cookie and every authenticated call 401s.
+/// Force-include credentials. No-op on native (reqwest carries its own
+/// cookie handling there).
+fn with_credentials(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    #[cfg(target_arch = "wasm32")]
+    {
+        req.fetch_credentials_include()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        req
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct YomuClient {
@@ -140,6 +156,17 @@ impl YomuClient {
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
         self.base.join(&format!("api/v1/manga/{id}/cover")).ok()
+    }
+
+    // ---- backup / restore ----
+
+    pub async fn backup(&self) -> Result<Backup> {
+        self.get("api/v1/backup").await
+    }
+
+    pub async fn restore(&self, backup: &Backup) -> Result<RestoreSummary> {
+        let req = self.http.post(self.url("api/v1/restore")?).json(backup);
+        self.send(req).await
     }
 
     // ---- categories ----
@@ -278,7 +305,7 @@ impl YomuClient {
     }
 
     async fn check_status(req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let resp = req
+        let resp = with_credentials(req)
             .send()
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;

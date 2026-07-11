@@ -23,6 +23,12 @@ pub(crate) fn parse_chapter_date(
         if let Ok(dt) = DateTime::parse_from_str(text, fmt) {
             return Some(dt.with_timezone(&Utc));
         }
+        // A format carrying a time but no offset (e.g. "%Y-%m-%d %H:%M")
+        // parses as neither a zoned DateTime nor a bare NaiveDate; treat it
+        // as local-naive wall time at UTC, matching the date-only branch.
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, fmt) {
+            return Some(dt.and_utc());
+        }
         if let Ok(date) = NaiveDate::parse_from_str(text, fmt) {
             return date.and_hms_opt(0, 0, 0).map(|d| d.and_utc());
         }
@@ -89,6 +95,14 @@ mod tests {
         assert_eq!(
             parse_chapter_date("2026/05/19", Some("%Y/%m/%d"), now()),
             Some(at(2026, 5, 19, 0, 0, 0)),
+        );
+    }
+
+    #[test]
+    fn configured_datetime_without_timezone_parses() {
+        assert_eq!(
+            parse_chapter_date("2026-05-19 14:30", Some("%Y-%m-%d %H:%M"), now()),
+            Some(at(2026, 5, 19, 14, 30, 0)),
         );
     }
 

@@ -100,6 +100,10 @@ pub struct MangaSpec {
     pub description: Option<String>,
     #[serde(default)]
     pub cover: Option<String>,
+    /// Selector matching each genre/tag element on the manga page; the
+    /// trimmed text of every match is collected (deduplicated). Optional.
+    #[serde(default)]
+    pub genres: Option<String>,
     /// Some sites load the chapter list as an HTML fragment from a
     /// separate endpoint (htmx-style) instead of rendering it into the
     /// manga page. Template substituting `{url}` (the manga page URL) and
@@ -238,7 +242,36 @@ impl Rule {
             Some(selector) => el.select(selector).next()?,
             None => el,
         };
-        let value = match &self.attr {
+        Self::value_of(target, self.attr.as_deref())
+    }
+
+    /// Extract from *every* match under `el`, in document order and
+    /// deduplicated — for list rules like genres. An attribute-less,
+    /// selector-less rule yields at most `el` itself.
+    fn extract_all(&self, el: ElementRef) -> Vec<String> {
+        let mut out = Vec::new();
+        match &self.selector {
+            Some(selector) => {
+                for target in el.select(selector) {
+                    if let Some(value) = Self::value_of(target, self.attr.as_deref())
+                        && !out.contains(&value)
+                    {
+                        out.push(value);
+                    }
+                }
+            }
+            None => {
+                if let Some(value) = Self::value_of(el, self.attr.as_deref()) {
+                    out.push(value);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whitespace-normalized attribute or text of `target`.
+    fn value_of(target: ElementRef, attr: Option<&str>) -> Option<String> {
+        let value = match attr {
             Some(attr) => target.value().attr(attr)?.to_string(),
             None => target.text().collect::<String>(),
         };
@@ -273,6 +306,7 @@ struct CompiledSpec {
     manga_title: Option<Rule>,
     manga_description: Option<Rule>,
     manga_cover: Option<Rule>,
+    manga_genres: Option<Rule>,
     chapter_item: Selector,
     chapter_title: Option<Rule>,
     chapter_link: Rule,
@@ -329,6 +363,7 @@ impl SelectorSource {
             manga_title: rule_opt(&spec.manga.title)?,
             manga_description: rule_opt(&spec.manga.description)?,
             manga_cover: rule_opt(&spec.manga.cover)?,
+            manga_genres: rule_opt(&spec.manga.genres)?,
             chapter_item: sel(&spec.manga.chapter_item)?,
             chapter_title: rule_opt(&spec.manga.chapter_title)?,
             chapter_link: Rule::parse(&spec.manga.chapter_link)?,
@@ -510,6 +545,12 @@ impl SelectorSource {
             .and_then(|r| r.extract(root))
             .and_then(|c| page_url.join(&c).ok())
             .map(|u| u.to_string());
+        let genres = self
+            .compiled
+            .manga_genres
+            .as_ref()
+            .map(|r| r.extract_all(root))
+            .unwrap_or_default();
 
         let chapters_doc = Html::parse_document(chapters_html);
         let mut chapters = Vec::new();
@@ -574,6 +615,7 @@ impl SelectorSource {
                 in_library: None,
             },
             description,
+            genres,
             chapters,
         })
     }
@@ -811,17 +853,27 @@ const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 /// could otherwise aim the server at cloud metadata (169.254.169.254) or LAN
 /// hosts. A *hostname* that resolves to a private address (DNS rebinding) is
 /// out of scope here; that needs a connection-pinning resolver.
+fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || o[0] == 0
+        || (o[0] == 100 && (64..=127).contains(&o[1])) // carrier-grade NAT 100.64/10
+}
+
 fn is_private_target(url: &Url) -> bool {
     match url.host() {
-        Some(url::Host::Ipv4(ip)) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                || ip.octets()[0] == 0
-        }
+        Some(url::Host::Ipv4(ip)) => is_private_v4(ip),
         Some(url::Host::Ipv6(ip)) => {
+            // An IPv4-mapped address (`::ffff:a.b.c.d`) routes to the real
+            // IPv4 host, so it must face the same checks — otherwise the
+            // metadata endpoint is reachable as `[::ffff:169.254.169.254]`.
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_private_v4(v4);
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
@@ -1011,6 +1063,9 @@ mod tests {
             "http://10.0.0.5/x",
             "http://[::1]/x",
             "http://[fd00::1]/x",
+            "http://[::ffff:169.254.169.254]/x", // v4-mapped cloud metadata
+            "http://[::ffff:10.0.0.5]/x",        // v4-mapped private
+            "http://100.64.0.1/x",               // carrier-grade NAT
         ];
         for u in blocked {
             assert!(

@@ -270,6 +270,30 @@ button.primary,
   font-weight: 600;
 }
 
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.backup-status {
+  margin-top: 0.6rem;
+}
+
+/* Off-screen but still focusable/clickable (the restore file input lives
+   inside its .button label). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 button.danger:hover {
   border-color: var(--down);
   color: var(--down);
@@ -357,6 +381,48 @@ button.danger:hover {
 .category-update-toggle {
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+.library-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.library-search {
+  width: 100%;
+  max-width: 22rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.library-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.genre-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.genre-chip {
+  padding: 0.15rem 0.6rem;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.genre-chip.active {
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+  background: var(--accent);
 }
 
 .manga-grid {

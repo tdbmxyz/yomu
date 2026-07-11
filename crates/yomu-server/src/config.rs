@@ -99,6 +99,13 @@ pub struct AuthConfig {
     pub public_url: Option<url::Url>,
     /// Session lifetime in days (0 = default 90).
     pub session_days: u32,
+    /// Browser origins allowed to make credentialed cross-origin calls
+    /// (a frontend served from a different host than this API). Empty =
+    /// same-origin only, which is the served-frontend deployment. A
+    /// wildcard is intentionally impossible here: credentialed CORS may
+    /// not use `*`.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 impl AuthConfig {

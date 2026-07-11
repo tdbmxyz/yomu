@@ -23,6 +23,10 @@ pub struct Manga {
     /// [`Category`] id ("reading" by default).
     #[serde(default = "default_category")]
     pub category: String,
+    /// Genres/tags scraped from the source, for library filtering. Empty
+    /// until the manga is added or refreshed from a source that lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
     pub added_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checked_at: Option<DateTime<Utc>>,

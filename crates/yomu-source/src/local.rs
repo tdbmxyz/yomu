@@ -36,6 +36,8 @@ struct Details {
     title: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    genres: Vec<String>,
 }
 
 pub struct LocalSource {
@@ -70,7 +72,22 @@ impl LocalSource {
         if !path.exists() {
             return Err(SourceError::Parse(format!("local key {key:?} not found")));
         }
-        Ok(path)
+        // Lexical checks stop `..`, but a symlink under the dir can still point
+        // outside it. Canonicalize and confirm the real path stays within the
+        // (canonical) local dir before handing it back.
+        let canon_dir = self
+            .dir
+            .canonicalize()
+            .map_err(|e| SourceError::Parse(format!("local dir not resolvable: {e}")))?;
+        let canon = path
+            .canonicalize()
+            .map_err(|e| SourceError::Parse(format!("local key {key:?} not resolvable: {e}")))?;
+        if !canon.starts_with(&canon_dir) {
+            return Err(SourceError::Parse(format!(
+                "local key {key:?} escapes the local dir"
+            )));
+        }
+        Ok(canon)
     }
 
     /// `local:` URL addressing a file (or `.cbz` entry) under the local dir.
@@ -176,6 +193,7 @@ impl LocalSource {
                 in_library: None,
             },
             description: details.description,
+            genres: details.genres,
             chapters,
         })
     }
@@ -449,6 +467,26 @@ mod tests {
         for key in ["../etc", "/etc/passwd", "a/../../b", ".hidden", ""] {
             assert!(source.resolve(key).is_err(), "key {key:?} must be rejected");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_keys_cannot_escape_the_local_dir() {
+        let root = std::env::temp_dir().join(format!("yomu-symlink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = std::env::temp_dir().join(format!("yomu-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"x").unwrap();
+        // A symlink inside the local dir aimed at content outside it: the
+        // lexical check passes (no `..`), so only canonicalization stops it.
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let source = LocalSource::new("local", "Local", root.clone());
+        assert!(source.resolve("escape/secret").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[tokio::test]
