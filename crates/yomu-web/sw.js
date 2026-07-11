@@ -12,7 +12,7 @@
 //
 // Bump CACHE when the caching logic changes, or when a fixed-name asset
 // (favicon/app icons) changes so the old cache-first copy is purged.
-const CACHE = "yomu-v4";
+const CACHE = "yomu-v5";
 const SHELL = "/";
 
 // Hashed assets referenced by a shell document (href/src/import of
@@ -113,8 +113,12 @@ async function navigate(event) {
     const response = await fetch(SHELL);
     if (response.ok) {
       event.waitUntil(refreshShell(cache, response.clone()).catch(() => {}));
+      return response;
     }
-    return response;
+    // A 5xx/redirect on "/" would otherwise be shown as the app: prefer the
+    // last known-good shell when we have one.
+    const cached = await cache.match(SHELL);
+    return cached || response;
   } catch (err) {
     const cached = await cache.match(SHELL);
     if (cached) return cached;
