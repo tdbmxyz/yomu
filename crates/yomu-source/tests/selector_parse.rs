@@ -20,6 +20,7 @@ fn fixture_source() -> SelectorSource {
         title = "h1.entry-title"
         description = ".summary"
         cover = ".cover img@src"
+        genres = ".genres a"
         chapter_item = "li.chapter"
         chapter_link = "a@href"
 
@@ -166,6 +167,8 @@ fn parses_manga_details_and_chapter_numbers() {
         details.description.as_deref(),
         Some("A farmer stuck in a tower. Comfy.")
     );
+    // Genres collected in document order, deduplicated (Action appears twice).
+    assert_eq!(details.genres, vec!["Action", "Fantasy"]);
     assert_eq!(details.chapters.len(), 4);
     // Numbers parsed from titles, including decimals; order preserved as
     // listed (newest first here), captured in source_order.

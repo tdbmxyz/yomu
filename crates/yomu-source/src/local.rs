@@ -36,6 +36,8 @@ struct Details {
     title: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    genres: Vec<String>,
 }
 
 pub struct LocalSource {
@@ -191,6 +193,7 @@ impl LocalSource {
                 in_library: None,
             },
             description: details.description,
+            genres: details.genres,
             chapters,
         })
     }

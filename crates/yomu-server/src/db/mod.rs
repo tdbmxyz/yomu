@@ -139,6 +139,29 @@ async fn insert_chapters(
     Ok(())
 }
 
+/// Replace a manga's genre rows within a transaction.
+async fn write_genres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    manga_id: Uuid,
+    genres: &[String],
+) -> Result<()> {
+    sqlx::query("DELETE FROM manga_genres WHERE manga_id = ?")
+        .bind(manga_id.to_string())
+        .execute(&mut **tx)
+        .await?;
+    for genre in genres {
+        sqlx::query(
+            "INSERT INTO manga_genres (manga_id, genre) VALUES (?, ?)
+             ON CONFLICT (manga_id, genre) DO NOTHING",
+        )
+        .bind(manga_id.to_string())
+        .bind(genre)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 fn parse_uuid(s: String) -> Result<Uuid> {
     Uuid::parse_str(&s).map_err(|_| DbError::Corrupt(format!("invalid uuid {s:?}")))
 }
@@ -180,6 +203,8 @@ impl TryFrom<MangaRow> for Manga {
             cover_url: parse_url_opt(row.cover_url)?,
             auto_download: row.auto_download,
             category: row.category,
+            // Genres live in manga_genres; accessors attach them.
+            genres: Vec::new(),
             added_at: row.added_at,
             last_checked_at: row.last_checked_at,
         })
@@ -327,6 +352,7 @@ mod tests {
                 in_library: None,
             },
             description: Some("desc".into()),
+            genres: Vec::new(),
             chapters: chapters
                 .iter()
                 .enumerate()
@@ -339,6 +365,17 @@ mod tests {
                     published_at: None,
                 })
                 .collect(),
+        }
+    }
+
+    fn details_with_genres(
+        key: &str,
+        chapters: &[(&str, Option<f64>)],
+        genres: &[&str],
+    ) -> MangaDetails {
+        MangaDetails {
+            genres: genres.iter().map(|g| g.to_string()).collect(),
+            ..details(key, chapters)
         }
     }
 
@@ -484,6 +521,43 @@ mod tests {
             (again.manga, again.chapters, again.read_marks, again.progress_events),
             (0, 0, 0, 0)
         );
+    }
+
+    #[tokio::test]
+    async fn genres_are_stored_and_batched() {
+        let db = Db::in_memory().await.unwrap();
+        let a = db
+            .insert_manga(
+                "fixture",
+                &details_with_genres("m1", &[("c1", Some(1.0))], &["Action", "Fantasy"]),
+                false,
+            )
+            .await
+            .unwrap();
+        let b = db
+            .insert_manga(
+                "fixture",
+                &details_with_genres("m2", &[("c1", Some(1.0))], &["Fantasy", "Romance"]),
+                false,
+            )
+            .await
+            .unwrap();
+
+        // insert_manga returns the genres it wrote; get_manga reloads them.
+        assert_eq!(a.genres, vec!["Action", "Fantasy"]);
+        assert_eq!(db.get_manga(a.id).await.unwrap().genres, vec!["Action", "Fantasy"]);
+        // list_manga attaches genres per row from one grouped query.
+        let listed = db.list_manga().await.unwrap();
+        let listed_b = listed.iter().find(|m| m.id == b.id).unwrap();
+        assert_eq!(listed_b.genres, vec!["Fantasy", "Romance"]);
+
+        // set_genres is replace-all, not additive.
+        db.set_genres(a.id, &["Drama".into()]).await.unwrap();
+        assert_eq!(db.genres_for(a.id).await.unwrap(), vec!["Drama"]);
+
+        let map = db.genres_by_manga().await.unwrap();
+        assert_eq!(map.get(&a.id).unwrap(), &vec!["Drama".to_string()]);
+        assert_eq!(map.get(&b.id).unwrap(), &vec!["Fantasy".to_string(), "Romance".into()]);
     }
 
     #[tokio::test]

@@ -62,6 +62,9 @@ impl Db {
             .bind(manga.last_checked_at)
             .execute(&mut *tx)
             .await?;
+            // Genres ride along whether or not the manga row was new, so a
+            // restore refreshes tags on manga already present.
+            write_genres(&mut tx, manga.id, &manga.genres).await?;
             summary.manga += r.rows_affected() as u32;
         }
 

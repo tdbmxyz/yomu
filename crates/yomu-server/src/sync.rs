@@ -28,6 +28,7 @@ pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<Vec<Chapte
 
     let details = source.manga(&manga.source_key).await?;
     let sync = state.db.sync_chapters(manga.id, &details.chapters).await?;
+    state.db.set_genres(manga.id, &details.genres).await?;
     state.db.set_last_checked(manga.id, Utc::now()).await?;
 
     // The DB layer only moves rows; apply its page-directory follow-ups

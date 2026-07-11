@@ -100,6 +100,10 @@ pub struct MangaSpec {
     pub description: Option<String>,
     #[serde(default)]
     pub cover: Option<String>,
+    /// Selector matching each genre/tag element on the manga page; the
+    /// trimmed text of every match is collected (deduplicated). Optional.
+    #[serde(default)]
+    pub genres: Option<String>,
     /// Some sites load the chapter list as an HTML fragment from a
     /// separate endpoint (htmx-style) instead of rendering it into the
     /// manga page. Template substituting `{url}` (the manga page URL) and
@@ -238,7 +242,36 @@ impl Rule {
             Some(selector) => el.select(selector).next()?,
             None => el,
         };
-        let value = match &self.attr {
+        Self::value_of(target, self.attr.as_deref())
+    }
+
+    /// Extract from *every* match under `el`, in document order and
+    /// deduplicated — for list rules like genres. An attribute-less,
+    /// selector-less rule yields at most `el` itself.
+    fn extract_all(&self, el: ElementRef) -> Vec<String> {
+        let mut out = Vec::new();
+        match &self.selector {
+            Some(selector) => {
+                for target in el.select(selector) {
+                    if let Some(value) = Self::value_of(target, self.attr.as_deref())
+                        && !out.contains(&value)
+                    {
+                        out.push(value);
+                    }
+                }
+            }
+            None => {
+                if let Some(value) = Self::value_of(el, self.attr.as_deref()) {
+                    out.push(value);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whitespace-normalized attribute or text of `target`.
+    fn value_of(target: ElementRef, attr: Option<&str>) -> Option<String> {
+        let value = match attr {
             Some(attr) => target.value().attr(attr)?.to_string(),
             None => target.text().collect::<String>(),
         };
@@ -273,6 +306,7 @@ struct CompiledSpec {
     manga_title: Option<Rule>,
     manga_description: Option<Rule>,
     manga_cover: Option<Rule>,
+    manga_genres: Option<Rule>,
     chapter_item: Selector,
     chapter_title: Option<Rule>,
     chapter_link: Rule,
@@ -329,6 +363,7 @@ impl SelectorSource {
             manga_title: rule_opt(&spec.manga.title)?,
             manga_description: rule_opt(&spec.manga.description)?,
             manga_cover: rule_opt(&spec.manga.cover)?,
+            manga_genres: rule_opt(&spec.manga.genres)?,
             chapter_item: sel(&spec.manga.chapter_item)?,
             chapter_title: rule_opt(&spec.manga.chapter_title)?,
             chapter_link: Rule::parse(&spec.manga.chapter_link)?,
@@ -510,6 +545,12 @@ impl SelectorSource {
             .and_then(|r| r.extract(root))
             .and_then(|c| page_url.join(&c).ok())
             .map(|u| u.to_string());
+        let genres = self
+            .compiled
+            .manga_genres
+            .as_ref()
+            .map(|r| r.extract_all(root))
+            .unwrap_or_default();
 
         let chapters_doc = Html::parse_document(chapters_html);
         let mut chapters = Vec::new();
@@ -574,6 +615,7 @@ impl SelectorSource {
                 in_library: None,
             },
             description,
+            genres,
             chapters,
         })
     }

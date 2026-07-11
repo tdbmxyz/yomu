@@ -38,6 +38,7 @@ impl Db {
             _ => DbError::Sqlx(e),
         })?;
         insert_chapters(&mut tx, id, &details.chapters, now).await?;
+        write_genres(&mut tx, id, &details.genres).await?;
         tx.commit().await?;
         self.get_manga(id).await
     }
@@ -48,7 +49,9 @@ impl Db {
             .fetch_optional(&self.pool)
             .await?
             .ok_or(DbError::NotFound)?;
-        Manga::try_from(row)
+        let mut manga = Manga::try_from(row)?;
+        manga.genres = self.genres_for(id).await?;
+        Ok(manga)
     }
 
     pub async fn list_manga(&self) -> Result<Vec<Manga>> {
@@ -56,7 +59,49 @@ impl Db {
             sqlx::query_as::<_, MangaRow>("SELECT * FROM manga ORDER BY title COLLATE NOCASE")
                 .fetch_all(&self.pool)
                 .await?;
-        rows.into_iter().map(Manga::try_from).collect()
+        let mut genres = self.genres_by_manga().await?;
+        rows.into_iter()
+            .map(|row| {
+                let mut manga = Manga::try_from(row)?;
+                manga.genres = genres.remove(&manga.id).unwrap_or_default();
+                Ok(manga)
+            })
+            .collect()
+    }
+
+    /// Genres of one manga, alphabetically.
+    pub async fn genres_for(&self, manga_id: Uuid) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT genre FROM manga_genres WHERE manga_id = ? ORDER BY genre COLLATE NOCASE",
+        )
+        .bind(manga_id.to_string())
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// All genres grouped by manga, for the library list (one query).
+    pub async fn genres_by_manga(
+        &self,
+    ) -> Result<std::collections::HashMap<Uuid, Vec<String>>> {
+        let rows = sqlx::query(
+            "SELECT manga_id, genre FROM manga_genres ORDER BY genre COLLATE NOCASE",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: std::collections::HashMap<Uuid, Vec<String>> = std::collections::HashMap::new();
+        for row in rows {
+            let manga_id = parse_uuid(row.get::<String, _>("manga_id"))?;
+            out.entry(manga_id).or_default().push(row.get("genre"));
+        }
+        Ok(out)
+    }
+
+    /// Replace a manga's genres (used on add and on refresh).
+    pub async fn set_genres(&self, manga_id: Uuid, genres: &[String]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        write_genres(&mut tx, manga_id, genres).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Per-manga chapter rollups for the library list, in one grouped query
