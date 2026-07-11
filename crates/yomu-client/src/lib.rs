@@ -24,21 +24,13 @@ pub enum ClientError {
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-/// On wasm, `fetch` defaults to same-origin credentials, so a frontend
-/// pointed at a *different* host than the API (remote `yomu-api-base`)
-/// never sends the session cookie and every authenticated call 401s.
-/// Force-include credentials. No-op on native (reqwest carries its own
-/// cookie handling there).
-fn with_credentials(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req.fetch_credentials_include()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        req
-    }
-}
+// NB: the wasm client deliberately keeps `fetch`'s default (same-origin)
+// credentials mode. Forcing `credentials: include` breaks every cross-origin
+// deployment whose server uses wildcard CORS — a credentialed request may not
+// use `Access-Control-Allow-Origin: *` — which is exactly how the native
+// shells reach a LAN server. Cross-site cookie auth would need `SameSite=None`
+// cookies *and* credentialed CORS anyway, so this shim never worked; it only
+// broke the common no-auth cross-origin path.
 
 #[derive(Debug, Clone)]
 pub struct YomuClient {
@@ -332,7 +324,7 @@ impl YomuClient {
     }
 
     async fn check_status(req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let resp = with_credentials(req)
+        let resp = req
             .send()
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;

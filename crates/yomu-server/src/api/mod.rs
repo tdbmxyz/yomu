@@ -89,10 +89,14 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
 }
 
-/// CORS policy. The served-frontend deployment is same-origin and needs no
-/// CORS at all; a cross-origin frontend must be named explicitly because
-/// credentialed requests (our session cookie) forbid a `*` origin. An
-/// invalid origin string is dropped with a warning rather than failing boot.
+/// CORS policy. Default (no `allowed_origins`) is permissive: any origin,
+/// no credentials. That's what the native shells (Android/desktop pointed at
+/// a LAN server) and a separately-hosted web frontend rely on, and it's safe
+/// now that every mutating route requires a session — a credentialed request
+/// may not use a wildcard `Access-Control-Allow-Origin`, so `*` cannot ride a
+/// user's cookie. Set `allowed_origins` to switch to a credentialed allowlist
+/// (for a cross-origin frontend that authenticates with cookies). An invalid
+/// origin string is dropped with a warning rather than failing boot.
 fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
     let origins: Vec<HeaderValue> = allowed_origins
         .iter()
@@ -105,7 +109,7 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
         })
         .collect();
     if origins.is_empty() {
-        return CorsLayer::new();
+        return CorsLayer::permissive();
     }
     CorsLayer::new()
         .allow_credentials(true)
@@ -188,5 +192,28 @@ mod tests {
     #[tokio::test]
     async fn health_stays_open() {
         assert_eq!(status_of("GET", "/api/v1/health").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn default_cors_is_permissive_for_cross_origin_clients() {
+        // No allowed_origins configured (the default): a cross-origin request
+        // — the native shells and PWAs pointed at a LAN server — must get a
+        // permissive `Access-Control-Allow-Origin`, or their fetches are
+        // blocked. This is the 1.8.0 → 1.8.1 regression guard.
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(Config::default(), db, Registry::default(), None);
+        let router = super::router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/health")
+            .header("origin", "https://tauri.localhost")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let acao = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(acao, Some("*"), "default CORS must allow any origin");
     }
 }
