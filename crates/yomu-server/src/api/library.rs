@@ -42,39 +42,37 @@ pub async fn list(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
 ) -> Result<Json<Vec<MangaWithPosition>>, ApiError> {
-    let mut out = Vec::new();
-    for manga in state.db.list_manga().await? {
-        let position = match &user {
-            Some(user) => state.db.latest_position(user.id, manga.id).await?,
-            None => None,
-        };
-        let chapters = state.db.list_chapters(manga.id).await?;
-        let chapter_count = chapters.len() as u32;
-        let read = match &user {
-            Some(user) => state.db.read_ids(user.id, manga.id).await?,
-            None => Default::default(),
-        };
-        let unread_count = chapters.iter().filter(|c| !read.contains(&c.id)).count() as u32;
-        let downloaded_count = chapters
-            .iter()
-            .filter(|c| matches!(c.download, yomu_domain::DownloadState::Downloaded { .. }))
-            .count() as u32;
-        let position_chapter_title = position.as_ref().and_then(|p| {
-            chapters
-                .iter()
-                .find(|c| c.id == p.chapter_id)
-                .map(|c| c.title.clone())
-        });
-        out.push(MangaWithPosition {
-            manga,
-            position,
-            chapter_count,
-            unread_count,
-            downloaded_count,
-            latest_chapter_at: chapters.iter().map(|c| c.fetched_at).max(),
-            position_chapter_title,
-        });
-    }
+    // Three queries total, not 3N+1: chapter rollups (counts + latest) and
+    // per-manga positions come back grouped, keyed by manga id.
+    let rollup_scope = user.as_ref().map(|u| u.id.to_string()).unwrap_or_default();
+    let mut rollups = state.db.library_rollups(&rollup_scope).await?;
+    let mut positions = match &user {
+        Some(user) => state.db.latest_positions(user.id).await?,
+        None => Default::default(),
+    };
+
+    let out = state
+        .db
+        .list_manga()
+        .await?
+        .into_iter()
+        .map(|manga| {
+            let rollup = rollups.remove(&manga.id).unwrap_or_default();
+            let (position, position_chapter_title) = match positions.remove(&manga.id) {
+                Some((position, title)) => (Some(position), title),
+                None => (None, None),
+            };
+            MangaWithPosition {
+                position,
+                chapter_count: rollup.chapter_count,
+                unread_count: rollup.unread_count,
+                downloaded_count: rollup.downloaded_count,
+                latest_chapter_at: rollup.latest_chapter_at,
+                position_chapter_title,
+                manga,
+            }
+        })
+        .collect();
     Ok(Json(out))
 }
 

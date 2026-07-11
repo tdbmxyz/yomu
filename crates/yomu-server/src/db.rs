@@ -40,6 +40,15 @@ pub struct ChapterSync {
     pub file_ops: Vec<ChapterFileOp>,
 }
 
+/// Per-manga chapter aggregates for the library list (see `library_rollups`).
+#[derive(Debug, Clone, Default)]
+pub struct LibraryRollup {
+    pub chapter_count: u32,
+    pub downloaded_count: u32,
+    pub unread_count: u32,
+    pub latest_chapter_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChapterFileOp {
     /// The chapter row was deleted; drop its page directory.
@@ -145,6 +154,81 @@ impl Db {
                 .fetch_all(&self.pool)
                 .await?;
         rows.into_iter().map(Manga::try_from).collect()
+    }
+
+    /// Per-manga chapter rollups for the library list, in one grouped query
+    /// instead of a `list_chapters` + `read_ids` pair per manga. `user_id`
+    /// scopes the unread count; pass the shared user (or, when signed out,
+    /// any id that matches no reader — an empty string — so nothing counts
+    /// as read).
+    pub async fn library_rollups(
+        &self,
+        user_id: &str,
+    ) -> Result<std::collections::HashMap<Uuid, LibraryRollup>> {
+        let rows = sqlx::query(
+            "SELECT c.manga_id AS manga_id,
+                    COUNT(*) AS chapter_count,
+                    SUM(CASE WHEN c.download_state = 'downloaded' THEN 1 ELSE 0 END)
+                        AS downloaded_count,
+                    SUM(CASE WHEN r.chapter_id IS NULL THEN 1 ELSE 0 END) AS unread_count,
+                    MAX(c.fetched_at) AS latest_chapter_at
+             FROM chapters c
+             LEFT JOIN read_chapters r ON r.chapter_id = c.id AND r.user_id = ?
+             GROUP BY c.manga_id",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    parse_uuid(row.get::<String, _>("manga_id"))?,
+                    LibraryRollup {
+                        chapter_count: row.get::<i64, _>("chapter_count") as u32,
+                        downloaded_count: row.get::<i64, _>("downloaded_count") as u32,
+                        unread_count: row.get::<i64, _>("unread_count") as u32,
+                        latest_chapter_at: row.get("latest_chapter_at"),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Every manga's merged current position for one user, plus the position
+    /// chapter's title, in a single window-function query (the same
+    /// max-at/id-tie-break as `latest_position`).
+    pub async fn latest_positions(
+        &self,
+        user_id: Uuid,
+    ) -> Result<std::collections::HashMap<Uuid, (Position, Option<String>)>> {
+        let rows = sqlx::query(
+            "SELECT p.manga_id AS manga_id, p.chapter_id AS chapter_id, p.page AS page,
+                    p.at AS at, ch.title AS title
+             FROM (
+                 SELECT manga_id, chapter_id, page, at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY manga_id ORDER BY at DESC, id DESC
+                        ) AS rn
+                 FROM progress_events WHERE user_id = ?
+             ) p
+             LEFT JOIN chapters ch ON ch.id = p.chapter_id
+             WHERE p.rn = 1",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let manga_id = parse_uuid(row.get::<String, _>("manga_id"))?;
+                let position = Position {
+                    chapter_id: parse_uuid(row.get::<String, _>("chapter_id"))?,
+                    page: row.get::<i64, _>("page") as u32,
+                    at: row.get("at"),
+                };
+                let title: Option<String> = row.get("title");
+                Ok((manga_id, (position, title)))
+            })
+            .collect()
     }
 
     pub async fn set_auto_download(&self, id: Uuid, auto_download: bool) -> Result<Manga> {
@@ -1236,6 +1320,54 @@ mod tests {
         assert!(matches!(after[0].download, DownloadState::None));
         // page_count survives: still true knowledge about the chapter
         assert_eq!(after[0].page_count, Some(9));
+    }
+
+    #[tokio::test]
+    async fn library_rollups_and_positions_are_batched_per_manga() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        // list_chapters order: number asc → c1 then c2.
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        db.mark_pending(&[chapters[0].id]).await.unwrap();
+        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
+        db.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        db.append_event(
+            SHARED,
+            &ProgressEvent {
+                id: Uuid::from_u128(1),
+                manga_id: manga.id,
+                chapter_id: chapters[1].id,
+                page: 3,
+                device: "test".into(),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let rollups = db.library_rollups(&SHARED.to_string()).await.unwrap();
+        let rollup = rollups.get(&manga.id).unwrap();
+        assert_eq!(rollup.chapter_count, 2);
+        assert_eq!(rollup.downloaded_count, 1);
+        assert_eq!(rollup.unread_count, 1); // one of two marked read
+        assert!(rollup.latest_chapter_at.is_some());
+
+        let positions = db.latest_positions(SHARED).await.unwrap();
+        let (position, title) = positions.get(&manga.id).unwrap();
+        assert_eq!(position.chapter_id, chapters[1].id);
+        assert_eq!(position.page, 3);
+        assert_eq!(title.as_deref(), Some(chapters[1].title.as_str()));
+
+        // Signed-out scope (no matching user) counts nothing as read.
+        let anon = db.library_rollups("").await.unwrap();
+        assert_eq!(anon.get(&manga.id).unwrap().unread_count, 2);
     }
 
     #[tokio::test]
