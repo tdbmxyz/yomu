@@ -186,8 +186,12 @@ fn ReaderInner() -> impl IntoView {
         move |_| {
             if page_count() > 0 && !opened.get_value() {
                 opened.set_value(true);
-                if wants_end {
-                    let last = page_count().saturating_sub(1);
+                let last = page_count().saturating_sub(1);
+                // "?page=end" resolves to the last page; any other opening
+                // page is clamped so a stale or hand-edited ?page= (or a
+                // chapter that shrank server-side) can't open a blank panel
+                // and journal an out-of-range position.
+                if wants_end || page.get_untracked() > last {
                     page.set(last);
                     pos.set(last as i64);
                 }
@@ -195,21 +199,6 @@ fn ReaderInner() -> impl IntoView {
             }
         }
     });
-    let turn = {
-        let report = report.clone();
-        move |delta: i64| {
-            let count = page_count();
-            if count == 0 {
-                return;
-            }
-            let current = page.get_untracked() as i64;
-            let next = (current + delta).clamp(0, count as i64 - 1) as u32;
-            if next != current as u32 {
-                page.set(next);
-                report(chapter_id, next);
-            }
-        }
-    };
 
     let neighbours = move || {
         let chapters = detail.get().and_then(|r| r.ok()).map(|d| d.chapters)?;
@@ -300,25 +289,47 @@ fn ReaderInner() -> impl IntoView {
         }
     };
 
-    let key_turn = turn.clone();
-    let key_request = request_turn.clone();
-    let key_handle = window_event_listener(leptos::ev::keydown, move |ev| {
-        // In RTL the previous page is on the right.
-        let forward: i64 = match dir.get_untracked() {
-            ReaderDirection::Ltr => 1,
-            ReaderDirection::Rtl => -1,
-        };
-        let delta = match ev.key().as_str() {
-            "ArrowLeft" => -forward,
-            "ArrowRight" => forward,
-            _ => return,
-        };
-        match mode.get_untracked() {
-            ReaderMode::Paged => key_request(delta),
-            ReaderMode::Vertical => key_turn(delta),
+    // Land an armed turn: what the track's `transitionend` normally does.
+    // Reads the pending delta from `snap` so it is safe to call from either
+    // the transition handler or the deadlock fallback below.
+    let finish_snap = {
+        let commit = commit_pos.clone();
+        move || {
+            if let Some(delta) = snap.get_untracked() {
+                snap.set(None);
+                drag.set(0.0);
+                commit(pos.get_untracked() + delta);
+            }
+        }
+    };
+    // Deadlock guard: a committed turn clears `snap` on the track's
+    // `transitionend`. When that event never fires — prefers-reduced-motion,
+    // a user `transition: none`, or a transform equal to the current one —
+    // `snap` would stay `Some` forever and every further turn early-returns.
+    // Each time a snap is armed, schedule a fallback that lands it; a
+    // generation tag makes a superseded timer a no-op so it can't commit a
+    // later turn early.
+    let snap_gen = StoredValue::new(0_u64);
+    Effect::new({
+        let finish_snap = finish_snap.clone();
+        move |_| {
+            if snap.get().is_none() {
+                return;
+            }
+            snap_gen.update_value(|g| *g += 1);
+            let generation = snap_gen.get_value();
+            let finish = finish_snap.clone();
+            set_timeout(
+                move || {
+                    if snap_gen.get_value() == generation && snap.get_untracked().is_some() {
+                        finish();
+                    }
+                },
+                std::time::Duration::from_millis(400),
+            );
         }
     });
-    on_cleanup(move || key_handle.remove());
+
 
     let toggle_mode = {
         let reroute = reroute.clone();
@@ -375,7 +386,7 @@ fn ReaderInner() -> impl IntoView {
     });
 
     let request_view = request_turn.clone();
-    let commit_view = commit_pos.clone();
+    let finish_view = finish_snap.clone();
     let report_scroll = report.clone();
     let client_paged = use_client();
     let client_vertical = use_client();
@@ -415,6 +426,26 @@ fn ReaderInner() -> impl IntoView {
         }
     };
 
+    // Arrow keys drive `go_page`, which routes per mode: paged turns the
+    // pager, vertical scrolls the strip to the adjacent page (so the scroll
+    // handler journals the position). Calling the paged-only `turn` here
+    // used to move the counter and report a page the strip never scrolled to.
+    let key_go_page = go_page.clone();
+    let key_handle = window_event_listener(leptos::ev::keydown, move |ev| {
+        // In RTL the previous page is on the right.
+        let forward: i64 = match dir.get_untracked() {
+            ReaderDirection::Ltr => 1,
+            ReaderDirection::Rtl => -1,
+        };
+        let delta = match ev.key().as_str() {
+            "ArrowLeft" => -forward,
+            "ArrowRight" => forward,
+            _ => return,
+        };
+        key_go_page(delta);
+    });
+    on_cleanup(move || key_handle.remove());
+
     view! {
         <div
             class="reader-overlay"
@@ -437,7 +468,7 @@ fn ReaderInner() -> impl IntoView {
 
             {move || {
                 let request = request_view.clone();
-                let commit = commit_view.clone();
+                let finish = finish_view.clone();
                 let report = report_scroll.clone();
                 match pages.get() {
                     None => view! { <p class="muted reader-msg">"Loading pages…"</p> }.into_any(),
@@ -810,16 +841,12 @@ fn ReaderInner() -> impl IntoView {
                                 }
                             };
                             let on_transitionend = {
-                                let commit = commit.clone();
+                                let finish = finish.clone();
                                 move |ev: leptos::ev::TransitionEvent| {
                                     if ev.property_name() != "transform" {
                                         return;
                                     }
-                                    if let Some(delta) = snap.get_untracked() {
-                                        snap.set(None);
-                                        drag.set(0.0);
-                                        commit(pos.get_untracked() + delta);
-                                    }
+                                    finish();
                                 }
                             };
                             view! {
