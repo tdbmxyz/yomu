@@ -1062,6 +1062,176 @@ impl Db {
                 .await?,
         )
     }
+
+    // ---- backup / restore ----
+
+    /// Every chapter row, for a backup. Read state is per-user and travels
+    /// separately (see `read_all_ids`); `read` is left false here.
+    pub async fn export_chapters(&self) -> Result<Vec<Chapter>> {
+        let rows = sqlx::query_as::<_, ChapterRow>("SELECT * FROM chapters ORDER BY manga_id")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(Chapter::try_from).collect()
+    }
+
+    /// Every chapter id this user has marked read (across all manga).
+    pub async fn read_all_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>> {
+        let rows =
+            sqlx::query_scalar::<_, String>("SELECT chapter_id FROM read_chapters WHERE user_id = ?")
+                .bind(user_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter().map(parse_uuid).collect()
+    }
+
+    /// This user's entire progress journal, for a backup.
+    pub async fn export_events(&self, user_id: Uuid) -> Result<Vec<ProgressEvent>> {
+        let rows = sqlx::query_as::<_, EventRow>(
+            "SELECT * FROM progress_events WHERE user_id = ? ORDER BY seq",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(ProgressEvent::try_from).collect()
+    }
+
+    /// Merge a backup into this instance for `user_id`. Idempotent and
+    /// additive: existing manga/chapters/categories are kept as-is, new ones
+    /// inserted; read marks and progress events replay by primary key.
+    /// Chapters land with their download state reset — the backup carries no
+    /// page files. Returns per-table counts of rows that were actually new.
+    pub async fn import_backup(
+        &self,
+        user_id: Uuid,
+        backup: &yomu_domain::Backup,
+    ) -> Result<yomu_domain::RestoreSummary> {
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now();
+        let mut summary = yomu_domain::RestoreSummary {
+            manga: 0,
+            chapters: 0,
+            categories: 0,
+            read_marks: 0,
+            progress_events: 0,
+        };
+
+        for category in &backup.categories {
+            let r = sqlx::query(
+                "INSERT INTO categories (id, name, position, update_enabled)
+                 VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&category.id)
+            .bind(&category.name)
+            .bind(category.position)
+            .bind(category.update_enabled)
+            .execute(&mut *tx)
+            .await?;
+            summary.categories += r.rows_affected() as u32;
+        }
+
+        for manga in &backup.manga {
+            let r = sqlx::query(
+                "INSERT INTO manga (id, source_id, source_key, title, description, cover_url,
+                                    auto_download, category, added_at, last_checked_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(manga.id.to_string())
+            .bind(&manga.source_id)
+            .bind(&manga.source_key)
+            .bind(&manga.title)
+            .bind(&manga.description)
+            .bind(manga.cover_url.as_ref().map(|u| u.as_str()))
+            .bind(manga.auto_download)
+            .bind(&manga.category)
+            .bind(manga.added_at)
+            .bind(manga.last_checked_at)
+            .execute(&mut *tx)
+            .await?;
+            summary.manga += r.rows_affected() as u32;
+        }
+
+        for chapter in &backup.chapters {
+            // Download state is intentionally dropped: the pages aren't in
+            // the backup, so a restored chapter reads live until re-downloaded.
+            // page_count is kept — it's true knowledge, not a local artifact.
+            let r = sqlx::query(
+                "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
+                                       scanlator, fetched_at, published_at, page_count)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(chapter.id.to_string())
+            .bind(chapter.manga_id.to_string())
+            .bind(&chapter.source_key)
+            .bind(&chapter.title)
+            .bind(chapter.number)
+            .bind(chapter.source_order)
+            .bind(&chapter.scanlator)
+            .bind(chapter.fetched_at)
+            .bind(chapter.published_at)
+            .bind(chapter.page_count)
+            .execute(&mut *tx)
+            .await?;
+            summary.chapters += r.rows_affected() as u32;
+        }
+
+        for chapter_id in &backup.read_chapter_ids {
+            // Skip marks whose chapter didn't come along — the FK would reject
+            // them and one stale id must not fail the whole restore.
+            let known: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chapters WHERE id = ?)")
+                    .bind(chapter_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !known {
+                continue;
+            }
+            let r = sqlx::query(
+                "INSERT INTO read_chapters (user_id, chapter_id, at) VALUES (?, ?, ?)
+                 ON CONFLICT (user_id, chapter_id) DO NOTHING",
+            )
+            .bind(user_id.to_string())
+            .bind(chapter_id.to_string())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            summary.read_marks += r.rows_affected() as u32;
+        }
+
+        for event in &backup.progress {
+            let manga_known: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM manga WHERE id = ?)")
+                    .bind(event.manga_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let chapter_known: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chapters WHERE id = ?)")
+                    .bind(event.chapter_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !manga_known || !chapter_known {
+                continue;
+            }
+            let r = sqlx::query(
+                "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(event.id.to_string())
+            .bind(user_id.to_string())
+            .bind(event.manga_id.to_string())
+            .bind(event.chapter_id.to_string())
+            .bind(event.page)
+            .bind(&event.device)
+            .bind(event.at)
+            .execute(&mut *tx)
+            .await?;
+            summary.progress_events += r.rows_affected() as u32;
+        }
+
+        tx.commit().await?;
+        Ok(summary)
+    }
 }
 
 async fn insert_chapters(
@@ -1368,6 +1538,75 @@ mod tests {
         // Signed-out scope (no matching user) counts nothing as read.
         let anon = db.library_rollups("").await.unwrap();
         assert_eq!(anon.get(&manga.id).unwrap().unread_count, 2);
+    }
+
+    #[tokio::test]
+    async fn backup_round_trips_into_a_fresh_instance() {
+        use yomu_domain::Backup;
+
+        let source = Db::in_memory().await.unwrap();
+        let manga = source
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                true,
+            )
+            .await
+            .unwrap();
+        let chapters = source.list_chapters(manga.id).await.unwrap();
+        source.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        source
+            .append_event(
+                SHARED,
+                &ProgressEvent {
+                    id: Uuid::from_u128(7),
+                    manga_id: manga.id,
+                    chapter_id: chapters[1].id,
+                    page: 5,
+                    device: "test".into(),
+                    at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let backup = Backup {
+            version: yomu_domain::BACKUP_VERSION,
+            exported_at: Utc::now(),
+            categories: source.list_categories().await.unwrap(),
+            manga: source.list_manga().await.unwrap(),
+            chapters: source.export_chapters().await.unwrap(),
+            read_chapter_ids: source.read_all_ids(SHARED).await.unwrap(),
+            progress: source.export_events(SHARED).await.unwrap(),
+        };
+
+        let target = Db::in_memory().await.unwrap();
+        let summary = target.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(summary.manga, 1);
+        assert_eq!(summary.chapters, 2);
+        assert_eq!(summary.read_marks, 1);
+        assert_eq!(summary.progress_events, 1);
+
+        // The restored instance mirrors the source's library and reading state.
+        let restored = target.list_manga().await.unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, manga.id);
+        assert!(restored[0].auto_download);
+        let read = target.read_ids(SHARED, manga.id).await.unwrap();
+        assert!(read.contains(&chapters[0].id));
+        let position = target.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        assert_eq!(position.chapter_id, chapters[1].id);
+        assert_eq!(position.page, 5);
+        // Restored chapters read live (no page files travelled with the backup).
+        let restored_chapters = target.list_chapters(manga.id).await.unwrap();
+        assert!(restored_chapters.iter().all(|c| matches!(c.download, DownloadState::None)));
+
+        // Re-importing is idempotent: nothing new lands the second time.
+        let again = target.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(
+            (again.manga, again.chapters, again.read_marks, again.progress_events),
+            (0, 0, 0, 0)
+        );
     }
 
     #[tokio::test]

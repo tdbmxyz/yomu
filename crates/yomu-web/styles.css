@@ -270,6 +270,30 @@ button.primary,
   font-weight: 600;
 }
 
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.backup-status {
+  margin-top: 0.6rem;
+}
+
+/* Off-screen but still focusable/clickable (the restore file input lives
+   inside its .button label). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 button.danger:hover {
   border-color: var(--down);
   color: var(--down);

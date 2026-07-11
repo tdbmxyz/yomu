@@ -4,11 +4,11 @@
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    AddMangaRequest, ApiErrorBody, BrowseSort, BulkChaptersResponse, Category, Chapter,
+    AddMangaRequest, ApiErrorBody, Backup, BrowseSort, BulkChaptersResponse, Category, Chapter,
     DownloadChaptersRequest, EventsResponse, HealthResponse, Manga, MangaDetailResponse,
     MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse, PagesResponse, Position,
-    PushEventsRequest, PushEventsResponse, RefreshResponse, SetPositionRequest, SourceInfo,
-    SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
+    PushEventsRequest, PushEventsResponse, RefreshResponse, RestoreSummary, SetPositionRequest,
+    SourceInfo, SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -156,6 +156,17 @@ impl YomuClient {
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
         self.base.join(&format!("api/v1/manga/{id}/cover")).ok()
+    }
+
+    // ---- backup / restore ----
+
+    pub async fn backup(&self) -> Result<Backup> {
+        self.get("api/v1/backup").await
+    }
+
+    pub async fn restore(&self, backup: &Backup) -> Result<RestoreSummary> {
+        let req = self.http.post(self.url("api/v1/restore")?).json(backup);
+        self.send(req).await
     }
 
     // ---- categories ----

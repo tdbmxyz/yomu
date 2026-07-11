@@ -7,12 +7,14 @@
 
 pub mod api;
 pub mod auth;
+pub mod backup;
 pub mod library;
 pub mod progress;
 pub mod source;
 
 pub use api::*;
 pub use auth::*;
+pub use backup::*;
 pub use library::*;
 pub use progress::*;
 pub use source::*;

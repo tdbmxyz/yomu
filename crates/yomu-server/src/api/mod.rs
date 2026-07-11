@@ -1,6 +1,7 @@
 //! HTTP API (`/api/v1`) and static frontend serving.
 
 mod auth;
+mod backup;
 mod categories;
 mod chapters;
 mod error;
@@ -66,6 +67,8 @@ pub fn router(state: AppState) -> Router {
             "/progress/events",
             get(progress::events).post(progress::push_events),
         )
+        .route("/backup", get(backup::export))
+        .route("/restore", axum::routing::post(backup::restore))
         .with_state(state.clone());
 
     let mut app = Router::new().nest("/api/v1", api);
