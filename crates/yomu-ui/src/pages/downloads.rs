@@ -64,7 +64,11 @@ fn DownloadsView(
     refetch: impl Fn() + Clone + 'static + Send,
 ) -> impl IntoView {
     let split = |want: fn(&DownloadState) -> bool| -> Vec<DownloadQueueEntry> {
-        resp.queue.iter().filter(|e| want(&e.state)).cloned().collect()
+        resp.queue
+            .iter()
+            .filter(|e| want(&e.state))
+            .cloned()
+            .collect()
     };
     let downloading = split(|s| matches!(s, DownloadState::Downloading));
     let pending = split(|s| matches!(s, DownloadState::Pending));

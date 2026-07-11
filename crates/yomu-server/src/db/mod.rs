@@ -583,7 +583,10 @@ mod tests {
         let manga = db
             .insert_manga(
                 "fixture",
-                &details("m1", &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))]),
+                &details(
+                    "m1",
+                    &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))],
+                ),
                 false,
             )
             .await
@@ -595,7 +598,9 @@ mod tests {
         db.mark_pending(&[downloaded]).await.unwrap();
         db.finish_download(downloaded, Ok(5)).await.unwrap();
         db.mark_pending(&[failed]).await.unwrap();
-        db.finish_download(failed, Err("boom".into())).await.unwrap();
+        db.finish_download(failed, Err("boom".into()))
+            .await
+            .unwrap();
 
         // Queue holds pending + failed but not the downloaded chapter.
         let queue = db.download_queue().await.unwrap();
@@ -611,8 +616,17 @@ mod tests {
         assert_eq!(titles.get(&manga.id).unwrap(), &manga.title);
 
         // dismiss drops pending|failed → none, not downloaded.
-        assert_eq!(db.dismiss_downloads(&[pending, downloaded]).await.unwrap(), 1);
-        assert!(!db.download_queue().await.unwrap().iter().any(|c| c.id == pending));
+        assert_eq!(
+            db.dismiss_downloads(&[pending, downloaded]).await.unwrap(),
+            1
+        );
+        assert!(
+            !db.download_queue()
+                .await
+                .unwrap()
+                .iter()
+                .any(|c| c.id == pending)
+        );
 
         // retry_failed re-queues only failed rows.
         assert_eq!(db.retry_failed(&[failed, downloaded]).await.unwrap(), 1);

@@ -166,22 +166,22 @@ impl YomuClient {
     }
 
     pub async fn retry_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
-        let req = self
-            .http
-            .post(self.url("api/v1/downloads/retry")?)
-            .json(&DownloadChaptersRequest {
-                chapter_ids: ids.to_vec(),
-            });
+        let req =
+            self.http
+                .post(self.url("api/v1/downloads/retry")?)
+                .json(&DownloadChaptersRequest {
+                    chapter_ids: ids.to_vec(),
+                });
         self.send(req).await
     }
 
     pub async fn dismiss_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
-        let req = self
-            .http
-            .post(self.url("api/v1/downloads/dismiss")?)
-            .json(&DownloadChaptersRequest {
-                chapter_ids: ids.to_vec(),
-            });
+        let req =
+            self.http
+                .post(self.url("api/v1/downloads/dismiss")?)
+                .json(&DownloadChaptersRequest {
+                    chapter_ids: ids.to_vec(),
+                });
         self.send(req).await
     }
 

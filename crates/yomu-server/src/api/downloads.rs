@@ -25,17 +25,15 @@ pub async fn list(
     let queue = chapters
         .into_iter()
         .map(|chapter| {
-            let progress = active
-                .filter(|a| a.chapter_id == chapter.id)
-                .map(|a| DownloadProgress {
-                    page: a.page,
-                    total: a.total,
-                });
+            let progress =
+                active
+                    .filter(|a| a.chapter_id == chapter.id)
+                    .map(|a| DownloadProgress {
+                        page: a.page,
+                        total: a.total,
+                    });
             DownloadQueueEntry {
-                manga_title: titles
-                    .get(&chapter.manga_id)
-                    .cloned()
-                    .unwrap_or_default(),
+                manga_title: titles.get(&chapter.manga_id).cloned().unwrap_or_default(),
                 chapter_id: chapter.id,
                 manga_id: chapter.manga_id,
                 chapter_title: chapter.title,
