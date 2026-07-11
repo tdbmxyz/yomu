@@ -152,9 +152,18 @@ pub fn effective_position(
 /// fetches actually land in the offline cache. False on the very first
 /// visit (registration pending), in webviews without SW support, etc.
 pub fn service_worker_active() -> bool {
-    web_sys::window()
-        .map(|w| w.navigator().service_worker().controller().is_some())
-        .unwrap_or(false)
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let sw = window.navigator().service_worker();
+    // `navigator.serviceWorker` is undefined in an insecure context (http on a
+    // non-localhost host); reading `.controller` on it throws rather than
+    // returning null, which would abort the page render. Same guard as the
+    // registration in yomu-web/src/main.rs.
+    if sw.is_undefined() {
+        return false;
+    }
+    sw.controller().is_some()
 }
 
 /// Fetch chapter metadata and every page image once. The service worker's
