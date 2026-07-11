@@ -306,7 +306,6 @@ fn ReaderInner() -> impl IntoView {
         }
     });
 
-
     let toggle_mode = {
         let reroute = reroute.clone();
         move |_| {

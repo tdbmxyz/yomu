@@ -80,15 +80,13 @@ impl Db {
     }
 
     /// All genres grouped by manga, for the library list (one query).
-    pub async fn genres_by_manga(
-        &self,
-    ) -> Result<std::collections::HashMap<Uuid, Vec<String>>> {
-        let rows = sqlx::query(
-            "SELECT manga_id, genre FROM manga_genres ORDER BY genre COLLATE NOCASE",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut out: std::collections::HashMap<Uuid, Vec<String>> = std::collections::HashMap::new();
+    pub async fn genres_by_manga(&self) -> Result<std::collections::HashMap<Uuid, Vec<String>>> {
+        let rows =
+            sqlx::query("SELECT manga_id, genre FROM manga_genres ORDER BY genre COLLATE NOCASE")
+                .fetch_all(&self.pool)
+                .await?;
+        let mut out: std::collections::HashMap<Uuid, Vec<String>> =
+            std::collections::HashMap::new();
         for row in rows {
             let manga_id = parse_uuid(row.get::<String, _>("manga_id"))?;
             out.entry(manga_id).or_default().push(row.get("genre"));

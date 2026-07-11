@@ -56,10 +56,8 @@ pub fn More() -> impl IntoView {
                     Ok(backup) => match serde_json::to_string(&backup) {
                         Ok(json) => {
                             if download_json("yomu-backup.json", &json).is_ok() {
-                                backup_status.set(Some(format!(
-                                    "Exported {} manga.",
-                                    backup.manga.len()
-                                )));
+                                backup_status
+                                    .set(Some(format!("Exported {} manga.", backup.manga.len())));
                             } else {
                                 backup_status.set(Some("Could not start the download.".into()));
                             }

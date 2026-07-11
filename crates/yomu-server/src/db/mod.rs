@@ -4,12 +4,10 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use uuid::Uuid;
-use yomu_domain::{
-    Category, Chapter, ChapterRef, DownloadState, Manga, ProgressEvent, User,
-};
+use yomu_domain::{Category, Chapter, ChapterRef, DownloadState, Manga, ProgressEvent, User};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -508,17 +506,30 @@ mod tests {
         assert!(restored[0].auto_download);
         let read = target.read_ids(SHARED, manga.id).await.unwrap();
         assert!(read.contains(&chapters[0].id));
-        let position = target.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        let position = target
+            .latest_position(SHARED, manga.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(position.chapter_id, chapters[1].id);
         assert_eq!(position.page, 5);
         // Restored chapters read live (no page files travelled with the backup).
         let restored_chapters = target.list_chapters(manga.id).await.unwrap();
-        assert!(restored_chapters.iter().all(|c| matches!(c.download, DownloadState::None)));
+        assert!(
+            restored_chapters
+                .iter()
+                .all(|c| matches!(c.download, DownloadState::None))
+        );
 
         // Re-importing is idempotent: nothing new lands the second time.
         let again = target.import_backup(SHARED, &backup).await.unwrap();
         assert_eq!(
-            (again.manga, again.chapters, again.read_marks, again.progress_events),
+            (
+                again.manga,
+                again.chapters,
+                again.read_marks,
+                again.progress_events
+            ),
             (0, 0, 0, 0)
         );
     }
@@ -545,7 +556,10 @@ mod tests {
 
         // insert_manga returns the genres it wrote; get_manga reloads them.
         assert_eq!(a.genres, vec!["Action", "Fantasy"]);
-        assert_eq!(db.get_manga(a.id).await.unwrap().genres, vec!["Action", "Fantasy"]);
+        assert_eq!(
+            db.get_manga(a.id).await.unwrap().genres,
+            vec!["Action", "Fantasy"]
+        );
         // list_manga attaches genres per row from one grouped query.
         let listed = db.list_manga().await.unwrap();
         let listed_b = listed.iter().find(|m| m.id == b.id).unwrap();
@@ -557,7 +571,10 @@ mod tests {
 
         let map = db.genres_by_manga().await.unwrap();
         assert_eq!(map.get(&a.id).unwrap(), &vec!["Drama".to_string()]);
-        assert_eq!(map.get(&b.id).unwrap(), &vec!["Fantasy".to_string(), "Romance".into()]);
+        assert_eq!(
+            map.get(&b.id).unwrap(),
+            &vec!["Fantasy".to_string(), "Romance".into()]
+        );
     }
 
     #[tokio::test]
@@ -1019,10 +1036,7 @@ mod tests {
             ..good.clone()
         };
 
-        let (accepted, skipped) = db
-            .append_events(SHARED, &[good, dangling])
-            .await
-            .unwrap();
+        let (accepted, skipped) = db.append_events(SHARED, &[good, dangling]).await.unwrap();
         assert_eq!((accepted, skipped), (1, 1));
         // The surviving position is the good event's chapter, not the
         // later-dated dangling one.

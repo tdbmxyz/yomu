@@ -68,11 +68,12 @@ impl Db {
 
     /// Every chapter id this user has marked read (across all manga).
     pub async fn read_all_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>> {
-        let rows =
-            sqlx::query_scalar::<_, String>("SELECT chapter_id FROM read_chapters WHERE user_id = ?")
-                .bind(user_id.to_string())
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT chapter_id FROM read_chapters WHERE user_id = ?",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(parse_uuid).collect()
     }
 }
