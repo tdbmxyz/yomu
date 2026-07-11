@@ -154,6 +154,35 @@ pub struct BulkChaptersResponse {
     pub affected: u32,
 }
 
+/// Live page progress of the chapter the download worker is fetching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    /// Pages written so far (1-based).
+    pub page: u32,
+    pub total: u32,
+}
+
+/// One chapter in the download queue (pending / downloading / failed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadQueueEntry {
+    pub chapter_id: Uuid,
+    pub manga_id: Uuid,
+    pub manga_title: String,
+    pub chapter_title: String,
+    pub state: crate::DownloadState,
+    /// Present only for the chapter currently downloading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<DownloadProgress>,
+}
+
+/// `GET /downloads`: the queue plus a server-storage summary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadsResponse {
+    pub queue: Vec<DownloadQueueEntry>,
+    pub server_downloaded_chapters: u32,
+    pub server_downloaded_pages: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PagesResponse {
     pub chapter_id: Uuid,

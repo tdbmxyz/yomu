@@ -5,10 +5,11 @@ use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
     AddMangaRequest, ApiErrorBody, Backup, BrowseSort, BulkChaptersResponse, Category, Chapter,
-    DownloadChaptersRequest, EventsResponse, HealthResponse, Manga, MangaDetailResponse,
-    MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse, PagesResponse, Position,
-    PushEventsRequest, PushEventsResponse, RefreshResponse, RestoreSummary, SetPositionRequest,
-    SourceInfo, SourceSearchResults, UpdateCategoryRequest, UpdateMangaRequest,
+    DownloadChaptersRequest, DownloadsResponse, EventsResponse, HealthResponse, Manga,
+    MangaDetailResponse, MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse,
+    PagesResponse, Position, PushEventsRequest, PushEventsResponse, RefreshResponse,
+    RestoreSummary, SetPositionRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
+    UpdateMangaRequest,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -156,6 +157,32 @@ impl YomuClient {
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
         self.base.join(&format!("api/v1/manga/{id}/cover")).ok()
+    }
+
+    // ---- downloads ----
+
+    pub async fn downloads(&self) -> Result<DownloadsResponse> {
+        self.get("api/v1/downloads").await
+    }
+
+    pub async fn retry_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+        let req = self
+            .http
+            .post(self.url("api/v1/downloads/retry")?)
+            .json(&DownloadChaptersRequest {
+                chapter_ids: ids.to_vec(),
+            });
+        self.send(req).await
+    }
+
+    pub async fn dismiss_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+        let req = self
+            .http
+            .post(self.url("api/v1/downloads/dismiss")?)
+            .json(&DownloadChaptersRequest {
+                chapter_ids: ids.to_vec(),
+            });
+        self.send(req).await
     }
 
     // ---- backup / restore ----
