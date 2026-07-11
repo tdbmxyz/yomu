@@ -89,11 +89,20 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
         return Err(reason);
     }
 
-    // Atomic-ish publish: the final directory only ever appears complete.
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-    tokio::fs::rename(&partial, &dir)
-        .await
-        .map_err(|e| format!("publishing {}: {e}", dir.display()))?;
+    // Atomic-ish publish that never destroys a good copy: stage the old
+    // directory aside, promote the new one, then drop the old. If the
+    // promotion fails (cross-device, permissions, race), restore the old
+    // copy so a re-download can't lose an already-complete chapter.
+    let backup = dir.with_extension("old");
+    let _ = tokio::fs::remove_dir_all(&backup).await;
+    let had_old = tokio::fs::rename(&dir, &backup).await.is_ok();
+    if let Err(e) = tokio::fs::rename(&partial, &dir).await {
+        if had_old {
+            let _ = tokio::fs::rename(&backup, &dir).await;
+        }
+        return Err(format!("publishing {}: {e}", dir.display()));
+    }
+    let _ = tokio::fs::remove_dir_all(&backup).await;
 
     Ok(pages.len() as u32)
 }
