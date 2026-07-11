@@ -811,17 +811,27 @@ const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 /// could otherwise aim the server at cloud metadata (169.254.169.254) or LAN
 /// hosts. A *hostname* that resolves to a private address (DNS rebinding) is
 /// out of scope here; that needs a connection-pinning resolver.
+fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || o[0] == 0
+        || (o[0] == 100 && (64..=127).contains(&o[1])) // carrier-grade NAT 100.64/10
+}
+
 fn is_private_target(url: &Url) -> bool {
     match url.host() {
-        Some(url::Host::Ipv4(ip)) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                || ip.octets()[0] == 0
-        }
+        Some(url::Host::Ipv4(ip)) => is_private_v4(ip),
         Some(url::Host::Ipv6(ip)) => {
+            // An IPv4-mapped address (`::ffff:a.b.c.d`) routes to the real
+            // IPv4 host, so it must face the same checks — otherwise the
+            // metadata endpoint is reachable as `[::ffff:169.254.169.254]`.
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_private_v4(v4);
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
@@ -1011,6 +1021,9 @@ mod tests {
             "http://10.0.0.5/x",
             "http://[::1]/x",
             "http://[fd00::1]/x",
+            "http://[::ffff:169.254.169.254]/x", // v4-mapped cloud metadata
+            "http://[::ffff:10.0.0.5]/x",        // v4-mapped private
+            "http://100.64.0.1/x",               // carrier-grade NAT
         ];
         for u in blocked {
             assert!(
