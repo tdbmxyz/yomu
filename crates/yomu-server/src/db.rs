@@ -635,15 +635,26 @@ impl Db {
             .execute(&self.pool)
             .await;
         match result {
-            Ok(_) => {}
+            Ok(_) => self.user_by_id(id).await,
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                // A unique violation is either a concurrent first-login for
+                // this same subject (the winner's row exists — return it) or
+                // a preferred_username collision (retry qualified by subject).
+                if let Some(existing) =
+                    sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE subject = ?")
+                        .bind(subject)
+                        .fetch_optional(&self.pool)
+                        .await?
+                {
+                    return self.user_by_id(parse_uuid(existing)?).await;
+                }
                 insert(format!("{}-{subject}", username.trim().to_lowercase()))
                     .execute(&self.pool)
                     .await?;
+                self.user_by_id(id).await
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => Err(e.into()),
         }
-        self.user_by_id(id).await
     }
 
     pub async fn create_session(
@@ -739,7 +750,15 @@ impl Db {
                     .bind(event.manga_id.to_string())
                     .fetch_one(&mut *tx)
                     .await?;
-            if !known {
+            // The single-event path validates the chapter via get_chapter; the
+            // offline batch must too, or a client desync stores a position
+            // pointing at a chapter that resolves to nothing.
+            let chapter_known: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chapters WHERE id = ?)")
+                    .bind(event.chapter_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !known || !chapter_known {
                 skipped += 1;
                 continue;
             }
@@ -1649,6 +1668,44 @@ mod tests {
         assert_eq!((accepted, skipped), (1, 1));
         let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
         assert_eq!(position.page, 9);
+    }
+
+    #[tokio::test]
+    async fn batch_append_skips_events_with_unknown_chapter() {
+        // A known manga but a garbage chapter_id (client desync) must be
+        // skipped, not stored — otherwise latest_position points at a
+        // chapter that resolves to nothing.
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let real = db.list_chapters(manga.id).await.unwrap().remove(0);
+
+        let good = ProgressEvent {
+            id: Uuid::from_u128(1),
+            manga_id: manga.id,
+            chapter_id: real.id,
+            page: 4,
+            device: "test".into(),
+            at: DateTime::from_timestamp(100, 0).unwrap(),
+        };
+        let dangling = ProgressEvent {
+            id: Uuid::from_u128(2),
+            chapter_id: Uuid::from_u128(9999),
+            at: DateTime::from_timestamp(200, 0).unwrap(),
+            ..good.clone()
+        };
+
+        let (accepted, skipped) = db
+            .append_events(SHARED, &[good, dangling])
+            .await
+            .unwrap();
+        assert_eq!((accepted, skipped), (1, 1));
+        // The surviving position is the good event's chapter, not the
+        // later-dated dangling one.
+        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        assert_eq!(position.chapter_id, real.id);
     }
 
     #[tokio::test]
