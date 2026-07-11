@@ -899,6 +899,46 @@ fn ReaderInner() -> impl IntoView {
                             // keyboards page with the arrows, neither of
                             // which touches the strip element.
                             let positioned = StoredValue::new(false);
+                            // Opening anchor: until the reader's first user
+                            // gesture, the opening page is hard-pinned to the
+                            // viewport top on every layout change. Launch
+                            // correctness therefore doesn't depend on any
+                            // compensation arithmetic — whatever loads in
+                            // whatever order, the view shows the page that
+                            // was opened. Position journaling pauses while
+                            // anchored (the position IS the anchor target).
+                            let anchored = StoredValue::new(true);
+                            let anchor_target =
+                                StoredValue::new((chapter_id, initial_page));
+                            let repin = move || {
+                                let Some(el) = strip.get_untracked() else {
+                                    return;
+                                };
+                                let (chapter, p) = anchor_target.get_value();
+                                let selector = format!(
+                                    "img[data-chapter='{chapter}'][data-page='{p}']"
+                                );
+                                if let Ok(Some(child)) = el.query_selector(&selector) {
+                                    child.scroll_into_view();
+                                }
+                            };
+                            let release_touch = window_event_listener(
+                                leptos::ev::pointerdown,
+                                move |_| anchored.set_value(false),
+                            );
+                            let release_wheel = window_event_listener(
+                                leptos::ev::wheel,
+                                move |_| anchored.set_value(false),
+                            );
+                            let release_key = window_event_listener(
+                                leptos::ev::keydown,
+                                move |_| anchored.set_value(false),
+                            );
+                            on_cleanup(move || {
+                                release_touch.remove();
+                                release_wheel.remove();
+                                release_key.remove();
+                            });
                             // Start at the current page, not the top: entering
                             // vertical mode (or "continue reading") must not
                             // rewind the saved position.
@@ -913,14 +953,11 @@ fn ReaderInner() -> impl IntoView {
                                         &format!("{}px", sum / n as f64),
                                     );
                                 }
-                                let selector = format!(
-                                    "img[data-chapter='{}'][data-page='{}']",
+                                anchor_target.set_value((
                                     current_chapter.get_untracked(),
                                     page.get_untracked(),
-                                );
-                                if let Ok(Some(child)) = el.query_selector(&selector) {
-                                    child.scroll_into_view();
-                                }
+                                ));
+                                repin();
                                 positioned.set_value(true);
                             });
                             let loading_next = StoredValue::new(false);
@@ -1003,6 +1040,10 @@ fn ReaderInner() -> impl IntoView {
                                 let prepend = move |count: u32| {
                                     segments.update(|s| s.insert(0, (prev, count)));
                                     request_animation_frame(move || {
+                                        if anchored.get_value() {
+                                            repin();
+                                            return;
+                                        }
                                         let Some(el) = strip.get_untracked() else { return };
                                         if let Ok(Some(wrap)) = el.query_selector(&format!(
                                             ".strip-chapter[data-chapter='{prev}']"
@@ -1104,6 +1145,7 @@ fn ReaderInner() -> impl IntoView {
                                         }
                                     }
                                     if positioned.get_value()
+                                        && !anchored.get_value()
                                         && at_loaded
                                         && let Some((chapter, p)) = at
                                         && (chapter != current_chapter.get_untracked()
@@ -1350,6 +1392,15 @@ fn ReaderInner() -> impl IntoView {
                                                         );
                                                 }
                                                 delta += above * (new_avg - old_avg);
+                                                // Before the first user
+                                                // gesture, launch correctness
+                                                // is absolute: re-pin the
+                                                // opening page instead of
+                                                // doing delta arithmetic.
+                                                if anchored.get_value() {
+                                                    repin();
+                                                    return;
+                                                }
                                                 // Mid-fling, a scrollBy would
                                                 // cancel the fling ("snap
                                                 // after release" on phones):
