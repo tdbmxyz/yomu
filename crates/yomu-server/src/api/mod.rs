@@ -8,6 +8,7 @@ mod library;
 mod progress;
 mod sources;
 
+use axum::http::{HeaderValue, Method, header};
 use axum::routing::get;
 use axum::{Json, Router};
 use tower_http::cors::CorsLayer;
@@ -74,10 +75,39 @@ pub fn router(state: AppState) -> Router {
         app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
     }
 
-    app
-        // LAN-only posture, like chaos; revisit with auth.
-        .layer(CorsLayer::permissive())
+    app.layer(cors_layer(&state.config.auth.allowed_origins))
         .layer(TraceLayer::new_for_http())
+}
+
+/// CORS policy. The served-frontend deployment is same-origin and needs no
+/// CORS at all; a cross-origin frontend must be named explicitly because
+/// credentialed requests (our session cookie) forbid a `*` origin. An
+/// invalid origin string is dropped with a warning rather than failing boot.
+fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    let origins: Vec<HeaderValue> = allowed_origins
+        .iter()
+        .filter_map(|o| match o.trim_end_matches('/').parse::<HeaderValue>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!(origin = %o, "ignoring unparseable allowed_origin");
+                None
+            }
+        })
+        .collect();
+    if origins.is_empty() {
+        return CorsLayer::new();
+    }
+    CorsLayer::new()
+        .allow_credentials(true)
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
 async fn health() -> Json<HealthResponse> {
