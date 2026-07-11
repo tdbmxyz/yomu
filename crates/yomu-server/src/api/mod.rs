@@ -87,3 +87,58 @@ async fn health() -> Json<HealthResponse> {
         commit: option_env!("YOMU_BUILD_COMMIT").map(Into::into),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    use yomu_source::registry::Registry;
+
+    use crate::config::Config;
+    use crate::db::Db;
+    use crate::state::AppState;
+
+    /// Router in OIDC mode: `oidc_enabled()` is true, but no session is
+    /// presented, so `CurrentUser`-gated routes must reject.
+    async fn oidc_router() -> axum::Router {
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        super::router(state)
+    }
+
+    async fn status_of(method: &str, path: &str) -> StatusCode {
+        let router = oidc_router().await;
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        router.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn mutating_routes_require_a_session_in_oidc_mode() {
+        // Every write must reject an anonymous request with 401, not act on it.
+        assert_eq!(
+            status_of("POST", "/api/v1/library").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/chapters/download").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/chapters/remove-downloads").await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn health_stays_open() {
+        assert_eq!(status_of("GET", "/api/v1/health").await, StatusCode::OK);
+    }
+}

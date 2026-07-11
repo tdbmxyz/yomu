@@ -9,12 +9,13 @@ use yomu_domain::{
 };
 
 use super::ApiError;
-use crate::auth::OptionalUser;
+use crate::auth::{CurrentUser, OptionalUser};
 use crate::state::AppState;
 use crate::sync;
 
 pub async fn add(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Json(req): Json<AddMangaRequest>,
 ) -> Result<(StatusCode, Json<Manga>), ApiError> {
     let source = state.sources.get(&req.source_id).ok_or_else(|| {
@@ -103,6 +104,7 @@ pub async fn detail(
 
 pub async fn update(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMangaRequest>,
 ) -> Result<Json<Manga>, ApiError> {
@@ -115,6 +117,7 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let chapter_ids: Vec<Uuid> = state
@@ -134,6 +137,7 @@ pub async fn delete(
 
 pub async fn refresh(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
     let manga = state.db.get_manga(id).await?;

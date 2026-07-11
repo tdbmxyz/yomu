@@ -51,6 +51,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "derive", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

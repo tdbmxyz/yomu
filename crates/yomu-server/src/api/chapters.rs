@@ -16,6 +16,7 @@ use crate::state::AppState;
 /// Enqueue a chapter for download to the server's disk.
 pub async fn download(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<Chapter>), ApiError> {
     let chapter = state.db.get_chapter(id).await?;
@@ -36,6 +37,7 @@ pub async fn download(
 /// purpose.
 pub async fn download_many(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Json(req): Json<DownloadChaptersRequest>,
 ) -> Result<(StatusCode, Json<BulkChaptersResponse>), ApiError> {
     let queued = state.db.mark_pending(&req.chapter_ids).await?;
@@ -52,6 +54,7 @@ pub async fn download_many(
 /// directories deleted. Chapters not currently downloaded are skipped.
 pub async fn remove_downloads(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Json(req): Json<DownloadChaptersRequest>,
 ) -> Result<Json<BulkChaptersResponse>, ApiError> {
     let removed = state.db.remove_downloads(&req.chapter_ids).await?;
