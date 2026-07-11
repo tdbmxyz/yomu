@@ -82,11 +82,24 @@ pub struct AppState {
     /// Wakes the download worker when chapters become pending.
     pub download_notify: Arc<Notify>,
     pub live_pages: Arc<LivePages>,
+    /// Page progress of the chapter the single download worker is fetching
+    /// (`None` when idle). In-memory and best-effort: lost on restart, which
+    /// only drops a transient progress bar — the chapter re-queues normally.
+    pub download_progress: Arc<RwLock<Option<ActiveDownload>>>,
     /// `Some` when `[auth]` configures an OIDC provider; `None` runs the
     /// single-account mode (everyone is the shared user).
     pub oidc: Option<Arc<OidcRuntime>>,
     /// Browse pages currently revalidating in the background.
     pub catalog_inflight: Arc<crate::catalog::Inflight>,
+}
+
+/// The chapter the download worker is fetching, and how far along.
+#[derive(Clone, Copy)]
+pub struct ActiveDownload {
+    pub chapter_id: Uuid,
+    /// Pages written so far (1-based).
+    pub page: u32,
+    pub total: u32,
 }
 
 impl AppState {
@@ -97,6 +110,7 @@ impl AppState {
             sources: Arc::new(sources),
             download_notify: Arc::new(Notify::new()),
             live_pages: Arc::new(LivePages::default()),
+            download_progress: Arc::new(RwLock::new(None)),
             oidc: oidc.map(Arc::new),
             catalog_inflight: Arc::new(crate::catalog::Inflight::default()),
         }

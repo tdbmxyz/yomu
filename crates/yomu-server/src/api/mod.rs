@@ -4,6 +4,7 @@ mod auth;
 mod backup;
 mod categories;
 mod chapters;
+mod downloads;
 mod error;
 mod library;
 mod progress;
@@ -69,6 +70,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/backup", get(backup::export))
         .route("/restore", axum::routing::post(backup::restore))
+        .route("/downloads", get(downloads::list))
+        .route("/downloads/retry", axum::routing::post(downloads::retry))
+        .route(
+            "/downloads/dismiss",
+            axum::routing::post(downloads::dismiss),
+        )
         .with_state(state.clone());
 
     let mut app = Router::new().nest("/api/v1", api);
@@ -166,6 +173,14 @@ mod tests {
         );
         assert_eq!(
             status_of("POST", "/api/v1/chapters/remove-downloads").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/downloads/retry").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/downloads/dismiss").await,
             StatusCode::UNAUTHORIZED
         );
     }

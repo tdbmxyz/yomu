@@ -41,6 +41,8 @@ async fn run(state: AppState) {
                     }
                     Err(err) => tracing::error!(%err, "recording download outcome"),
                 }
+                // Chapter left the worker: no active progress until the next.
+                *state.download_progress.write().await = None;
                 continue; // drain the queue before sleeping
             }
             Ok(None) => {}
@@ -82,7 +84,7 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
         .await
         .map_err(|e| format!("creating {}: {e}", partial.display()))?;
 
-    let fetched = fetch_pages(source.as_ref(), &pages, &partial).await;
+    let fetched = fetch_pages(state, chapter.id, source.as_ref(), &pages, &partial).await;
     if let Err(reason) = fetched {
         // Don't leave half a chapter of litter behind a failed attempt.
         let _ = tokio::fs::remove_dir_all(&partial).await;
@@ -108,11 +110,21 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
 }
 
 async fn fetch_pages(
+    state: &AppState,
+    chapter_id: uuid::Uuid,
     source: &dyn yomu_source::Source,
     pages: &[url::Url],
     partial: &std::path::Path,
 ) -> Result<(), String> {
+    let total = pages.len() as u32;
     for (index, url) in pages.iter().enumerate() {
+        // Publish page progress for the Downloads UI before fetching each
+        // page (so a slow page shows as "downloading page N", not stalled).
+        *state.download_progress.write().await = Some(crate::state::ActiveDownload {
+            chapter_id,
+            page: index as u32 + 1,
+            total,
+        });
         let image = source.image(url).await.map_err(|e| e.to_string())?;
         let ext = extension_for(&image.content_type, url);
         let path = partial.join(format!("{index:04}.{ext}"));

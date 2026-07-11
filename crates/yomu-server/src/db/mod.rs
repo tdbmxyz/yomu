@@ -578,6 +578,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_queue_lists_and_transitions_states() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details(
+                    "m1",
+                    &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))],
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let (pending, downloaded, failed) = (chapters[0].id, chapters[1].id, chapters[2].id);
+
+        db.mark_pending(&[pending]).await.unwrap();
+        db.mark_pending(&[downloaded]).await.unwrap();
+        db.finish_download(downloaded, Ok(5)).await.unwrap();
+        db.mark_pending(&[failed]).await.unwrap();
+        db.finish_download(failed, Err("boom".into()))
+            .await
+            .unwrap();
+
+        // Queue holds pending + failed but not the downloaded chapter.
+        let queue = db.download_queue().await.unwrap();
+        let ids: Vec<_> = queue.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&pending) && ids.contains(&failed));
+        assert!(!ids.contains(&downloaded));
+
+        // Server summary counts the one downloaded chapter and its pages.
+        assert_eq!(db.downloaded_summary().await.unwrap(), (1, 5));
+
+        // Titles come back for labelling.
+        let titles = db.manga_titles(&[manga.id]).await.unwrap();
+        assert_eq!(titles.get(&manga.id).unwrap(), &manga.title);
+
+        // dismiss drops pending|failed → none, not downloaded.
+        assert_eq!(
+            db.dismiss_downloads(&[pending, downloaded]).await.unwrap(),
+            1
+        );
+        assert!(
+            !db.download_queue()
+                .await
+                .unwrap()
+                .iter()
+                .any(|c| c.id == pending)
+        );
+
+        // retry_failed re-queues only failed rows.
+        assert_eq!(db.retry_failed(&[failed, downloaded]).await.unwrap(), 1);
+        let after = db.list_chapters(manga.id).await.unwrap();
+        let failed_row = after.iter().find(|c| c.id == failed).unwrap();
+        assert!(matches!(failed_row.download, DownloadState::Pending));
+    }
+
+    #[tokio::test]
     async fn library_keys_maps_source_key_to_id() {
         let db = Db::in_memory().await.unwrap();
         let manga = db

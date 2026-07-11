@@ -176,6 +176,9 @@ pub fn More() -> impl IntoView {
             }}
 
             <p class="home-more">
+                <a href="/downloads">"Downloads →"</a>
+            </p>
+            <p class="home-more">
                 <a href="/about">"About yomu →"</a>
             </p>
         </section>
