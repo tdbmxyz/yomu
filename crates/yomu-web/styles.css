@@ -1326,9 +1326,6 @@ body:has(.reader-overlay.flow) main {
 .reader-overlay.flow {
   position: static;
   min-height: 100dvh;
-  /* the reader compensates the scroll itself when chapters are prepended,
-     evicted or grow above the viewport; native anchoring would double it */
-  overflow-anchor: none;
 }
 
 .reader-overlay.flow .reader-chrome,

@@ -457,13 +457,15 @@ pub(super) fn vertical_strip(
         Some(h) => (h, 1_u32),
         None => (0.0_f64, 0_u32),
     });
-    // Glue deferral: a compensation scrollBy landing
-    // mid-fling cancels the fling on touch devices
-    // (the "snap after release"). While scroll events
-    // are streaming, deltas accumulate and land on
-    // scrollend / the next idle load instead.
-    let last_scroll_ts = StoredValue::new(0.0_f64);
-    let pending_glue = StoredValue::new(0.0_f64);
+    // Compensating layout shifts by hand can never be timed right on touch
+    // devices: a scrollBy mid-fling cancels the fling, and one deferred to
+    // scrollend lands seconds late as a random jump. Engines with CSS scroll
+    // anchoring (Blink, Gecko) do the compensation inside layout instead —
+    // there the strip leaves the scroll position alone entirely. The manual
+    // glue below only runs on engines without it (WebKit), which are the
+    // wheel-scrolled desktop shells where an immediate scrollBy is safe.
+    let native_anchor =
+        web_sys::css::supports_with_value("overflow-anchor", "auto").unwrap_or(false);
     // Scroll events only count once the programmatic
     // opening scroll below has landed; before that
     // they would map placeholder-height images to a
@@ -565,11 +567,9 @@ pub(super) fn vertical_strip(
     // Scrolling up past the strip's start pulls the
     // previous chapter in *above* the viewport, so
     // the scroll position must be pushed down by the
-    // new segment's height to keep the view still.
-    // Native scroll anchoring would do the same
-    // (doubling the shift where supported), so it is
-    // disabled on the strip (styles.css) and all
-    // compensation is done by hand.
+    // new segment's height to keep the view still —
+    // by native anchoring where available, by hand
+    // otherwise.
     let loading_prev = StoredValue::new(false);
     let client_prev = client_vertical.clone();
     let load_prev = move || {
@@ -597,6 +597,13 @@ pub(super) fn vertical_strip(
             request_animation_frame(move || {
                 if anchored.get_value() {
                     repin();
+                    return;
+                }
+                // Native anchoring keeps the view still across the
+                // insertion — except at scroll offset 0, where the spec
+                // pins the scroller to the top and the view would land on
+                // the previous chapter's start instead of staying put.
+                if native_anchor && window().scroll_y().unwrap_or(0.0) > 0.0 {
                     return;
                 }
                 let Some(el) = strip.get_untracked() else {
@@ -654,7 +661,6 @@ pub(super) fn vertical_strip(
         }
     };
     let scroll_handle = window_event_listener(leptos::ev::scroll, move |_| {
-        last_scroll_ts.set_value(js_sys::Date::now());
         let Some(el) = strip.get_untracked() else {
             return;
         };
@@ -736,12 +742,14 @@ pub(super) fn vertical_strip(
                 });
                 if !front.is_empty() || !back.is_empty() {
                     let mut above = 0.0;
-                    for id in &front {
-                        if let Ok(Some(wrap)) =
-                            el.query_selector(&format!(".strip-chapter[data-chapter='{id}']"))
-                            && let Ok(wrap) = wrap.dyn_into::<web_sys::HtmlElement>()
-                        {
-                            above += wrap.offset_height() as f64;
+                    if !native_anchor {
+                        for id in &front {
+                            if let Ok(Some(wrap)) =
+                                el.query_selector(&format!(".strip-chapter[data-chapter='{id}']"))
+                                && let Ok(wrap) = wrap.dyn_into::<web_sys::HtmlElement>()
+                            {
+                                above += wrap.offset_height() as f64;
+                            }
                         }
                     }
                     let drop: std::collections::HashSet<uuid::Uuid> =
@@ -770,27 +778,100 @@ pub(super) fn vertical_strip(
         }
     });
     on_cleanup(move || scroll_handle.remove());
-    // The fling is over: land any parked glue. On
-    // engines without scrollend the next idle load
-    // flushes it instead.
-    let scrollend_handle = window_event_listener(
-        leptos::ev::Custom::<web_sys::Event>::new("scrollend"),
-        move |_| {
-            let parked = pending_glue.get_value();
-            if parked.abs() > 1.0 {
-                pending_glue.set_value(0.0);
-                window().scroll_by_with_x_and_y(0.0, parked);
-            }
-        },
-    );
-    on_cleanup(move || scrollend_handle.remove());
+    // Mouse drag-to-scroll with a touch-style momentum fling: desktops can
+    // read (and reproduce phone-only scroll bugs) with click + drag. Touch
+    // pointers keep the browser's native scrolling.
+    let drag_from = StoredValue::new(None::<(f64, f64)>); // (start y, last y)
+    let drag_flick = StoredValue::new(pager::Flick::default());
+    let momentum = StoredValue::new(None::<leptos::leptos_dom::helpers::IntervalHandle>);
+    let stop_momentum = move || {
+        if let Some(handle) = momentum.get_value() {
+            handle.clear();
+            momentum.set_value(None);
+        }
+    };
+    on_cleanup(stop_momentum);
+    let on_pointerdown = move |ev: leptos::ev::PointerEvent| {
+        stop_momentum();
+        if ev.pointer_type() != "mouse" || ev.button() != 0 {
+            return;
+        }
+        // no text selection / native image drag while dragging the strip
+        ev.prevent_default();
+        if let Some(el) = strip.get_untracked() {
+            let _ = el.set_pointer_capture(ev.pointer_id());
+        }
+        let y = ev.client_y() as f64;
+        drag_from.set_value(Some((y, y)));
+        drag_flick.update_value(|f| {
+            f.clear();
+            f.push(y, ev.time_stamp());
+        });
+    };
+    let on_pointermove = move |ev: leptos::ev::PointerEvent| {
+        let Some((start, last)) = drag_from.get_value() else {
+            return;
+        };
+        let y = ev.client_y() as f64;
+        // relative scrolls, so they compose with any
+        // anchoring adjustment happening mid-drag
+        window().scroll_by_with_x_and_y(0.0, last - y);
+        drag_from.set_value(Some((start, y)));
+        drag_flick.update_value(|f| f.push(y, ev.time_stamp()));
+    };
+    let suppress_click = StoredValue::new(false);
+    let on_pointerup = move |ev: leptos::ev::PointerEvent| {
+        let Some((start, last)) = drag_from.get_value() else {
+            return;
+        };
+        drag_from.set_value(None);
+        if (last - start).abs() < 5.0 {
+            return; // a click, not a drag — let it toggle the chrome
+        }
+        suppress_click.set_value(true);
+        let velocity = drag_flick.with_value(|f| f.velocity(ev.time_stamp()));
+        if velocity.abs() > 0.1 {
+            let vel = StoredValue::new(velocity);
+            let handle = set_interval_with_handle(
+                move || {
+                    let v = vel.get_value() * 0.96;
+                    vel.set_value(v);
+                    if v.abs() < 0.05 {
+                        stop_momentum();
+                        return;
+                    }
+                    window().scroll_by_with_x_and_y(0.0, -v * 16.0);
+                },
+                std::time::Duration::from_millis(16),
+            )
+            .ok();
+            momentum.set_value(handle);
+        }
+    };
+    let on_pointercancel = move |_ev: leptos::ev::PointerEvent| {
+        drag_from.set_value(None);
+    };
     let client = client_vertical.clone();
     view! {
         <div
             class="reader-scroll"
             node_ref=strip
-            on:wheel=wheel_prev
-            on:click=move |_| chrome.update(|c| *c = !*c)
+            on:wheel=move |ev| {
+                stop_momentum();
+                wheel_prev(ev);
+            }
+            on:pointerdown=on_pointerdown
+            on:pointermove=on_pointermove
+            on:pointerup=on_pointerup
+            on:pointercancel=on_pointercancel
+            on:dragstart=move |ev: leptos::ev::DragEvent| ev.prevent_default()
+            on:click=move |_| {
+                if suppress_click.get_value() {
+                    suppress_click.set_value(false);
+                    return;
+                }
+                chrome.update(|c| *c = !*c);
+            }
         >
             <For
                 each=move || segments.get()
@@ -852,8 +933,11 @@ pub(super) fn vertical_strip(
                         // fully above the line — counted
                         // BEFORE anything moves (the
                         // reveal below shifts them).
+                        // Only the manual-glue engines
+                        // need the count.
                         let mut above = 0.0;
-                        if let Some(el) = strip.get_untracked()
+                        if !native_anchor
+                            && let Some(el) = strip.get_untracked()
                             && let Ok(pending) = el.query_selector_all(
                                 "img.reader-strip-page:not([data-loaded])",
                             )
@@ -933,25 +1017,11 @@ pub(super) fn vertical_strip(
                             repin();
                             return;
                         }
-                        // Mid-fling, a scrollBy would
-                        // cancel the fling ("snap
-                        // after release" on phones):
-                        // park the correction until
-                        // the scroll settles.
-                        if js_sys::Date::now()
-                            - last_scroll_ts.get_value()
-                            < 150.0
-                        {
-                            pending_glue
-                                .update_value(|p| *p += delta);
-                        } else {
-                            let delta =
-                                delta + pending_glue.get_value();
-                            pending_glue.set_value(0.0);
-                            if delta.abs() > 1.0 {
-                                window()
-                                    .scroll_by_with_x_and_y(0.0, delta);
-                            }
+                        // With native anchoring the
+                        // engine already held the view
+                        // still through the reveal.
+                        if !native_anchor && delta.abs() > 1.0 {
+                            window().scroll_by_with_x_and_y(0.0, delta);
                         }
                     };
                     let images = (0..count)
