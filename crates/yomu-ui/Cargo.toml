@@ -45,6 +45,7 @@ features = [
     "HtmlInputElement",
     "Event",
     "EventTarget",
+    "css",
 ]
 
 [dependencies.js-sys]
