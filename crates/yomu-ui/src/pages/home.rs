@@ -26,6 +26,17 @@ pub fn Home() -> impl IntoView {
             }
         }
     });
+    // The shells land here: store any missing library covers for offline
+    // (see cover::sweep_device_covers; the Library page does the same).
+    {
+        let sweep_client = client.clone();
+        Effect::new(move |_| {
+            if let Some(Ok(entries)) = library.get() {
+                let ids = entries.iter().map(|entry| entry.manga.id).collect();
+                crate::cover::sweep_device_covers(conn, &sweep_client, ids);
+            }
+        });
+    }
 
     view! {
         <section class="home">

@@ -5,8 +5,41 @@
 //! empty-cover placeholder instead of a broken image.
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 
 use crate::{Connectivity, offline, use_client, use_connectivity};
+
+thread_local! {
+    static SWEEPING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Save any of these manga's covers that device storage is missing —
+/// no-op outside the shells, while offline, or while a sweep is already
+/// running. Called by the pages that load the library (Home, Library), so
+/// covers are stored no matter where the app lands first.
+pub fn sweep_device_covers(
+    conn: RwSignal<Connectivity>,
+    client: &yomu_client::YomuClient,
+    ids: Vec<uuid::Uuid>,
+) {
+    if conn.get_untracked() != Connectivity::Online || !offline::shell_available() {
+        return;
+    }
+    if ids.is_empty() || SWEEPING.get() {
+        return;
+    }
+    SWEEPING.set(true);
+    let client = client.clone();
+    spawn_local(async move {
+        // the shell short-circuits covers it already stores
+        for id in ids {
+            if let Err(err) = offline::shell_save_cover(&client, id).await {
+                leptos::logging::warn!("cover save failed for {id}: {err}");
+            }
+        }
+        SWEEPING.set(false);
+    });
+}
 
 #[component]
 pub fn Cover(manga_id: uuid::Uuid, #[prop(optional)] large: bool) -> impl IntoView {
@@ -31,7 +64,6 @@ pub fn Cover(manga_id: uuid::Uuid, #[prop(optional)] large: bool) -> impl IntoVi
     let src = move || -> Option<String> {
         if conn.get() != Connectivity::Online
             && offline::shell_available()
-            && offline::device_cover_saved(manga_id)
             && let Some(url) = offline::shell_cover_url(manga_id)
         {
             return Some(url);

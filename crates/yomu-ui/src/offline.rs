@@ -365,18 +365,9 @@ pub async fn shell_save_chapter(
 
 // ---- device covers (shell) ----
 
-const DEVICE_COVERS_KEY: &str = "yomu-device-covers";
-
-/// Manga whose cover is stored in the shell's device storage.
-pub fn device_covers() -> std::collections::BTreeSet<Uuid> {
-    read_json(DEVICE_COVERS_KEY)
-}
-
-pub fn device_cover_saved(manga_id: Uuid) -> bool {
-    device_covers().contains(&manga_id)
-}
-
-/// URL serving the device-saved cover of a manga inside the shell.
+/// URL serving the device-saved cover of a manga inside the shell. The
+/// protocol 404s when no copy is stored — display falls back per-image
+/// (`onerror`), so there is no bookkeeping to drift from the files.
 pub fn shell_cover_url(manga_id: Uuid) -> Option<String> {
     let window = web_sys::window()?;
     let base = js_sys::Reflect::get(&window, &"YOMU_DEVICE_BASE".into())
@@ -385,8 +376,9 @@ pub fn shell_cover_url(manga_id: Uuid) -> Option<String> {
     Some(format!("{base}cover/{manga_id}"))
 }
 
-/// Download a manga's cover into the shell's device storage and remember
-/// it, so the library keeps its covers offline (no service worker there).
+/// Ask the shell to store a manga's cover, so the library keeps its covers
+/// offline (no service worker there). The shell short-circuits covers it
+/// already has, so submitting a whole library is cheap.
 pub async fn shell_save_cover(
     client: &yomu_client::YomuClient,
     manga_id: Uuid,
@@ -395,9 +387,6 @@ pub async fn shell_save_cover(
     let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
     let _ = js_sys::Reflect::set(&args, &"manga".into(), &manga_id.to_string().into());
     shell_invoke("device_save_cover", args).await?;
-    let mut covers = device_covers();
-    covers.insert(manga_id);
-    write_json(DEVICE_COVERS_KEY, &covers);
     Ok(())
 }
 

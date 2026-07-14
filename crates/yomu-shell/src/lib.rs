@@ -127,8 +127,10 @@ fn covers_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Download a manga's (server-cached) cover into device storage, so the
 /// library keeps its covers with the server unreachable — webviews here
-/// have no service worker to do it. Idempotent per manga: an existing file
-/// is replaced.
+/// have no service worker to do it. An existing copy short-circuits, so
+/// the UI can re-submit its whole library cheaply on every load (which
+/// also self-heals after any file loss — there is no separate bookkeeping
+/// to drift from the files).
 #[tauri::command]
 async fn device_save_cover(
     app: tauri::AppHandle,
@@ -137,6 +139,9 @@ async fn device_save_cover(
     manga: String,
 ) -> Result<(), String> {
     checked_id(&manga)?;
+    if device_cover_file(&app, &manga).is_some() {
+        return Ok(());
+    }
     let base = url::Url::parse(&base).map_err(|e| e.to_string())?;
     let url = base
         .join(&format!("api/v1/manga/{manga}/cover"))
@@ -154,17 +159,6 @@ async fn device_save_cover(
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     let dir = covers_dir(&app)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // drop any stale copy under another extension before writing
-    for old in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let path = old.path();
-        if path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s == manga)
-        {
-            let _ = std::fs::remove_file(path);
-        }
-    }
     std::fs::write(dir.join(format!("{manga}.{ext}")), &bytes).map_err(|e| e.to_string())?;
     Ok(())
 }

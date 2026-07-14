@@ -40,36 +40,14 @@ pub fn Library() -> impl IntoView {
     });
     // Shells have no service worker to cache covers: whenever the library
     // loads with the server reachable, quietly pull any cover not yet in
-    // device storage, so the grid keeps its covers offline. Sequential and
-    // idempotent (the device-cover mark set converges it).
-    if offline::shell_available() {
+    // device storage, so the grid keeps its covers offline.
+    {
         let sweep_client = client.clone();
-        let sweeping = StoredValue::new(false);
         Effect::new(move |_| {
-            if conn.get() != crate::Connectivity::Online {
-                return;
+            if let Some(Ok(entries)) = library.get() {
+                let ids = entries.iter().map(|entry| entry.manga.id).collect();
+                crate::cover::sweep_device_covers(conn, &sweep_client, ids);
             }
-            let Some(Ok(entries)) = library.get() else {
-                return;
-            };
-            let missing: Vec<uuid::Uuid> = entries
-                .iter()
-                .map(|entry| entry.manga.id)
-                .filter(|id| !offline::device_cover_saved(*id))
-                .collect();
-            if missing.is_empty() || sweeping.get_value() {
-                return;
-            }
-            sweeping.set_value(true);
-            let client = sweep_client.clone();
-            spawn_local(async move {
-                for id in missing {
-                    if let Err(err) = offline::shell_save_cover(&client, id).await {
-                        leptos::logging::warn!("cover save failed for {id}: {err}");
-                    }
-                }
-                sweeping.set_value(false);
-            });
         });
     }
 
