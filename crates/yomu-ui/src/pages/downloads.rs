@@ -17,12 +17,18 @@ pub fn Downloads() -> impl IntoView {
     // A ticking signal drives the resource; the interval below bumps it every
     // couple of seconds so the queue tracks the worker while the page is open.
     let tick = RwSignal::new(0u32);
+    let conn = crate::use_connectivity();
     let data = LocalResource::new({
         let client = client.clone();
         move || {
             tick.track();
+            conn.track();
             let client = client.clone();
-            async move { client.downloads().await }
+            async move {
+                offline::cached(conn, "downloads", || client.downloads())
+                    .await
+                    .map(|(value, _)| value)
+            }
         }
     });
 

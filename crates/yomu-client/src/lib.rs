@@ -24,6 +24,13 @@ pub enum ClientError {
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
+/// Default per-request deadline. Without one, an unreachable host hangs a
+/// webview fetch for minutes and every "Loading" state with it. reqwest
+/// implements this on wasm too (AbortController).
+const DATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// Deadline for the health probe (boot gate, offline-badge retry).
+const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 // NB: the wasm client deliberately keeps `fetch`'s default (same-origin)
 // credentials mode. Forcing `credentials: include` breaks every cross-origin
 // deployment whose server uses wildcard CORS — a credentialed request may not
@@ -58,7 +65,13 @@ impl YomuClient {
     }
 
     pub async fn health(&self) -> Result<HealthResponse> {
-        self.get("api/v1/health").await
+        // The health probe decides online/offline for the whole UI: keep
+        // it snappier than the data timeout.
+        let req = self
+            .http
+            .get(self.url("api/v1/health")?)
+            .timeout(HEALTH_TIMEOUT);
+        self.send(req).await
     }
 
     // ---- auth ----
@@ -263,7 +276,7 @@ impl YomuClient {
         let url = self
             .page_url(chapter_id, page)
             .ok_or_else(|| ClientError::Transport("invalid page url".into()))?;
-        Self::check_status(self.http.get(url)).await.map(|_| ())
+        self.check_status(self.http.get(url)).await.map(|_| ())
     }
 
     // ---- progress ----
@@ -313,19 +326,26 @@ impl YomuClient {
         &self,
         req: reqwest::RequestBuilder,
     ) -> Result<T> {
-        let resp = Self::check_status(req).await?;
+        let resp = self.check_status(req).await?;
         resp.json::<T>()
             .await
             .map_err(|e| ClientError::Decode(e.to_string()))
     }
 
     async fn send_no_content(&self, req: reqwest::RequestBuilder) -> Result<()> {
-        Self::check_status(req).await.map(|_| ())
+        self.check_status(req).await.map(|_| ())
     }
 
-    async fn check_status(req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let resp = req
-            .send()
+    async fn check_status(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let mut request = req
+            .build()
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        if request.timeout().is_none() {
+            *request.timeout_mut() = Some(DATA_TIMEOUT);
+        }
+        let resp = self
+            .http
+            .execute(request)
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
         let status = resp.status();
