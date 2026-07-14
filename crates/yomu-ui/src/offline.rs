@@ -532,15 +532,21 @@ where
         return Ok((value, true));
     }
     match fetch().await {
+        // NB: a success does NOT promote the app to Online. On the web a
+        // service worker answers cached API reads while the server is
+        // unreachable, so per-request success is not evidence of
+        // connectivity — treating it as such oscillates against real
+        // failures (fetch loop). Only the health probe (boot gate, badge
+        // retry, browser `online` event) sets Online; the probe is
+        // network-only in the service worker for the same reason.
         Ok(value) => {
             cache_put(key, &value);
-            if conn.get_untracked() != Connectivity::Online {
-                conn.set(Connectivity::Online);
-            }
             Ok((value, false))
         }
         Err(err) => {
-            if conn.get_untracked() != Connectivity::Offline {
+            // Only a downgrade, and only from Online: while a probe is
+            // Checking, the probe's own verdict is about to land.
+            if conn.get_untracked() == Connectivity::Online {
                 conn.set(Connectivity::Offline);
             }
             cache_get(key).map(|value| (value, true)).ok_or(err)

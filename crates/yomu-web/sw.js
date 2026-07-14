@@ -137,6 +137,10 @@ self.addEventListener("fetch", (event) => {
     // navigations that must reach the server (they redirect to/from the
     // identity provider), never be answered with the app shell.
     if (request.mode === "navigate") return;
+    // The health probe is how the app decides online/offline: answering it
+    // from the cache would report "online" with the server unreachable
+    // (and set off refetch loops against reads that do fail). Network only.
+    if (url.pathname.endsWith("/api/v1/health")) return;
     if (isImage(url)) {
       event.respondWith(cacheFirst(request));
     } else {

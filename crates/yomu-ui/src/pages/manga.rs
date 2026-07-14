@@ -231,9 +231,15 @@ fn MangaDetail(
     // updater checks is configured on the library page.
     let categories = LocalResource::new({
         let client = client.clone();
+        let conn = crate::use_connectivity();
         move || {
+            conn.track();
             let client = client.clone();
-            async move { client.categories().await }
+            async move {
+                offline::cached(conn, "categories", || client.categories())
+                    .await
+                    .map(|(value, _)| value)
+            }
         }
     });
     let current_category = manga.category.clone();
