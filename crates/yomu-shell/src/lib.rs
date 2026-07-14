@@ -117,6 +117,72 @@ async fn device_save_chapter(
     Ok(())
 }
 
+fn covers_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("covers"))
+}
+
+/// Download a manga's (server-cached) cover into device storage, so the
+/// library keeps its covers with the server unreachable — webviews here
+/// have no service worker to do it. Idempotent per manga: an existing file
+/// is replaced.
+#[tauri::command]
+async fn device_save_cover(
+    app: tauri::AppHandle,
+    http: State<'_, Http>,
+    base: String,
+    manga: String,
+) -> Result<(), String> {
+    checked_id(&manga)?;
+    let base = url::Url::parse(&base).map_err(|e| e.to_string())?;
+    let url = base
+        .join(&format!("api/v1/manga/{manga}/cover"))
+        .map_err(|e| e.to_string())?;
+    let resp = http.0.get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("cover: HTTP {}", resp.status()));
+    }
+    let ext = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(extension_for)
+        .unwrap_or("jpg");
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let dir = covers_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // drop any stale copy under another extension before writing
+    for old in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let path = old.path();
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s == manga)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    std::fs::write(dir.join(format!("{manga}.{ext}")), &bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn device_cover_file(app: &tauri::AppHandle, manga: &str) -> Option<PathBuf> {
+    let dir = covers_dir(app).ok()?;
+    let stem = checked_id(manga).ok()?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_stem()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f == stem)
+        })
+}
+
 /// Remove a chapter from device storage.
 #[tauri::command]
 fn device_delete_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), String> {
@@ -154,9 +220,11 @@ pub fn run() {
         .manage(Http(reqwest::Client::new()))
         .invoke_handler(tauri::generate_handler![
             device_save_chapter,
-            device_delete_chapter
+            device_delete_chapter,
+            device_save_cover
         ])
-        // Serves device-saved pages: yomudev://localhost/chapter/<id>/<n>
+        // Serves device-saved content: yomudev://localhost/chapter/<id>/<n>
+        // and yomudev://localhost/cover/<manga>
         // (http://yomudev.localhost/… on Android/Windows).
         .register_uri_scheme_protocol("yomudev", |ctx, request| {
             let not_found = || {
@@ -167,15 +235,17 @@ pub fn run() {
             };
             let path = request.uri().path().trim_start_matches('/').to_string();
             let mut parts = path.split('/');
-            let (Some("chapter"), Some(chapter), Some(n), None) =
-                (parts.next(), parts.next(), parts.next(), parts.next())
-            else {
-                return not_found();
+            let file = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some("chapter"), Some(chapter), Some(n), None) => {
+                    let Ok(n) = n.parse::<u32>() else {
+                        return not_found();
+                    };
+                    device_page_file(ctx.app_handle(), chapter, n)
+                }
+                (Some("cover"), Some(manga), None, _) => device_cover_file(ctx.app_handle(), manga),
+                _ => None,
             };
-            let Ok(n) = n.parse::<u32>() else {
-                return not_found();
-            };
-            let Some(file) = device_page_file(ctx.app_handle(), chapter, n) else {
+            let Some(file) = file else {
                 return not_found();
             };
             match std::fs::read(&file) {

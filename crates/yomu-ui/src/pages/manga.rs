@@ -25,15 +25,17 @@ pub fn MangaPage() -> impl IntoView {
     // pulled to this device as soon as their server download lands.
     let pull_queue = RwSignal::new(HashSet::<Uuid>::new());
     let client = use_client();
+    let conn = crate::use_connectivity();
     let detail = LocalResource::new({
         let client = client.clone();
         move || {
             refresh.track();
+            conn.track();
             let client = client.clone();
             async move {
                 // The flag marks the detail as served-from-cache (server
                 // unreachable) so rows can show which chapters won't open.
-                offline::with_cache_flagged(&format!("manga:{id}"), client.manga(id).await)
+                offline::cached(conn, &format!("manga:{id}"), || client.manga(id)).await
             }
         }
     });
@@ -175,8 +177,6 @@ fn MangaDetail(
     let client = use_client();
     let manga = detail.manga.clone();
     let id = manga.id;
-    let cover = client.cover_url(id);
-
     // "Continue" goes to the last known position — server's answer merged
     // with any unsynced offline events — or the first chapter.
     let position = offline::effective_position(id, detail.position.clone(), &offline::outbox());
@@ -273,10 +273,7 @@ fn MangaDetail(
     view! {
         <section class="manga-detail">
             <div class="manga-head">
-                {cover
-                    .map(|url| {
-                        view! { <img class="manga-cover large" src=url.to_string() alt=""/> }
-                    })}
+                <crate::cover::Cover manga_id=id large=true/>
                 <div class="manga-head-body">
                     <h2>{manga.title.clone()}</h2>
                     {manga

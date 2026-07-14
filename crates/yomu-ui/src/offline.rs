@@ -363,6 +363,44 @@ pub async fn shell_save_chapter(
     Ok(meta.page_count)
 }
 
+// ---- device covers (shell) ----
+
+const DEVICE_COVERS_KEY: &str = "yomu-device-covers";
+
+/// Manga whose cover is stored in the shell's device storage.
+pub fn device_covers() -> std::collections::BTreeSet<Uuid> {
+    read_json(DEVICE_COVERS_KEY)
+}
+
+pub fn device_cover_saved(manga_id: Uuid) -> bool {
+    device_covers().contains(&manga_id)
+}
+
+/// URL serving the device-saved cover of a manga inside the shell.
+pub fn shell_cover_url(manga_id: Uuid) -> Option<String> {
+    let window = web_sys::window()?;
+    let base = js_sys::Reflect::get(&window, &"YOMU_DEVICE_BASE".into())
+        .ok()?
+        .as_string()?;
+    Some(format!("{base}cover/{manga_id}"))
+}
+
+/// Download a manga's cover into the shell's device storage and remember
+/// it, so the library keeps its covers offline (no service worker there).
+pub async fn shell_save_cover(
+    client: &yomu_client::YomuClient,
+    manga_id: Uuid,
+) -> Result<(), String> {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
+    let _ = js_sys::Reflect::set(&args, &"manga".into(), &manga_id.to_string().into());
+    shell_invoke("device_save_cover", args).await?;
+    let mut covers = device_covers();
+    covers.insert(manga_id);
+    write_json(DEVICE_COVERS_KEY, &covers);
+    Ok(())
+}
+
 /// Delete a device-saved chapter from the shell's storage.
 pub async fn shell_delete_chapter(chapter_id: Uuid) -> Result<(), String> {
     let args = js_sys::Object::new();
@@ -465,32 +503,48 @@ pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
-/// Last-known-good wrapper for a fetch result: on success cache it under
-/// `key` and return it; on failure fall back to the cached copy, propagating
-/// the error only when there is nothing cached. Collapses the fetch → cache /
-/// cache_get pattern repeated across the pages.
-pub fn with_cache<T, E>(key: &str, result: std::result::Result<T, E>) -> std::result::Result<T, E>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
-    with_cache_flagged(key, result).map(|(value, _)| value)
-}
-
-/// Like [`with_cache`] but also reports whether the value came from the cache
-/// (i.e. the server was unreachable) — used to flag stale/offline views.
-pub fn with_cache_flagged<T, E>(
+/// Connectivity-aware last-known-good read; the one data path every page
+/// resource goes through. Online: fetch, cache the result under `key`,
+/// fall back to the cached copy on failure — and record the failure by
+/// flipping the app [`Connectivity`] to `Offline`, so the *first* failed
+/// request is the last one that touches the network. Not online: serve the
+/// cached copy immediately without fetching; only when nothing is cached
+/// does the fetch still run (it fails fast now, and the server may be
+/// back). The bool is "came from the cache" — used to flag stale views.
+///
+/// Callers' resource closures should read the connectivity signal in their
+/// tracked (sync) part, so a successful badge retry refetches every open
+/// view.
+pub async fn cached<T, E, Fut>(
+    conn: leptos::prelude::RwSignal<crate::Connectivity>,
     key: &str,
-    result: std::result::Result<T, E>,
+    fetch: impl FnOnce() -> Fut,
 ) -> std::result::Result<(T, bool), E>
 where
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
-    match result {
+    use crate::Connectivity;
+    use leptos::prelude::{GetUntracked, Set};
+    if conn.get_untracked() != Connectivity::Online
+        && let Some(value) = cache_get(key)
+    {
+        return Ok((value, true));
+    }
+    match fetch().await {
         Ok(value) => {
             cache_put(key, &value);
+            if conn.get_untracked() != Connectivity::Online {
+                conn.set(Connectivity::Online);
+            }
             Ok((value, false))
         }
-        Err(err) => cache_get(key).map(|value| (value, true)).ok_or(err),
+        Err(err) => {
+            if conn.get_untracked() != Connectivity::Offline {
+                conn.set(Connectivity::Offline);
+            }
+            cache_get(key).map(|value| (value, true)).ok_or(err)
+        }
     }
 }
 

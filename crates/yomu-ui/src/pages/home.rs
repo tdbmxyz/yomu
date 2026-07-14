@@ -13,11 +13,17 @@ pub fn Home() -> impl IntoView {
     let client = use_client();
     // Same resource + last-known-good cache as the Library page, so both
     // tabs work offline in the shell.
+    let conn = crate::use_connectivity();
     let library = LocalResource::new({
         let client = client.clone();
         move || {
+            conn.track();
             let client = client.clone();
-            async move { offline::with_cache("library", client.library().await) }
+            async move {
+                offline::cached(conn, "library", || client.library())
+                    .await
+                    .map(|(value, _)| value)
+            }
         }
     });
 
@@ -155,22 +161,15 @@ fn ShelfCard(
     subtitle: String,
     badge: Option<String>,
 ) -> impl IntoView {
-    let client = use_client();
     let id = entry.manga.id;
     let href = match href_chapter {
         Some((chapter, page)) => format!("/read/{id}/{chapter}?page={page}"),
         None => format!("/manga/{id}"),
     };
-    let cover = client.cover_url(id);
     view! {
         <a class="shelf-card" href=href>
             <span class="cover-wrap">
-                {cover
-                    .map(|url| {
-                        view! {
-                            <img class="manga-cover" src=url.to_string() loading="lazy" alt=""/>
-                        }
-                    })}
+                <crate::cover::Cover manga_id=id/>
                 {badge.map(|b| view! { <span class="unread-badge">{b}</span> })}
             </span>
             <span class="manga-title">{entry.manga.title.clone()}</span>

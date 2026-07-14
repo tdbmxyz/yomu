@@ -11,22 +11,68 @@ pub fn Library() -> impl IntoView {
     let refresh = RwSignal::new(0u32);
     // Last-known-good fallbacks: without a service worker (Tauri shell)
     // the library stays browsable while the server is unreachable.
+    let conn = crate::use_connectivity();
     let library = LocalResource::new({
         let client = client.clone();
         move || {
             refresh.track();
+            conn.track();
             let client = client.clone();
-            async move { offline::with_cache("library", client.library().await) }
+            async move {
+                offline::cached(conn, "library", || client.library())
+                    .await
+                    .map(|(value, _)| value)
+            }
         }
     });
     let categories = LocalResource::new({
         let client = client.clone();
         move || {
             refresh.track();
+            conn.track();
             let client = client.clone();
-            async move { offline::with_cache("categories", client.categories().await) }
+            async move {
+                offline::cached(conn, "categories", || client.categories())
+                    .await
+                    .map(|(value, _)| value)
+            }
         }
     });
+    // Shells have no service worker to cache covers: whenever the library
+    // loads with the server reachable, quietly pull any cover not yet in
+    // device storage, so the grid keeps its covers offline. Sequential and
+    // idempotent (the device-cover mark set converges it).
+    if offline::shell_available() {
+        let sweep_client = client.clone();
+        let sweeping = StoredValue::new(false);
+        Effect::new(move |_| {
+            if conn.get() != crate::Connectivity::Online {
+                return;
+            }
+            let Some(Ok(entries)) = library.get() else {
+                return;
+            };
+            let missing: Vec<uuid::Uuid> = entries
+                .iter()
+                .map(|entry| entry.manga.id)
+                .filter(|id| !offline::device_cover_saved(*id))
+                .collect();
+            if missing.is_empty() || sweeping.get_value() {
+                return;
+            }
+            sweeping.set_value(true);
+            let client = sweep_client.clone();
+            spawn_local(async move {
+                for id in missing {
+                    if let Err(err) = offline::shell_save_cover(&client, id).await {
+                        leptos::logging::warn!("cover save failed for {id}: {err}");
+                    }
+                }
+                sweeping.set_value(false);
+            });
+        });
+    }
+
     // None = "All".
     let selected = RwSignal::new(None::<String>);
     // In-library filters, applied client-side over the loaded list.
@@ -62,7 +108,6 @@ pub fn Library() -> impl IntoView {
                         .into_any()
                 }
                 Some(Ok(list)) => {
-                    let client = use_client();
                     let needle = search.get().trim().to_lowercase();
                     let genre = active_genre.get();
                     let filtered: Vec<_> = list
@@ -104,7 +149,6 @@ pub fn Library() -> impl IntoView {
                             {filtered
                                 .into_iter()
                                 .map(|entry| {
-                                    let cover = client.cover_url(entry.manga.id);
                                     let device = device_counts
                                         .get(&entry.manga.id)
                                         .copied()
@@ -126,17 +170,7 @@ pub fn Library() -> impl IntoView {
                                             href=format!("/manga/{}", entry.manga.id)
                                         >
                                             <span class="cover-wrap">
-                                                {cover
-                                                    .map(|url| {
-                                                        view! {
-                                                            <img
-                                                                class="manga-cover"
-                                                                src=url.to_string()
-                                                                loading="lazy"
-                                                                alt=""
-                                                            />
-                                                        }
-                                                    })}
+                                                <crate::cover::Cover manga_id=entry.manga.id/>
                                                 {badge
                                                     .map(|b| {
                                                         view! { <span class="unread-badge">{b}</span> }

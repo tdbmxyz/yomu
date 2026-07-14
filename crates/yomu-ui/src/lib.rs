@@ -3,6 +3,7 @@
 //! chaos.
 
 mod chapter_actions;
+mod cover;
 mod format;
 pub mod offline;
 mod pager;
@@ -25,32 +26,63 @@ pub fn use_client() -> YomuClient {
     YomuClient::new(config.api_base)
 }
 
+/// App-wide connectivity to the configured server. `Offline` puts every
+/// cached read (see [`offline::cached`]) in cache-first mode — no network
+/// until the user retries from the offline badge (or the browser fires
+/// `online`). `Checking` is a probe in flight: reads stay cache-first so a
+/// retry doesn't stampede requests before the probe decides.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Connectivity {
+    Checking,
+    Online,
+    Offline,
+}
+
+pub fn use_connectivity() -> RwSignal<Connectivity> {
+    use_context().expect("Connectivity provided by App")
+}
+
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
+    let conn = RwSignal::new(Connectivity::Checking);
+    provide_context(conn);
     offline::apply_theme(offline::theme());
 
-    // Sync any progress recorded while offline: once at startup, and again
-    // whenever the browser reports connectivity is back.
+    // Whenever the server (re)becomes reachable, sync progress and read
+    // marks recorded while it wasn't. Covers startup (the boot gate flips
+    // to Online) and every later recovery, badge retries included.
     let flush_client = YomuClient::new(config.api_base.clone());
-    spawn_local({
-        let client = flush_client.clone();
-        async move {
-            offline::flush_outbox(&client).await;
-            offline::flush_marks(&client).await;
+    Effect::new(move |_| {
+        if conn.get() != Connectivity::Online {
+            return;
         }
-    });
-    let online_handle = window_event_listener(leptos::ev::online, move |_| {
         let client = flush_client.clone();
         spawn_local(async move {
             offline::flush_outbox(&client).await;
             offline::flush_marks(&client).await;
         });
     });
+    // The OS says a network came back: one free probe. This is the only
+    // automatic recovery path — everything else is the manual badge.
+    let probe_client = YomuClient::new(config.api_base.clone());
+    let online_handle = window_event_listener(leptos::ev::online, move |_| {
+        if conn.get_untracked() == Connectivity::Online {
+            return;
+        }
+        let client = probe_client.clone();
+        spawn_local(async move {
+            if client.health().await.is_ok() {
+                offline::mark_server_seen(client.base().as_str());
+                conn.set(Connectivity::Online);
+            }
+        });
+    });
     on_cleanup(move || online_handle.remove());
 
     view! {
         <ServerGate>
+            <OfflineBadge/>
             <Router>
                 <nav class="topbar">
                     <span class="brand">"yomu"</span>
@@ -94,80 +126,55 @@ pub fn App(config: AppConfig) -> impl IntoView {
 #[derive(Clone, Copy, PartialEq)]
 enum GateState {
     Checking,
-    /// Server answered: render normally.
+    /// Server answered, or answered in the past (then `Connectivity` is
+    /// `Offline` and the badge shows): render normally.
     Ready,
-    /// Server unreachable but reached before: render the cached UI with a
-    /// non-blocking offline indicator. Reading downloaded chapters is the
-    /// expected behaviour here, so the connect form must not block it.
-    Offline,
     /// Server unreachable and never reached from this address: genuine
     /// first-run or a wrong address — show the connect form.
     Unreachable,
 }
 
-/// Blocks the app behind a health check so a shell (Tauri, or a fresh PWA
-/// install) pointing at the wrong place gets a "connect to your server"
-/// form instead of a wall of failed requests. The chosen URL is the
-/// `yomu-api-base` localStorage override the API-base resolution already
-/// honors.
+/// Blocks the app behind one bounded health check (3 s — see the client's
+/// probe timeout) so a shell (Tauri, or a fresh PWA install) pointing at
+/// the wrong place gets a "connect to your server" form instead of a wall
+/// of failed requests. The chosen URL is the `yomu-api-base` localStorage
+/// override the API-base resolution already honors.
 ///
 /// The decision is "have we ever reached *this* address?", not
 /// `navigator.onLine`: away from a self-hosted server the device still has
 /// connectivity (`onLine` is true) with no route home, and blocking there
 /// would hide the downloaded library. A server that answered before is
-/// treated as merely offline (gate opens, cached UI + offline hint); one
-/// that never answered is treated as misconfigured (connect form).
+/// treated as merely offline — the gate opens onto the cached UI and the
+/// offline badge takes over; one that never answered is treated as
+/// misconfigured (connect form).
 #[component]
 fn ServerGate(children: ChildrenFn) -> impl IntoView {
     let gate = RwSignal::new(GateState::Checking);
+    let conn = use_connectivity();
     let client = use_client();
     let base = client.base().to_string();
-    spawn_local({
-        let client = client.clone();
-        let base = base.clone();
-        async move {
-            match client.health().await {
-                Ok(_) => {
-                    offline::mark_server_seen(&base);
-                    gate.set(GateState::Ready);
-                }
-                Err(_) if offline::server_seen(&base) => gate.set(GateState::Offline),
-                Err(_) => gate.set(GateState::Unreachable),
-            }
-        }
-    });
-
-    // When the browser regains connectivity, re-check: a server that comes
-    // back clears the offline banner without a reload. Only promotes
-    // towards Ready — it never throws an offline reader back to the gate.
-    let online_handle = window_event_listener(leptos::ev::online, move |_| {
-        if gate.get_untracked() == GateState::Ready {
-            return;
-        }
-        let client = client.clone();
-        let base = base.clone();
-        spawn_local(async move {
-            if client.health().await.is_ok() {
+    spawn_local(async move {
+        match client.health().await {
+            Ok(_) => {
                 offline::mark_server_seen(&base);
+                conn.set(Connectivity::Online);
                 gate.set(GateState::Ready);
             }
-        });
+            Err(_) if offline::server_seen(&base) => {
+                conn.set(Connectivity::Offline);
+                gate.set(GateState::Ready);
+            }
+            Err(_) => {
+                conn.set(Connectivity::Offline);
+                gate.set(GateState::Unreachable);
+            }
+        }
     });
-    on_cleanup(move || online_handle.remove());
 
     view! {
         {move || match gate.get() {
             GateState::Checking => view! { <p class="muted gate-msg">"Connecting…"</p> }.into_any(),
             GateState::Ready => children().into_any(),
-            GateState::Offline => {
-                view! {
-                    <div class="offline-banner" title="The server is unreachable — showing saved content.">
-                        "offline"
-                    </div>
-                    {children()}
-                }
-                    .into_any()
-            }
             GateState::Unreachable => {
                 view! {
                     <section class="server-gate">
@@ -177,7 +184,7 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
                             <code>"http://192.168.1.128:4700"</code> ")."
                         </p>
                         <ConnectForm>
-                            <button on:click=move |_| gate.set(GateState::Offline)>
+                            <button on:click=move |_| gate.set(GateState::Ready)>
                                 "Continue anyway"
                             </button>
                         </ConnectForm>
@@ -185,6 +192,62 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
                 }
                     .into_any()
             }
+        }}
+    }
+}
+
+/// The offline indicator and the way back: shown whenever the server isn't
+/// known to be reachable, tapping it runs one bounded health probe. On
+/// success every open view refreshes by itself (resources track
+/// [`Connectivity`]) and queued progress flushes (see `App`).
+#[component]
+fn OfflineBadge() -> impl IntoView {
+    let conn = use_connectivity();
+    // One "still offline" flash after a failed retry, cleared on a timer.
+    let flash = RwSignal::new(false);
+    let client = use_client();
+    let retry = move |_| {
+        if conn.get_untracked() != Connectivity::Offline {
+            return; // probe already in flight
+        }
+        conn.set(Connectivity::Checking);
+        let client = client.clone();
+        spawn_local(async move {
+            match client.health().await {
+                Ok(_) => {
+                    offline::mark_server_seen(client.base().as_str());
+                    conn.set(Connectivity::Online);
+                }
+                Err(_) => {
+                    conn.set(Connectivity::Offline);
+                    flash.set(true);
+                    set_timeout(
+                        move || flash.set(false),
+                        std::time::Duration::from_millis(1800),
+                    );
+                }
+            }
+        });
+    };
+
+    view! {
+        {move || {
+            (conn.get() != Connectivity::Online)
+                .then(|| {
+                    view! {
+                        <button
+                            class="offline-banner"
+                            title="The server is unreachable — showing saved content. Tap to retry."
+                            on:click=retry.clone()
+                        >
+                            {move || match conn.get() {
+                                Connectivity::Checking => "connecting…",
+                                _ if flash.get() => "still offline",
+                                _ => "offline — retry",
+                            }}
+                        </button>
+                    }
+                })
         }}
     }
 }

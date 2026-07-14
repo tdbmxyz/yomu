@@ -8,15 +8,22 @@ use leptos_router::hooks::use_params_map;
 use yomu_domain::{MangaSummary, SourceInfo};
 
 use super::search::SummaryGrid;
+use crate::offline;
 use crate::use_client;
 
 /// The list of configured sources; browsable ones link to their catalog.
 #[component]
 pub fn Sources() -> impl IntoView {
     let client = use_client();
+    let conn = crate::use_connectivity();
     let sources = LocalResource::new(move || {
+        conn.track();
         let client = client.clone();
-        async move { client.sources().await }
+        async move {
+            offline::cached(conn, "sources", || client.sources())
+                .await
+                .map(|(value, _)| value)
+        }
     });
 
     view! {
