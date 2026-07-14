@@ -1380,14 +1380,14 @@ body:has(.reader-overlay.flow) main {
   text-align: center;
 }
 
-/* Non-blocking "server unreachable, showing saved content" hint. Fixed,
-   out of the way, and it never intercepts taps. */
+/* Non-blocking "server unreachable, showing saved content" hint — and the
+   manual way back online: tapping it runs one bounded health probe. */
 .offline-banner {
   position: fixed;
   top: calc(0.4rem + env(safe-area-inset-top, 0px));
   right: 0.5rem;
   z-index: 40;
-  pointer-events: none;
+  cursor: pointer;
   font-size: 0.7rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;

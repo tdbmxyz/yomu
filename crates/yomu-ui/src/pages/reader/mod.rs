@@ -86,23 +86,36 @@ fn ReaderInner() -> impl IntoView {
         StoredValue::new(std::collections::HashMap::new());
 
     let client = use_client();
+    let conn = crate::use_connectivity();
+    // NB: the reader's resources deliberately do NOT track `conn` — a
+    // badge retry mid-read would refetch them and rebuild the strip at the
+    // mount-time page. They read it untracked for the offline shortcut.
     let pages = LocalResource::new({
         let client = client.clone();
         move || {
             let client = client.clone();
             async move {
-                match client.chapter_pages(chapter_id).await {
-                    Ok(meta) => Ok(meta),
-                    // Saved on this device: enough metadata to read with
-                    // the server unreachable.
-                    Err(err) => match offline::device_chapter_pages(chapter_id) {
-                        Some(page_count) => Ok(yomu_domain::PagesResponse {
+                // Saved on this device: enough metadata to read with the
+                // server unreachable — and consulted *first* while offline,
+                // so opening a downloaded chapter never waits on the
+                // network.
+                let device = || {
+                    offline::device_chapter_pages(chapter_id).map(|page_count| {
+                        yomu_domain::PagesResponse {
                             chapter_id,
                             page_count,
                             downloaded: false,
-                        }),
-                        None => Err(err),
-                    },
+                        }
+                    })
+                };
+                if conn.get_untracked() != crate::Connectivity::Online
+                    && let Some(meta) = device()
+                {
+                    return Ok(meta);
+                }
+                match client.chapter_pages(chapter_id).await {
+                    Ok(meta) => Ok(meta),
+                    Err(err) => device().ok_or(err),
                 }
             }
         }
@@ -114,7 +127,11 @@ fn ReaderInner() -> impl IntoView {
             async move {
                 // offline: chapter title + prev/next come from the
                 // last-known-good copy the manga page stored
-                offline::with_cache(&format!("manga:{manga_id}"), client.manga(manga_id).await)
+                offline::cached(conn, &format!("manga:{manga_id}"), || {
+                    client.manga(manga_id)
+                })
+                .await
+                .map(|(value, _)| value)
             }
         }
     });
