@@ -95,28 +95,20 @@ fn ReaderInner() -> impl IntoView {
         move || {
             let client = client.clone();
             async move {
-                // Saved on this device: enough metadata to read with the
-                // server unreachable — and consulted *first* while offline,
-                // so opening a downloaded chapter never waits on the
-                // network.
-                let device = || {
-                    offline::device_chapter_pages(chapter_id).map(|page_count| {
-                        yomu_domain::PagesResponse {
-                            chapter_id,
-                            page_count,
-                            downloaded: false,
-                        }
-                    })
-                };
-                if conn.get_untracked() != crate::Connectivity::Online
-                    && let Some(meta) = device()
-                {
-                    return Ok(meta);
+                // A chapter saved on this device is read entirely from the
+                // device: the images already come from the shell/worker
+                // copy unconditionally (see page_source), so its page
+                // count must too — otherwise opening a saved chapter
+                // waits on a server round-trip that adds nothing (and, on
+                // a bad link, seconds).
+                if let Some(page_count) = offline::device_chapter_pages(chapter_id) {
+                    return Ok(yomu_domain::PagesResponse {
+                        chapter_id,
+                        page_count,
+                        downloaded: false,
+                    });
                 }
-                match client.chapter_pages(chapter_id).await {
-                    Ok(meta) => Ok(meta),
-                    Err(err) => device().ok_or(err),
-                }
+                client.chapter_pages(chapter_id).await
             }
         }
     });
