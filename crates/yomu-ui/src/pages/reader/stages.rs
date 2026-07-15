@@ -544,7 +544,15 @@ pub(super) fn vertical_strip(
         let Some(next) = chapters.get(index + 1).map(|c| c.id) else {
             return; // already at the last chapter
         };
-        if let Some(count) = page_counts.with_value(|counts| counts.get(&next).copied()) {
+        // device-saved neighbours append without a network round-trip
+        // (their images come from the device copy anyway)
+        if let Some(count) = page_counts
+            .with_value(|counts| counts.get(&next).copied())
+            .or_else(|| offline::device_chapter_pages(next))
+        {
+            page_counts.update_value(|counts| {
+                counts.insert(next, count);
+            });
             segments.update(|s| s.push((next, count)));
             return;
         }
@@ -617,7 +625,13 @@ pub(super) fn vertical_strip(
                 }
             });
         };
-        if let Some(count) = page_counts.with_value(|counts| counts.get(&prev).copied()) {
+        if let Some(count) = page_counts
+            .with_value(|counts| counts.get(&prev).copied())
+            .or_else(|| offline::device_chapter_pages(prev))
+        {
+            page_counts.update_value(|counts| {
+                counts.insert(prev, count);
+            });
             prepend(count);
             return;
         }
