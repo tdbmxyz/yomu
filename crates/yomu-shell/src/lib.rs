@@ -8,9 +8,10 @@
 //! in-app connect screen, which is the path on Android).
 //!
 //! Device downloads: webviews here have no service worker, so "save to
-//! device" calls the [`device_save_chapter`] command, which stores pages
-//! under the app data directory; the reader loads them back through the
-//! `yomudev` custom protocol (base URL injected as `window.YOMU_DEVICE_BASE`).
+//! device" drives [`device_begin_chapter`] / [`device_save_page`] /
+//! [`device_finish_chapter`], which store pages under the app data
+//! directory; the reader loads them back through the `yomudev` custom
+//! protocol (base URL injected as `window.YOMU_DEVICE_BASE`).
 
 use std::path::PathBuf;
 
@@ -75,46 +76,56 @@ fn content_type_for(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Download every page of a chapter from the server into device storage.
-/// Written to a `.partial-` directory and renamed, so a stored chapter is
-/// always complete (same rule as the server's downloader).
+/// Device chapter saves run page by page (the UI drives the loop so it
+/// can show progress), against a `.partial-` directory that only becomes
+/// the chapter on `device_finish_chapter` — a stored chapter is always
+/// complete (same rule as the server's downloader).
 #[tauri::command]
-async fn device_save_chapter(
+fn device_begin_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), String> {
+    checked_id(&chapter)?;
+    let partial = chapters_dir(&app)?.join(format!(".partial-{chapter}"));
+    let _ = std::fs::remove_dir_all(&partial);
+    std::fs::create_dir_all(&partial).map_err(|e| e.to_string())
+}
+
+/// Download one page of a chapter into its `.partial-` directory.
+#[tauri::command]
+async fn device_save_page(
     app: tauri::AppHandle,
     http: State<'_, Http>,
     base: String,
     chapter: String,
-    count: u32,
+    page: u32,
 ) -> Result<(), String> {
     checked_id(&chapter)?;
     let base = url::Url::parse(&base).map_err(|e| e.to_string())?;
+    let url = base
+        .join(&format!("api/v1/chapters/{chapter}/pages/{page}"))
+        .map_err(|e| e.to_string())?;
+    let resp = http.0.get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("page {page}: HTTP {}", resp.status()));
+    }
+    let ext = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(extension_for)
+        .unwrap_or("jpg");
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let partial = chapters_dir(&app)?.join(format!(".partial-{chapter}"));
+    std::fs::write(partial.join(format!("{page:04}.{ext}")), &bytes).map_err(|e| e.to_string())
+}
+
+/// Land a completed `.partial-` directory as the stored chapter.
+#[tauri::command]
+fn device_finish_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), String> {
+    checked_id(&chapter)?;
     let dir = chapters_dir(&app)?;
     let partial = dir.join(format!(".partial-{chapter}"));
-    let _ = std::fs::remove_dir_all(&partial);
-    std::fs::create_dir_all(&partial).map_err(|e| e.to_string())?;
-
-    for n in 0..count {
-        let url = base
-            .join(&format!("api/v1/chapters/{chapter}/pages/{n}"))
-            .map_err(|e| e.to_string())?;
-        let resp = http.0.get(url).send().await.map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("page {n}: HTTP {}", resp.status()));
-        }
-        let ext = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(extension_for)
-            .unwrap_or("jpg");
-        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        std::fs::write(partial.join(format!("{n:04}.{ext}")), &bytes).map_err(|e| e.to_string())?;
-    }
-
     let target = dir.join(&chapter);
     let _ = std::fs::remove_dir_all(&target);
-    std::fs::rename(&partial, &target).map_err(|e| e.to_string())?;
-    Ok(())
+    std::fs::rename(&partial, &target).map_err(|e| e.to_string())
 }
 
 fn covers_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -213,7 +224,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Http(reqwest::Client::new()))
         .invoke_handler(tauri::generate_handler![
-            device_save_chapter,
+            device_begin_chapter,
+            device_save_page,
+            device_finish_chapter,
             device_delete_chapter,
             device_save_cover
         ])

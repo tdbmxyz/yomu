@@ -9,6 +9,24 @@ use super::{NotFound, param_uuid};
 use crate::offline;
 use crate::use_client;
 
+/// Which download tier a live progress ring belongs to (its color).
+#[derive(Clone, Copy, PartialEq)]
+enum ProgressTier {
+    Server,
+    Local,
+}
+
+/// Live per-chapter download progress, drawn as the row's perimeter ring.
+#[derive(Clone, Copy)]
+struct RowProgress {
+    done: u32,
+    total: u32,
+    tier: ProgressTier,
+    failed: bool,
+}
+
+type ProgressMap = RwSignal<std::collections::HashMap<Uuid, RowProgress>>;
+
 #[component]
 pub fn MangaPage() -> impl IntoView {
     let Some(id) = param_uuid("id") else {
@@ -24,6 +42,8 @@ pub fn MangaPage() -> impl IntoView {
     // "Download (both)": chapters queued on the server that should be
     // pulled to this device as soon as their server download lands.
     let pull_queue = RwSignal::new(HashSet::<Uuid>::new());
+    // Live download progress per chapter (both tiers), drawn by the rows.
+    let progress: ProgressMap = RwSignal::new(std::collections::HashMap::new());
     let client = use_client();
     let conn = crate::use_connectivity();
     let detail = LocalResource::new({
@@ -101,6 +121,37 @@ pub fn MangaPage() -> impl IntoView {
             )
             .ok();
             poll.set_value(handle);
+            // Each tick also pulls the active download's page progress
+            // (the server tracks it per page) into the rows' rings.
+            if conn.get_untracked() == crate::Connectivity::Online {
+                let client = use_client();
+                spawn_local(async move {
+                    let Ok(downloads) = client.downloads().await else {
+                        return;
+                    };
+                    progress.update(|map| {
+                        map.retain(|_, p| p.tier != ProgressTier::Server);
+                        for entry in &downloads.queue {
+                            if let Some(p) = &entry.progress {
+                                map.insert(
+                                    entry.chapter_id,
+                                    RowProgress {
+                                        done: p.page,
+                                        total: p.total,
+                                        tier: ProgressTier::Server,
+                                        failed: false,
+                                    },
+                                );
+                            }
+                        }
+                    });
+                });
+            }
+        } else if !busy {
+            // queue drained: no server ring should linger
+            progress.update(|map| {
+                map.retain(|_, p| p.tier != ProgressTier::Server);
+            });
         }
     });
     on_cleanup(move || {
@@ -140,7 +191,8 @@ pub fn MangaPage() -> impl IntoView {
             let client = client.clone();
             spawn_local(async move {
                 for qid in ready {
-                    if let Err(err) = save_locally(&client, id, qid).await {
+                    if let Err(err) = save_locally(&client, id, qid, progress).await {
+                        status.set(Some(format!("Local save failed: {err}")));
                         leptos::logging::warn!("local pull: {err}");
                     }
                 }
@@ -153,7 +205,7 @@ pub fn MangaPage() -> impl IntoView {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             Some(Ok((detail, offline))) => {
-                view! { <MangaDetail detail offline refresh status selected anchor pull_queue/> }.into_any()
+                view! { <MangaDetail detail offline refresh status selected anchor pull_queue progress/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -173,6 +225,7 @@ fn MangaDetail(
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
     pull_queue: RwSignal<HashSet<Uuid>>,
+    progress: ProgressMap,
 ) -> impl IntoView {
     let client = use_client();
     let manga = detail.manga.clone();
@@ -354,25 +407,65 @@ fn MangaDetail(
                 selected
                 anchor
                 pull_queue
+                progress
             />
         </section>
     }
 }
 
 /// Save one chapter to this device (shell storage or, in the browser,
-/// the service-worker cache) and record the mark.
+/// the service-worker cache), drawing per-page progress on the row's
+/// ring, and record the mark. A failure flashes the ring red before the
+/// row falls back to its previous state.
 async fn save_locally(
     client: &yomu_client::YomuClient,
     manga_id: Uuid,
     id: Uuid,
+    progress: ProgressMap,
 ) -> Result<(), String> {
-    let count = if offline::shell_available() {
-        offline::shell_save_chapter(client, id).await?
-    } else {
-        offline::prefetch_chapter(client, id).await?
-    };
-    offline::mark_device_chapter(manga_id, id, count);
-    Ok(())
+    let result = offline::save_chapter_with_progress(client, id, |done, total| {
+        progress.update(|map| {
+            map.insert(
+                id,
+                RowProgress {
+                    done,
+                    total,
+                    tier: ProgressTier::Local,
+                    failed: false,
+                },
+            );
+        });
+    })
+    .await;
+    match result {
+        Ok(count) => {
+            offline::mark_device_chapter(manga_id, id, count);
+            progress.update(|map| {
+                map.remove(&id);
+            });
+            Ok(())
+        }
+        Err(err) => {
+            progress.update(|map| {
+                let entry = map.entry(id).or_insert(RowProgress {
+                    done: 0,
+                    total: 1,
+                    tier: ProgressTier::Local,
+                    failed: true,
+                });
+                entry.failed = true;
+            });
+            set_timeout(
+                move || {
+                    progress.try_update(|map| {
+                        map.remove(&id);
+                    });
+                },
+                std::time::Duration::from_millis(1500),
+            );
+            Err(err)
+        }
+    }
 }
 
 #[component]
@@ -386,6 +479,7 @@ fn ChapterList(
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
     pull_queue: RwSignal<HashSet<Uuid>>,
+    progress: ProgressMap,
 ) -> impl IntoView {
     // Display newest chapter first. Only the on-page list is reversed —
     // `list_chapters` stays in reading order (Chapter 1 → N), which the
@@ -535,7 +629,8 @@ fn ChapterList(
                 let client = use_client();
                 spawn_local(async move {
                     for id in pull {
-                        if let Err(err) = save_locally(&client, manga_id, id).await {
+                        if let Err(err) = save_locally(&client, manga_id, id, progress).await {
+                            status.set(Some(format!("Local save failed: {err}")));
                             leptos::logging::warn!("local download: {err}");
                         }
                     }
@@ -653,6 +748,7 @@ fn ChapterList(
                             selection_active
                             press
                             toggle
+                            progress
                         />
                     }
                 })
@@ -681,9 +777,11 @@ fn ChapterItem(
     selection_active: Memo<bool>,
     press: Callback<usize>,
     toggle: Callback<usize>,
+    progress: ProgressMap,
 ) -> impl IntoView {
     let id = chapter.id;
     let read = chapter.read;
+    let row_progress = move || progress.with(|map| map.get(&id).copied());
     let is_selected = Memo::new(move |_| selected.with(|s| s.contains(&id)));
 
     // Long-press detection: a primary pointer held ~500ms without moving.
@@ -776,6 +874,7 @@ fn ChapterItem(
             class:dl-local=move || on_device.get() && !on_server
             class:dl-both=move || on_server && on_device.get()
             class:dl-busy=dl_busy
+            class:dl-active=move || row_progress().is_some()
             class:dl-failed=dl_failed
             title=move || {
                 if offline && !on_device.get() {
@@ -792,6 +891,32 @@ fn ChapterItem(
             on:click=click
             on:contextmenu=context_menu
         >
+            // Live download progress: a stroke tracing the row's border
+            // clockwise from the top-left, proportional to pages done —
+            // green for device saves, blue for server downloads.
+            {move || {
+                row_progress()
+                    .map(|p| {
+                        let pct = if p.total > 0 {
+                            f64::from(p.done) / f64::from(p.total) * 100.0
+                        } else {
+                            0.0
+                        };
+                        let class = match (p.failed, p.tier) {
+                            (true, _) => "dl-ring ring-failed",
+                            (false, ProgressTier::Local) => "dl-ring ring-local",
+                            (false, ProgressTier::Server) => "dl-ring ring-server",
+                        };
+                        view! {
+                            <svg class=class aria-hidden="true">
+                                <rect
+                                    pathLength="100"
+                                    stroke-dasharray=format!("{pct:.1} 100")
+                                ></rect>
+                            </svg>
+                        }
+                    })
+            }}
             <Show when=move || selection_active.get()>
                 <span class="select-box" aria-hidden="true">
                     {move || if is_selected.get() { "☑" } else { "☐" }}
