@@ -923,6 +923,50 @@ a.source-card:hover {
   }
 }
 
+/* live download progress: an SVG stroke over the row border, tracing the
+   perimeter clockwise from the top-left, proportional to pages done
+   (pathLength=100 + dasharray set inline). The row underneath keeps the
+   faint pulse as the "remainder" cue. */
+.chapter-item {
+  position: relative;
+}
+
+.chapter-item.dl-active {
+  animation: dl-pulse 1.2s ease-in-out infinite;
+}
+
+.dl-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.dl-ring rect {
+  x: 1px;
+  y: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  rx: 7px;
+  fill: none;
+  stroke-width: 2px;
+  transition: stroke-dasharray 0.3s linear;
+}
+
+.dl-ring.ring-local rect {
+  stroke: var(--saved);
+}
+
+.dl-ring.ring-server rect {
+  stroke: var(--server);
+}
+
+.dl-ring.ring-failed rect {
+  stroke: var(--down);
+  transition: none;
+}
+
 /* accent edge bar, not a border: the border is the download-state cue */
 .chapter-item.current {
   box-shadow: inset 3px 0 0 var(--accent);

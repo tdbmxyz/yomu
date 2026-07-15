@@ -166,16 +166,20 @@ pub fn service_worker_active() -> bool {
     sw.controller().is_some()
 }
 
-/// Fetch chapter metadata and every page image once. The service worker's
-/// runtime caching stores each response, after which the chapter (and its
-/// metadata) is readable with the server unreachable. Refuses to run when
-/// no service worker controls the page: the fetches would succeed but cache
-/// nothing, and the chapter would be marked "on device" while it isn't.
-pub async fn prefetch_chapter(
+/// Save a chapter to this device page by page, calling `on_page(done,
+/// total)` after each — the caller draws the progress. In the shell,
+/// pages land in the app's data directory (`.partial-` staging, renamed
+/// whole at the end); in the browser the service worker's runtime caching
+/// stores each fetched response, refused when no worker controls the page
+/// (the fetches would succeed but cache nothing, and the chapter would be
+/// marked "on device" while it isn't).
+pub async fn save_chapter_with_progress(
     client: &yomu_client::YomuClient,
     chapter_id: Uuid,
+    on_page: impl Fn(u32, u32),
 ) -> Result<u32, String> {
-    if !service_worker_active() {
+    let shell = shell_available();
+    if !shell && !service_worker_active() {
         return Err(
             "offline cache unavailable (no service worker; first visit or unsupported browser)"
                 .into(),
@@ -185,13 +189,45 @@ pub async fn prefetch_chapter(
         .chapter_pages(chapter_id)
         .await
         .map_err(|e| e.to_string())?;
-    for n in 0..meta.page_count {
-        client
-            .fetch_page(chapter_id, n)
-            .await
-            .map_err(|e| format!("page {n}: {e}"))?;
+    let total = meta.page_count;
+    on_page(0, total);
+    if shell {
+        shell_chapter_command("device_begin_chapter", chapter_id, None).await?;
     }
-    Ok(meta.page_count)
+    for n in 0..total {
+        if shell {
+            let args = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
+            let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
+            let _ = js_sys::Reflect::set(&args, &"page".into(), &(n as f64).into());
+            shell_invoke("device_save_page", args)
+                .await
+                .map_err(|e| format!("page {n}: {e}"))?;
+        } else {
+            client
+                .fetch_page(chapter_id, n)
+                .await
+                .map_err(|e| format!("page {n}: {e}"))?;
+        }
+        on_page(n + 1, total);
+    }
+    if shell {
+        shell_chapter_command("device_finish_chapter", chapter_id, None).await?;
+    }
+    Ok(total)
+}
+
+async fn shell_chapter_command(
+    command: &str,
+    chapter_id: Uuid,
+    extra: Option<(&str, leptos::wasm_bindgen::JsValue)>,
+) -> Result<(), String> {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
+    if let Some((key, value)) = extra {
+        let _ = js_sys::Reflect::set(&args, &key.into(), &value);
+    }
+    shell_invoke(command, args).await.map(|_| ())
 }
 
 /// A chapter stored on this device.
@@ -341,26 +377,6 @@ async fn shell_invoke(
     wasm_bindgen_futures::JsFuture::from(promise)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
-}
-
-/// Download a chapter into the shell's device storage.
-pub async fn shell_save_chapter(
-    client: &yomu_client::YomuClient,
-    chapter_id: Uuid,
-) -> Result<u32, String> {
-    let meta = client
-        .chapter_pages(chapter_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let args = js_sys::Object::new();
-    let set = |key: &str, value: leptos::wasm_bindgen::JsValue| {
-        let _ = js_sys::Reflect::set(&args, &key.into(), &value);
-    };
-    set("base", client.base().to_string().into());
-    set("chapter", chapter_id.to_string().into());
-    set("count", (meta.page_count as f64).into());
-    shell_invoke("device_save_chapter", args).await?;
-    Ok(meta.page_count)
 }
 
 // ---- device covers (shell) ----
