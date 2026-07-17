@@ -183,6 +183,24 @@ pub struct DownloadsResponse {
     pub server_downloaded_pages: u32,
 }
 
+/// One updater round's find for one manga (`GET /updates`): what shell
+/// notifications announce. Mirrors the ntfy message content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateEvent {
+    pub manga_id: Uuid,
+    pub manga_title: String,
+    pub chapter_count: u32,
+    pub first_title: String,
+    pub last_title: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /updates?since=`: updater-found chapters, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatesResponse {
+    pub updates: Vec<UpdateEvent>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PagesResponse {
     pub chapter_id: Uuid,

@@ -9,6 +9,7 @@ mod error;
 mod library;
 mod progress;
 mod sources;
+mod updates;
 
 use axum::http::{HeaderValue, Method, header};
 use axum::routing::get;
@@ -70,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/backup", get(backup::export))
         .route("/restore", axum::routing::post(backup::restore))
+        .route("/updates", get(updates::list))
         .route("/downloads", get(downloads::list))
         .route("/downloads/retry", axum::routing::post(downloads::retry))
         .route(
