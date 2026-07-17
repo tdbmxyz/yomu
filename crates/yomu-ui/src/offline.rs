@@ -358,7 +358,7 @@ fn android_bridge(name: &str, on: bool) {
     let _ = method.call1(&bridge, &on.into());
 }
 
-async fn shell_invoke(
+pub(crate) async fn shell_invoke(
     command: &str,
     args: js_sys::Object,
 ) -> Result<leptos::wasm_bindgen::JsValue, String> {

@@ -222,6 +222,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(Http(reqwest::Client::new()))
         .invoke_handler(tauri::generate_handler![
             device_begin_chapter,
