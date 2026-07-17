@@ -1337,11 +1337,8 @@ mod tests {
         assert!(db.updates_since(seen, 100).await.unwrap().is_empty());
 
         // Cap.
-        db.add_update(manga.id, &chapters[..1].to_vec()).await.unwrap();
-        let capped = db
-            .updates_since(DateTime::<Utc>::MIN_UTC, 1)
-            .await
-            .unwrap();
+        db.add_update(manga.id, &chapters[..1]).await.unwrap();
+        let capped = db.updates_since(DateTime::<Utc>::MIN_UTC, 1).await.unwrap();
         assert_eq!(capped.len(), 1);
 
         // Prune everything older than the far future.

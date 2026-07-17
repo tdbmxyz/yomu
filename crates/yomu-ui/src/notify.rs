@@ -96,10 +96,21 @@ fn message(event: &UpdateEvent) -> String {
 async fn notify(event: &UpdateEvent) {
     let options = js_sys::Object::new();
     // Stable per-manga id: repeated finds replace instead of stacking.
-    let id = i32::from_le_bytes(event.manga_id.as_bytes()[..4].try_into().expect("4 bytes"))
+    // Fold the whole UUID — the first bytes alone are a v7 timestamp,
+    // shared by manga added around the same time.
+    let id = event
+        .manga_id
+        .as_bytes()
+        .chunks(4)
+        .map(|c| i32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .fold(0i32, |acc, w| acc ^ w)
         & 0x7fff_ffff;
     let _ = js_sys::Reflect::set(&options, &"id".into(), &(id as f64).into());
-    let _ = js_sys::Reflect::set(&options, &"title".into(), &event.manga_title.as_str().into());
+    let _ = js_sys::Reflect::set(
+        &options,
+        &"title".into(),
+        &event.manga_title.as_str().into(),
+    );
     let _ = js_sys::Reflect::set(&options, &"body".into(), &message(event).as_str().into());
     let args = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&args, &"options".into(), &options);
