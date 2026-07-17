@@ -107,6 +107,7 @@ mod downloads;
 mod manga;
 mod progress;
 mod read_marks;
+mod updates;
 mod users;
 
 async fn insert_chapters(
@@ -1296,5 +1297,62 @@ mod tests {
         let new = new.new_chapters;
         assert_eq!(new.len(), 1);
         assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn updates_feed_records_filters_and_prunes() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c1", Some(1.0)), ("c2", Some(2.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+
+        // Empty find: no row.
+        db.add_update(manga.id, &[]).await.unwrap();
+        let all = db
+            .updates_since(DateTime::<Utc>::MIN_UTC, 100)
+            .await
+            .unwrap();
+        assert!(all.is_empty());
+
+        db.add_update(manga.id, &chapters).await.unwrap();
+        let all = db
+            .updates_since(DateTime::<Utc>::MIN_UTC, 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].manga_id, manga.id);
+        assert_eq!(all[0].manga_title, "Manga m1");
+        assert_eq!(all[0].chapter_count, 2);
+        assert_eq!(all[0].first_title, "Chapter c1");
+        assert_eq!(all[0].last_title, "Chapter c2");
+
+        // A watermark at/after the event hides it; strictly-newer filter.
+        let seen = all[0].created_at;
+        assert!(db.updates_since(seen, 100).await.unwrap().is_empty());
+
+        // Cap.
+        db.add_update(manga.id, &chapters[..1].to_vec()).await.unwrap();
+        let capped = db
+            .updates_since(DateTime::<Utc>::MIN_UTC, 1)
+            .await
+            .unwrap();
+        assert_eq!(capped.len(), 1);
+
+        // Prune everything older than the far future.
+        db.prune_updates(Utc::now() + chrono::Duration::days(1))
+            .await
+            .unwrap();
+        assert!(
+            db.updates_since(DateTime::<Utc>::MIN_UTC, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
