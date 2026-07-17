@@ -59,8 +59,49 @@ class MainActivity : TauriActivity() {
     // Reader bridge: `setReading` marks the reader open (edge-to-edge,
     // bars overlay); `setImmersive` mirrors the chrome overlay — bars
     // hidden while reading pages, restored with the overlay.
+    // The `*Updates*` methods back app-off new-chapter notifications:
+    // the web UI hands over the server base URL (which schedules the
+    // periodic UpdatesWorker), and the seen-watermark lives here in
+    // SharedPreferences so the in-app poll and the background worker
+    // share one cursor.
     // JS-interface calls arrive on a worker thread, hence runOnUiThread.
     inner class ImmersiveBridge {
+        @JavascriptInterface
+        fun configureUpdates(base: String) {
+            val prefs = getSharedPreferences(UpdatesWorker.PREFS, MODE_PRIVATE)
+            prefs.edit().putString(UpdatesWorker.KEY_BASE, base).apply()
+            if (prefs.getString(UpdatesWorker.KEY_SEEN, null).isNullOrEmpty()) {
+                // First run: announce from now, not the feed's backlog.
+                prefs.edit().putString(UpdatesWorker.KEY_SEEN, UpdatesWorker.nowRfc3339()).apply()
+            }
+            UpdatesWorker.ensureChannel(this@MainActivity)
+            androidx.work.WorkManager.getInstance(this@MainActivity).enqueueUniquePeriodicWork(
+                "yomu-updates",
+                androidx.work.ExistingPeriodicWorkPolicy.UPDATE,
+                androidx.work.PeriodicWorkRequest.Builder(
+                    UpdatesWorker::class.java, 30, java.util.concurrent.TimeUnit.MINUTES
+                )
+                    .setConstraints(
+                        androidx.work.Constraints.Builder()
+                            .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                            .build()
+                    )
+                    .build()
+            )
+        }
+
+        @JavascriptInterface
+        fun updatesWatermark(): String {
+            return getSharedPreferences(UpdatesWorker.PREFS, MODE_PRIVATE)
+                .getString(UpdatesWorker.KEY_SEEN, "") ?: ""
+        }
+
+        @JavascriptInterface
+        fun setUpdatesWatermark(ts: String) {
+            getSharedPreferences(UpdatesWorker.PREFS, MODE_PRIVATE)
+                .edit().putString(UpdatesWorker.KEY_SEEN, ts).apply()
+        }
+
         @JavascriptInterface
         fun setReading(on: Boolean) {
             runOnUiThread {
