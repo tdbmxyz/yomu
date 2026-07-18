@@ -61,8 +61,7 @@ pub type LocalDownloads = RwSignal<std::collections::HashMap<uuid::Uuid, LocalDo
 
 /// Reactive mirror of the device-saved-chapter marks (localStorage), so a
 /// row flips to its on-device style the instant a save completes.
-pub type DeviceMarks =
-    RwSignal<std::collections::BTreeMap<uuid::Uuid, crate::offline::DeviceMark>>;
+pub type DeviceMarks = RwSignal<std::collections::BTreeMap<uuid::Uuid, crate::offline::DeviceMark>>;
 
 pub fn use_local_downloads() -> LocalDownloads {
     use_context().expect("LocalDownloads provided by App")

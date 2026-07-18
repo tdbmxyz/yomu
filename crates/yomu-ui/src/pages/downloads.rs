@@ -262,7 +262,11 @@ fn QueueRow(entry: DownloadQueueEntry) -> impl IntoView {
 /// One in-flight device save: manga · chapter, a page progress bar, and a
 /// Cancel button that flags the save loop to stop.
 #[component]
-fn LocalRow(id: uuid::Uuid, d: crate::LocalDownload, local: crate::LocalDownloads) -> impl IntoView {
+fn LocalRow(
+    id: uuid::Uuid,
+    d: crate::LocalDownload,
+    local: crate::LocalDownloads,
+) -> impl IntoView {
     let cancel = move |_| {
         local.update(|m| {
             if let Some(entry) = m.get_mut(&id) {
