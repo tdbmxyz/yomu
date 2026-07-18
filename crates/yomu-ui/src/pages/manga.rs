@@ -16,7 +16,8 @@ enum ProgressTier {
     Local,
 }
 
-/// Live per-chapter download progress, drawn as the row's perimeter ring.
+/// What a row renders as its perimeter ring, sourced from either the
+/// page-local server map or the app-level `LocalDownloads` store.
 #[derive(Clone, Copy)]
 struct RowProgress {
     done: u32,
@@ -25,7 +26,8 @@ struct RowProgress {
     failed: bool,
 }
 
-type ProgressMap = RwSignal<std::collections::HashMap<Uuid, RowProgress>>;
+/// Server-tier per-chapter progress, page-local (polled from /downloads).
+type ServerProgress = RwSignal<std::collections::HashMap<Uuid, (u32, u32)>>;
 
 #[component]
 pub fn MangaPage() -> impl IntoView {
@@ -43,7 +45,9 @@ pub fn MangaPage() -> impl IntoView {
     // pulled to this device as soon as their server download lands.
     let pull_queue = RwSignal::new(HashSet::<Uuid>::new());
     // Live download progress per chapter (both tiers), drawn by the rows.
-    let progress: ProgressMap = RwSignal::new(std::collections::HashMap::new());
+    let server_progress: ServerProgress = RwSignal::new(std::collections::HashMap::new());
+    let local_downloads = crate::use_local_downloads();
+    let device_marks = crate::use_device_marks();
     let client = use_client();
     let conn = crate::use_connectivity();
     let detail = LocalResource::new({
@@ -147,19 +151,11 @@ pub fn MangaPage() -> impl IntoView {
                     let Ok(downloads) = client.downloads().await else {
                         return;
                     };
-                    progress.update(|map| {
-                        map.retain(|_, p| p.tier != ProgressTier::Server);
+                    server_progress.update(|map| {
+                        map.clear();
                         for entry in &downloads.queue {
                             if let Some(p) = &entry.progress {
-                                map.insert(
-                                    entry.chapter_id,
-                                    RowProgress {
-                                        done: p.page,
-                                        total: p.total,
-                                        tier: ProgressTier::Server,
-                                        failed: false,
-                                    },
-                                );
+                                map.insert(entry.chapter_id, (p.page, p.total));
                             }
                         }
                     });
@@ -167,9 +163,7 @@ pub fn MangaPage() -> impl IntoView {
             }
         } else if !busy {
             // queue drained: no server ring should linger
-            progress.update(|map| {
-                map.retain(|_, p| p.tier != ProgressTier::Server);
-            });
+            server_progress.update(|map| map.clear());
         }
     });
     on_cleanup(move || {
@@ -207,9 +201,23 @@ pub fn MangaPage() -> impl IntoView {
                 }
             });
             let client = client.clone();
+            let mtitle = d.manga.title.clone();
+            let ctitles: std::collections::HashMap<Uuid, String> =
+                d.chapters.iter().map(|c| (c.id, c.title.clone())).collect();
             spawn_local(async move {
                 for qid in ready {
-                    if let Err(err) = save_locally(&client, id, qid, progress).await {
+                    let ct = ctitles.get(&qid).cloned().unwrap_or_default();
+                    if let Err(err) = save_locally(
+                        &client,
+                        id,
+                        mtitle.clone(),
+                        qid,
+                        ct,
+                        local_downloads,
+                        device_marks,
+                    )
+                    .await
+                    {
                         status.set(Some(format!("Local save failed: {err}")));
                         leptos::logging::warn!("local pull: {err}");
                     }
@@ -223,7 +231,7 @@ pub fn MangaPage() -> impl IntoView {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             Some(Ok((detail, offline))) => {
-                view! { <MangaDetail detail offline refresh status selected anchor pull_queue progress categories/> }.into_any()
+                view! { <MangaDetail detail offline refresh status selected anchor pull_queue server_progress categories/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -243,7 +251,7 @@ fn MangaDetail(
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
     pull_queue: RwSignal<HashSet<Uuid>>,
-    progress: ProgressMap,
+    server_progress: ServerProgress,
     /// Owned by MangaPage so refresh-driven remounts of this component
     /// re-render the select instantly from the already-loaded value.
     categories: LocalResource<Result<Vec<Category>, yomu_client::ClientError>>,
@@ -413,7 +421,8 @@ fn MangaDetail(
                 selected
                 anchor
                 pull_queue
-                progress
+                server_progress
+                manga_title=manga.title.clone()
             />
         </section>
     }
@@ -423,47 +432,91 @@ fn MangaDetail(
 /// the service-worker cache), drawing per-page progress on the row's
 /// ring, and record the mark. A failure flashes the ring red before the
 /// row falls back to its previous state.
+#[allow(clippy::too_many_arguments)]
 async fn save_locally(
     client: &yomu_client::YomuClient,
     manga_id: Uuid,
+    manga_title: String,
     id: Uuid,
-    progress: ProgressMap,
+    chapter_title: String,
+    local: crate::LocalDownloads,
+    device_marks: crate::DeviceMarks,
 ) -> Result<(), String> {
-    let result = offline::save_chapter_with_progress(client, id, |done, total| {
-        progress.update(|map| {
-            map.insert(
-                id,
-                RowProgress {
-                    done,
-                    total,
-                    tier: ProgressTier::Local,
-                    failed: false,
-                },
-            );
-        });
-    })
+    local.update(|map| {
+        map.insert(
+            id,
+            crate::LocalDownload {
+                manga_id,
+                manga_title: manga_title.clone(),
+                chapter_title: chapter_title.clone(),
+                done: 0,
+                total: 0,
+                failed: false,
+                cancel_requested: false,
+            },
+        );
+    });
+    let should_cancel =
+        move || local.with_untracked(|m| m.get(&id).is_some_and(|d| d.cancel_requested));
+    let result = offline::save_chapter_with_progress(
+        client,
+        id,
+        |done, total| {
+            local.update(|map| {
+                if let Some(d) = map.get_mut(&id) {
+                    d.done = done;
+                    d.total = total;
+                }
+            });
+        },
+        should_cancel,
+    )
     .await;
     match result {
-        Ok(count) => {
+        Ok(offline::SaveOutcome::Done(count)) => {
             offline::mark_device_chapter(manga_id, id, count);
-            progress.update(|map| {
+            device_marks.update(|m| {
+                m.insert(
+                    id,
+                    offline::DeviceMark {
+                        manga: manga_id,
+                        pages: count,
+                    },
+                );
+            });
+            local.update(|map| {
+                map.remove(&id);
+            });
+            Ok(())
+        }
+        Ok(offline::SaveOutcome::Cancelled) => {
+            local.update(|map| {
                 map.remove(&id);
             });
             Ok(())
         }
         Err(err) => {
-            progress.update(|map| {
-                let entry = map.entry(id).or_insert(RowProgress {
-                    done: 0,
-                    total: 1,
-                    tier: ProgressTier::Local,
-                    failed: true,
-                });
-                entry.failed = true;
+            local.update(|map| {
+                if let Some(d) = map.get_mut(&id) {
+                    d.failed = true;
+                } else {
+                    map.insert(
+                        id,
+                        crate::LocalDownload {
+                            manga_id,
+                            manga_title,
+                            chapter_title,
+                            done: 0,
+                            total: 1,
+                            failed: true,
+                            cancel_requested: false,
+                        },
+                    );
+                }
             });
             set_timeout(
                 move || {
-                    progress.try_update(|map| {
+                    local.try_update(|map| {
                         map.remove(&id);
                     });
                 },
@@ -485,7 +538,8 @@ fn ChapterList(
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
     pull_queue: RwSignal<HashSet<Uuid>>,
-    progress: ProgressMap,
+    server_progress: ServerProgress,
+    manga_title: String,
 ) -> impl IntoView {
     // Display newest chapter first. Only the on-page list is reversed —
     // `list_chapters` stays in reading order (Chapter 1 → N), which the
@@ -505,6 +559,15 @@ fn ChapterList(
         }
     }
     let ids = StoredValue::new(chapters.iter().map(|c| c.id).collect::<Vec<_>>());
+    let titles = StoredValue::new(
+        chapters
+            .iter()
+            .map(|c| (c.id, c.title.clone()))
+            .collect::<std::collections::HashMap<Uuid, String>>(),
+    );
+    let manga_title = StoredValue::new(manga_title);
+    let local_downloads = crate::use_local_downloads();
+    let device_marks = crate::use_device_marks();
     // Storage state per display index, for the selection menu's matrix.
     let states = StoredValue::new({
         let device = offline::device_chapters();
@@ -633,9 +696,22 @@ fn ChapterList(
             Action::DownloadLocal => {
                 let pull = ids_where(|s| s.on_server && !s.on_device);
                 let client = use_client();
+                let mtitle = manga_title.get_value();
+                let ctitles = titles.get_value();
                 spawn_local(async move {
                     for id in pull {
-                        if let Err(err) = save_locally(&client, manga_id, id, progress).await {
+                        let ct = ctitles.get(&id).cloned().unwrap_or_default();
+                        if let Err(err) = save_locally(
+                            &client,
+                            manga_id,
+                            mtitle.clone(),
+                            id,
+                            ct,
+                            local_downloads,
+                            device_marks,
+                        )
+                        .await
+                        {
                             status.set(Some(format!("Local save failed: {err}")));
                             leptos::logging::warn!("local download: {err}");
                         }
@@ -661,7 +737,12 @@ fn ChapterList(
                 spawn_local(async move {
                     for id in rm {
                         match offline::shell_delete_chapter(id).await {
-                            Ok(()) => offline::unmark_device_chapter(id),
+                            Ok(()) => {
+                                offline::unmark_device_chapter(id);
+                                device_marks.update(|m| {
+                                    m.remove(&id);
+                                });
+                            }
                             Err(err) => leptos::logging::warn!("local remove: {err}"),
                         }
                     }
@@ -754,7 +835,7 @@ fn ChapterList(
                             selection_active
                             press
                             toggle
-                            progress
+                            server_progress
                         />
                     }
                 })
@@ -783,11 +864,30 @@ fn ChapterItem(
     selection_active: Memo<bool>,
     press: Callback<usize>,
     toggle: Callback<usize>,
-    progress: ProgressMap,
+    server_progress: ServerProgress,
 ) -> impl IntoView {
     let id = chapter.id;
     let read = chapter.read;
-    let row_progress = move || progress.with(|map| map.get(&id).copied());
+    let local_downloads = crate::use_local_downloads();
+    let row_progress = move || {
+        if let Some(d) = local_downloads.with(|m| m.get(&id).cloned()) {
+            Some(RowProgress {
+                done: d.done,
+                total: d.total,
+                tier: ProgressTier::Local,
+                failed: d.failed,
+            })
+        } else {
+            server_progress
+                .with(|m| m.get(&id).copied())
+                .map(|(done, total)| RowProgress {
+                    done,
+                    total,
+                    tier: ProgressTier::Server,
+                    failed: false,
+                })
+        }
+    };
     let is_selected = Memo::new(move |_| selected.with(|s| s.contains(&id)));
 
     // Long-press detection: a primary pointer held ~500ms without moving.
@@ -855,7 +955,8 @@ fn ChapterItem(
     // Storage state, shown as the row's outline color (blue = on the
     // server, green = on this device, split = both) instead of the old
     // per-tier buttons; actions live in the selection menu.
-    let on_device = RwSignal::new(offline::device_chapters().contains_key(&id));
+    let device_marks = crate::use_device_marks();
+    let on_device = move || device_marks.with(|m| m.contains_key(&id));
     let on_server = matches!(chapter.download, DownloadState::Downloaded { .. });
     let dl_busy = matches!(
         chapter.download,
@@ -875,15 +976,15 @@ fn ChapterItem(
             class:selected=move || is_selected.get()
             // Served from the offline cache: chapters that aren't on this
             // device can't open until the server is reachable again.
-            class:unavailable=move || offline && !on_device.get()
-            class:dl-server=move || on_server && !on_device.get()
-            class:dl-local=move || on_device.get() && !on_server
-            class:dl-both=move || on_server && on_device.get()
+            class:unavailable=move || offline && !on_device()
+            class:dl-server=move || on_server && !on_device()
+            class:dl-local=move || on_device() && !on_server
+            class:dl-both=move || on_server && on_device()
             class:dl-busy=dl_busy
             class:dl-active=move || row_progress().is_some()
             class:dl-failed=dl_failed
             title=move || {
-                if offline && !on_device.get() {
+                if offline && !on_device() {
                     Some("Not available offline".to_string())
                 } else {
                     failed_reason.clone()

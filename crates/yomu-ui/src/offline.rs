@@ -173,17 +173,27 @@ pub fn service_worker_active() -> bool {
 /// stores each fetched response, refused when no worker controls the page
 /// (the fetches would succeed but cache nothing, and the chapter would be
 /// marked "on device" while it isn't).
+/// Result of a device save: how many pages, or that the caller cancelled.
+pub enum SaveOutcome {
+    Done(u32),
+    Cancelled,
+}
+
 pub async fn save_chapter_with_progress(
     client: &yomu_client::YomuClient,
     chapter_id: Uuid,
     on_page: impl Fn(u32, u32),
-) -> Result<u32, String> {
+    should_cancel: impl Fn() -> bool,
+) -> Result<SaveOutcome, String> {
     let shell = shell_available();
     if !shell && !service_worker_active() {
         return Err(
             "offline cache unavailable (no service worker; first visit or unsupported browser)"
                 .into(),
         );
+    }
+    if should_cancel() {
+        return Ok(SaveOutcome::Cancelled);
     }
     let meta = client
         .chapter_pages(chapter_id)
@@ -195,6 +205,13 @@ pub async fn save_chapter_with_progress(
         shell_chapter_command("device_begin_chapter", chapter_id, None).await?;
     }
     for n in 0..total {
+        if should_cancel() {
+            // Drop the partial staging dir so a later save starts clean.
+            if shell {
+                let _ = shell_delete_chapter(chapter_id).await;
+            }
+            return Ok(SaveOutcome::Cancelled);
+        }
         if shell {
             let args = js_sys::Object::new();
             let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
@@ -214,7 +231,7 @@ pub async fn save_chapter_with_progress(
     if shell {
         shell_chapter_command("device_finish_chapter", chapter_id, None).await?;
     }
-    Ok(total)
+    Ok(SaveOutcome::Done(total))
 }
 
 async fn shell_chapter_command(
