@@ -23,6 +23,8 @@ is one tap away on the phone.
   server queue — not a catalog of already-saved chapters.
 - Local saves are **cancelable** from the Downloads tab.
 - The Downloads tab gets a **sixth entry in the phone tab bar**.
+- A chapter's row in the chapter list updates to its **on-device**
+  style the moment a local save completes — no navigating away and back.
 
 ## Design
 
@@ -80,7 +82,37 @@ On `Done` they write the mark and remove the store entry (as today); on
 `Cancelled` they remove the entry without a mark; on `Err` they set
 `failed` and schedule removal (as today).
 
-### 3. Downloads tab layout
+### 3. Reactive device marks (live row status)
+
+Today a chapter row seeds `on_device` from a one-time
+`offline::device_chapters()` read at mount, and `mark_device_chapter`
+writes localStorage without notifying any row — so a freshly saved
+chapter only flips to its on-device style after leaving the list and
+coming back.
+
+Introduce an app-level reactive mirror of the device marks:
+
+```rust
+type DeviceMarks = RwSignal<BTreeMap<Uuid, DeviceMark>>;
+```
+
+- Provided in `App`, seeded from localStorage once; read via
+  `use_device_marks()`.
+- `mark_device_chapter` and `unmark_device_chapter` write localStorage
+  **and** update this signal (single write-through path). Existing
+  callers are unchanged; the functions gain the signal update.
+- Chapter rows derive `on_device` reactively:
+  `move || marks.with(|m| m.contains_key(&id))`, replacing the seeded
+  `RwSignal`. When a local save completes and writes its mark, every
+  affected row flips to `dl-local` / `dl-both` immediately; "remove
+  from device" flips them back live too.
+
+Because both the local-download store (§1) and these marks live at
+app level, the completion path is: loop returns `Done` → caller writes
+the mark (updates `DeviceMarks`) → removes the local-download entry
+(clears the ring). One update, both the ring and the row react.
+
+### 4. Downloads tab layout
 
 Storage tiles (server chapters, device chapters) stay at the top as the
 overview. Below, two labeled sections:
@@ -100,7 +132,7 @@ here" line.
 Rows link to `/manga/{id}` like the server rows. The manga-page rings
 react to the same store, so a cancel here also clears the ring there.
 
-### 4. Phone tab-bar access
+### 5. Phone tab-bar access
 
 Add a **Downloads** entry to the phone tab bar (`.tabbar` in
 lib.rs/styles.css), alongside Home / Library / Sources / Search / More —
@@ -108,7 +140,7 @@ six items within the 40rem breakpoint. The More-page "Downloads →" link
 stays for desktop parity. Icon spacing at six items is verified with a
 phone-width screenshot.
 
-### 5. Error handling
+### 6. Error handling
 
 - Cancel while a page request is in flight: that page resolves (or
   errors) and the next loop check exits; partial dir is cleaned on the
@@ -119,7 +151,7 @@ phone-width screenshot.
 - Store entries are keyed by chapter id, so the manga page and the tab
   never double-render the same save.
 
-### 6. Testing
+### 7. Testing
 
 - Headless shell-sim: start a local save on the manga page (per-page
   invoke delays), navigate to Downloads, assert the device section
@@ -128,6 +160,9 @@ phone-width screenshot.
 - Cancel: click the device row's Cancel → row shows "Cancelling…", then
   disappears; `device_delete_chapter` was invoked; no device mark
   written.
+- Live row status: on the manga page, run a local save to completion
+  without navigating; assert the chapter row gains the `dl-local` class
+  (and loses `unavailable` when offline) as soon as the mark is written.
 - Screenshot the two-section layout and the six-item phone tab bar
   (375 px wide) to confirm spacing.
 - `just check`, `cargo test --workspace --exclude yomu-shell`.
