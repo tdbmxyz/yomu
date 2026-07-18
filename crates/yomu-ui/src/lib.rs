@@ -43,11 +43,44 @@ pub fn use_connectivity() -> RwSignal<Connectivity> {
     use_context().expect("Connectivity provided by App")
 }
 
+/// One in-flight local (device) save, shown on the manga page ring and
+/// in the Downloads tab's device section. Keyed by chapter id in the
+/// `LocalDownloads` map.
+#[derive(Clone, PartialEq)]
+pub struct LocalDownload {
+    pub manga_id: uuid::Uuid,
+    pub manga_title: String,
+    pub chapter_title: String,
+    pub done: u32,
+    pub total: u32,
+    pub failed: bool,
+    pub cancel_requested: bool,
+}
+
+pub type LocalDownloads = RwSignal<std::collections::HashMap<uuid::Uuid, LocalDownload>>;
+
+/// Reactive mirror of the device-saved-chapter marks (localStorage), so a
+/// row flips to its on-device style the instant a save completes.
+pub type DeviceMarks =
+    RwSignal<std::collections::BTreeMap<uuid::Uuid, crate::offline::DeviceMark>>;
+
+pub fn use_local_downloads() -> LocalDownloads {
+    use_context().expect("LocalDownloads provided by App")
+}
+
+pub fn use_device_marks() -> DeviceMarks {
+    use_context().expect("DeviceMarks provided by App")
+}
+
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
     let conn = RwSignal::new(Connectivity::Checking);
     provide_context(conn);
+    let local_downloads: LocalDownloads = RwSignal::new(std::collections::HashMap::new());
+    provide_context(local_downloads);
+    let device_marks: DeviceMarks = RwSignal::new(offline::device_chapters());
+    provide_context(device_marks);
     offline::apply_theme(offline::theme());
 
     // Whenever the server (re)becomes reachable, sync progress and read
