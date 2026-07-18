@@ -191,6 +191,24 @@ main {
     display: flex;
   }
 
+  /* Six items: shrink the labels so none wrap or clip at 360px. */
+  .tabbar a {
+    font-size: 0.6rem;
+    gap: 0.05rem;
+    min-width: 0;
+  }
+
+  .tabbar a > :not(.tab-icon) {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tab-icon {
+    font-size: 1.05rem;
+  }
+
   main {
     /* room for the fixed tab bar (which grows by the safe-area inset) */
     padding-bottom: calc(5rem + env(safe-area-inset-bottom));
