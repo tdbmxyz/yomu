@@ -490,6 +490,25 @@ button.danger:hover {
   text-decoration: none;
 }
 
+.download-row-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.download-row-head .download-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.download-row-head .button {
+  flex: 0 0 auto;
+}
+
+.downloads-section {
+  margin-top: 1rem;
+}
+
 .download-progress {
   position: relative;
   height: 1.1rem;
