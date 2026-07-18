@@ -40,6 +40,7 @@ pub fn Downloads() -> impl IntoView {
 
     // Chapters saved on this device (localStorage marks — a per-device count).
     let device_count = offline::device_chapters().len() as u32;
+    let local = crate::use_local_downloads();
 
     let refetch = move || tick.update(|n| *n += 1);
 
@@ -56,7 +57,7 @@ pub fn Downloads() -> impl IntoView {
                 }
                 Some(Ok(resp)) => {
                     let refetch = refetch;
-                    view! { <DownloadsView resp device_count refetch/> }.into_any()
+                    view! { <DownloadsView resp device_count local refetch/> }.into_any()
                 }
             }}
         </section>
@@ -67,6 +68,7 @@ pub fn Downloads() -> impl IntoView {
 fn DownloadsView(
     resp: DownloadsResponse,
     device_count: u32,
+    local: crate::LocalDownloads,
     refetch: impl Fn() + Clone + 'static + Send,
 ) -> impl IntoView {
     let split = |want: fn(&DownloadState) -> bool| -> Vec<DownloadQueueEntry> {
@@ -139,9 +141,10 @@ fn DownloadsView(
             </div>
         </div>
 
+        <h3 class="shelf-title downloads-section">"Server"</h3>
         {empty
             .then(|| {
-                view! { <p class="muted">"Nothing in the download queue."</p> }
+                view! { <p class="muted">"Nothing in the server download queue."</p> }
             })}
 
         {(!downloading.is_empty())
@@ -192,6 +195,31 @@ fn DownloadsView(
                     </ul>
                 }
             })}
+
+        <h3 class="shelf-title downloads-section">"On this device"</h3>
+        {move || {
+            let items: Vec<_> = local.with(|m| {
+                let mut v: Vec<_> = m.iter().map(|(id, d)| (*id, d.clone())).collect();
+                v.sort_by(|a, b| a.1.manga_title.cmp(&b.1.manga_title));
+                v
+            });
+            if items.is_empty() {
+                view! {
+                    <p class="muted">{format!("{device_count} chapters on this device")}</p>
+                }
+                    .into_any()
+            } else {
+                view! {
+                    <ul class="download-list">
+                        {items
+                            .into_iter()
+                            .map(|(id, d)| view! { <LocalRow id d local/> })
+                            .collect_view()}
+                    </ul>
+                }
+                    .into_any()
+            }
+        }}
     }
 }
 
@@ -227,6 +255,52 @@ fn QueueRow(entry: DownloadQueueEntry) -> impl IntoView {
                     }
                 })}
             {error.map(|reason| view! { <span class="error download-error">{reason}</span> })}
+        </li>
+    }
+}
+
+/// One in-flight device save: manga · chapter, a page progress bar, and a
+/// Cancel button that flags the save loop to stop.
+#[component]
+fn LocalRow(
+    id: uuid::Uuid,
+    d: crate::LocalDownload,
+    local: crate::LocalDownloads,
+) -> impl IntoView {
+    let cancel = move |_| {
+        local.update(|m| {
+            if let Some(entry) = m.get_mut(&id) {
+                entry.cancel_requested = true;
+            }
+        });
+    };
+    let pct = if d.total > 0 {
+        (d.done as f64 / d.total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let cancelling = d.cancel_requested;
+    view! {
+        <li class="download-row" class:dl-failed=d.failed>
+            <div class="download-row-head">
+                <a class="download-title" href=format!("/manga/{}", d.manga_id)>
+                    <strong>{d.manga_title}</strong>
+                    " · " {d.chapter_title}
+                </a>
+                <button class="button" on:click=cancel disabled=cancelling>
+                    "Cancel"
+                </button>
+            </div>
+            <div class="download-progress">
+                <div class="download-progress-bar" style:width=format!("{pct}%")></div>
+                <span class="muted download-progress-label">
+                    {if cancelling {
+                        "Cancelling…".to_string()
+                    } else {
+                        format!("{}/{}", d.done, d.total)
+                    }}
+                </span>
+            </div>
         </li>
     }
 }
