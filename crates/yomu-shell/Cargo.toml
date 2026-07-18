@@ -20,5 +20,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
 url.workspace = true
 reqwest.workspace = true

@@ -5,6 +5,7 @@
 mod chapter_actions;
 mod cover;
 mod format;
+mod notify;
 pub mod offline;
 mod pager;
 mod pages;
@@ -79,6 +80,13 @@ pub fn App(config: AppConfig) -> impl IntoView {
         });
     });
     on_cleanup(move || online_handle.remove());
+
+    // Shell update notifications: poll the server's updates feed while
+    // the app is alive (see notify.rs; Android also polls app-off via
+    // WorkManager).
+    if offline::shell_available() {
+        notify::start(conn, YomuClient::new(config.api_base.clone()));
+    }
 
     view! {
         <ServerGate>

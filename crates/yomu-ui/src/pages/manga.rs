@@ -59,6 +59,24 @@ pub fn MangaPage() -> impl IntoView {
             }
         }
     });
+    // Category select data, owned here rather than by MangaDetail: a
+    // `refresh` bump recreates MangaDetail, and a resource created there
+    // would yield None until its refetch lands — the select would
+    // unmount for a beat every bump (visible flicker while downloads
+    // animate). Which categories the updater checks is configured on
+    // the library page.
+    let categories = LocalResource::new({
+        let client = client.clone();
+        move || {
+            conn.track();
+            let client = client.clone();
+            async move {
+                offline::cached(conn, "categories", || client.categories())
+                    .await
+                    .map(|(value, _)| value)
+            }
+        }
+    });
 
     // Coming back from the reader must land where the list was left, not
     // at the top. The browser can't restore the position itself: the page
@@ -205,7 +223,7 @@ pub fn MangaPage() -> impl IntoView {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             Some(Ok((detail, offline))) => {
-                view! { <MangaDetail detail offline refresh status selected anchor pull_queue progress/> }.into_any()
+                view! { <MangaDetail detail offline refresh status selected anchor pull_queue progress categories/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -226,6 +244,9 @@ fn MangaDetail(
     anchor: RwSignal<Option<usize>>,
     pull_queue: RwSignal<HashSet<Uuid>>,
     progress: ProgressMap,
+    /// Owned by MangaPage so refresh-driven remounts of this component
+    /// re-render the select instantly from the already-loaded value.
+    categories: LocalResource<Result<Vec<Category>, yomu_client::ClientError>>,
 ) -> impl IntoView {
     let client = use_client();
     let manga = detail.manga.clone();
@@ -280,21 +301,6 @@ fn MangaDetail(
         }
     };
 
-    // Category select (Reading / Paused / Finished …); which categories the
-    // updater checks is configured on the library page.
-    let categories = LocalResource::new({
-        let client = client.clone();
-        let conn = crate::use_connectivity();
-        move || {
-            conn.track();
-            let client = client.clone();
-            async move {
-                offline::cached(conn, "categories", || client.categories())
-                    .await
-                    .map(|(value, _)| value)
-            }
-        }
-    });
     let current_category = manga.category.clone();
     let set_category = {
         let client = client.clone();

@@ -24,6 +24,14 @@ async fn run(state: AppState) {
         // and a fresh library was just synced by its add flow anyway.
         tokio::time::sleep(interval).await;
 
+        if let Err(err) = state
+            .db
+            .prune_updates(chrono::Utc::now() - chrono::Duration::days(30))
+            .await
+        {
+            tracing::warn!(%err, "pruning updates feed");
+        }
+
         // Only categories with update_enabled (paused/finished series
         // don't need to hammer their sources).
         let manga = match state.db.list_manga_for_update().await {
@@ -37,6 +45,11 @@ async fn run(state: AppState) {
         for entry in manga {
             match sync::refresh_manga(&state, &entry).await {
                 Ok(new) if !new.is_empty() => {
+                    // Feed for shell notifications; only the updater
+                    // writes it, mirroring the ntfy rule above.
+                    if let Err(err) = state.db.add_update(entry.id, &new).await {
+                        tracing::warn!(%err, "recording update event");
+                    }
                     notifier.notify_new_chapters(&entry.title, &new).await;
                 }
                 Ok(_) => {}

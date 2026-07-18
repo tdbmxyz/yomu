@@ -9,7 +9,7 @@ use yomu_domain::{
     MangaDetailResponse, MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse,
     PagesResponse, Position, PushEventsRequest, PushEventsResponse, RefreshResponse,
     RestoreSummary, SetPositionRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
-    UpdateMangaRequest,
+    UpdateMangaRequest, UpdatesResponse,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -162,6 +162,16 @@ impl YomuClient {
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
         self.base.join(&format!("api/v1/manga/{id}/cover")).ok()
+    }
+
+    // ---- updates feed ----
+
+    /// Updater-found new chapters strictly after `since` (an RFC3339
+    /// watermark, as returned in `UpdateEvent::created_at`).
+    pub async fn updates(&self, since: &str) -> Result<UpdatesResponse> {
+        let mut url = self.url("api/v1/updates")?;
+        url.query_pairs_mut().append_pair("since", since);
+        self.send(self.http.get(url)).await
     }
 
     // ---- downloads ----
