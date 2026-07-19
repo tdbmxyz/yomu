@@ -1352,4 +1352,22 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[tokio::test]
+    async fn next_pending_download_is_lowest_number_first() {
+        let db = Db::in_memory().await.unwrap();
+        let manga = db
+            .insert_manga(
+                "fixture",
+                &details("m1", &[("c3", Some(3.0)), ("c1", Some(1.0)), ("c2", Some(2.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let ids: Vec<_> = chapters.iter().map(|c| c.id).collect();
+        db.mark_pending(&ids).await.unwrap();
+        let next = db.next_pending_download().await.unwrap().unwrap();
+        assert_eq!(next.number, Some(1.0));
+    }
 }
