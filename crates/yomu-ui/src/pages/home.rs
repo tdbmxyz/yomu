@@ -56,8 +56,13 @@ pub fn Home() -> impl IntoView {
                         .into_any()
                 }
                 Some(Ok(list)) => {
-                    let mut resume: Vec<MangaWithPosition> =
-                        list.iter().filter(|e| e.position.is_some()).cloned().collect();
+                    // Finished titles (nothing unread) drop off — there is
+                    // nothing to continue; they return when a new chapter lands.
+                    let mut resume: Vec<MangaWithPosition> = list
+                        .iter()
+                        .filter(|e| e.position.is_some() && e.unread_count > 0)
+                        .cloned()
+                        .collect();
                     resume.sort_by(|a, b| {
                         let at = |e: &MangaWithPosition| e.position.as_ref().map(|p| p.at);
                         at(b).cmp(&at(a))
