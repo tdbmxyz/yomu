@@ -9,6 +9,7 @@ mod notify;
 pub mod offline;
 mod pager;
 mod pages;
+mod pull;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -71,6 +72,23 @@ pub fn use_device_marks() -> DeviceMarks {
     use_context().expect("DeviceMarks provided by App")
 }
 
+/// One chapter queued to pull to this device once its server download
+/// finishes ("download both"). Ordered oldest-first; persisted so it
+/// survives navigation and app restarts.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PullItem {
+    pub chapter_id: uuid::Uuid,
+    pub manga_id: uuid::Uuid,
+    pub manga_title: String,
+    pub chapter_title: String,
+}
+
+pub type PullQueue = RwSignal<Vec<PullItem>>;
+
+pub fn use_pull_queue() -> PullQueue {
+    use_context().expect("PullQueue provided by App")
+}
+
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
@@ -80,6 +98,12 @@ pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(local_downloads);
     let device_marks: DeviceMarks = RwSignal::new(offline::device_chapters());
     provide_context(device_marks);
+    let pull_queue: PullQueue = RwSignal::new(offline::load_pull_queue());
+    provide_context(pull_queue);
+    // Write-through: persist any change so the queue survives restarts.
+    Effect::new(move |_| {
+        pull_queue.with(|q| offline::save_pull_queue(q));
+    });
     offline::apply_theme(offline::theme());
 
     // Whenever the server (re)becomes reachable, sync progress and read
@@ -120,6 +144,16 @@ pub fn App(config: AppConfig) -> impl IntoView {
         notify::start(conn, YomuClient::new(config.api_base.clone()));
     }
 
+    // Drain the device-pull queue app-wide, so "download both" completes
+    // even after leaving the manga page (or restarting).
+    pull::start(
+        conn,
+        YomuClient::new(config.api_base.clone()),
+        pull_queue,
+        local_downloads,
+        device_marks,
+    );
+
     view! {
         <ServerGate>
             <OfflineBadge/>
@@ -156,7 +190,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                     <A href="/library"><span class="tab-icon">"▦"</span>"Library"</A>
                     <A href="/sources"><span class="tab-icon">"⛁"</span>"Sources"</A>
                     <A href="/search"><span class="tab-icon">"⌕"</span>"Search"</A>
-                    <A href="/downloads"><span class="tab-icon">"⭳"</span>"Downloads"</A>
+                    <A href="/downloads"><span class="tab-icon">"↓"</span>"Downloads"</A>
                     <A href="/more"><span class="tab-icon">"≡"</span>"More"</A>
                 </nav>
             </Router>

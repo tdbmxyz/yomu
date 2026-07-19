@@ -527,6 +527,11 @@ button.danger:hover {
   margin-top: 1rem;
 }
 
+.downloads-waiting-head {
+  margin: 0.4rem 0 0.2rem;
+  font-size: 0.85rem;
+}
+
 .download-progress {
   position: relative;
   height: 1.1rem;

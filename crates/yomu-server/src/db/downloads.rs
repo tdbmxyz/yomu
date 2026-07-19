@@ -27,7 +27,8 @@ impl Db {
 
     pub async fn next_pending_download(&self) -> Result<Option<Chapter>> {
         let row = sqlx::query_as::<_, ChapterRow>(
-            "SELECT * FROM chapters WHERE download_state = 'pending' ORDER BY fetched_at LIMIT 1",
+            "SELECT * FROM chapters WHERE download_state = 'pending'
+             ORDER BY fetched_at, number IS NULL, number LIMIT 1",
         )
         .fetch_optional(&self.pool)
         .await?;

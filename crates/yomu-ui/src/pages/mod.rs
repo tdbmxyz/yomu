@@ -13,6 +13,7 @@ pub use downloads::Downloads;
 pub use home::Home;
 pub use library::Library;
 pub use manga::MangaPage;
+pub(crate) use manga::save_locally;
 pub use more::More;
 pub use reader::Reader;
 pub use search::Search;
