@@ -41,13 +41,8 @@ pub fn MangaPage() -> impl IntoView {
     // periodic refresh while downloads run doesn't wipe an ongoing selection.
     let selected = RwSignal::new(HashSet::<Uuid>::new());
     let anchor = RwSignal::new(None::<usize>);
-    // "Download (both)": chapters queued on the server that should be
-    // pulled to this device as soon as their server download lands.
-    let pull_queue = RwSignal::new(HashSet::<Uuid>::new());
     // Live download progress per chapter (both tiers), drawn by the rows.
     let server_progress: ServerProgress = RwSignal::new(std::collections::HashMap::new());
-    let local_downloads = crate::use_local_downloads();
-    let device_marks = crate::use_device_marks();
     let client = use_client();
     let conn = crate::use_connectivity();
     let detail = LocalResource::new({
@@ -172,66 +167,15 @@ pub fn MangaPage() -> impl IntoView {
         }
     });
 
-    // Drain the pull queue: whenever a queued chapter's server download
-    // lands (the 2s poll above keeps the detail fresh while any download
-    // runs), pull it to this device. Leaving the page abandons what
-    // hasn't been pulled yet.
-    {
-        let client = client.clone();
-        Effect::new(move |_| {
-            let Some(Ok((d, _))) = detail.get() else {
-                return;
-            };
-            let ready: Vec<Uuid> = pull_queue
-                .get_untracked()
-                .iter()
-                .copied()
-                .filter(|qid| {
-                    d.chapters.iter().any(|c| {
-                        c.id == *qid && matches!(c.download, DownloadState::Downloaded { .. })
-                    })
-                })
-                .collect();
-            if ready.is_empty() {
-                return;
-            }
-            pull_queue.update(|q| {
-                for qid in &ready {
-                    q.remove(qid);
-                }
-            });
-            let client = client.clone();
-            let mtitle = d.manga.title.clone();
-            let ctitles: std::collections::HashMap<Uuid, String> =
-                d.chapters.iter().map(|c| (c.id, c.title.clone())).collect();
-            spawn_local(async move {
-                for qid in ready {
-                    let ct = ctitles.get(&qid).cloned().unwrap_or_default();
-                    if let Err(err) = save_locally(
-                        &client,
-                        id,
-                        mtitle.clone(),
-                        qid,
-                        ct,
-                        local_downloads,
-                        device_marks,
-                    )
-                    .await
-                    {
-                        status.set(Some(format!("Local save failed: {err}")));
-                        leptos::logging::warn!("local pull: {err}");
-                    }
-                }
-                refresh.update(|n| *n += 1);
-            });
-        });
-    }
+    // The device-pull queue ("download both") is drained app-wide by the
+    // background driver (see crate::pull), so it survives leaving this
+    // page and app restarts — nothing to do here.
 
     view! {
         {move || match detail.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             Some(Ok((detail, offline))) => {
-                view! { <MangaDetail detail offline refresh status selected anchor pull_queue server_progress categories/> }.into_any()
+                view! { <MangaDetail detail offline refresh status selected anchor server_progress categories/> }.into_any()
             }
             Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
@@ -250,7 +194,6 @@ fn MangaDetail(
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
-    pull_queue: RwSignal<HashSet<Uuid>>,
     server_progress: ServerProgress,
     /// Owned by MangaPage so refresh-driven remounts of this component
     /// re-render the select instantly from the already-loaded value.
@@ -420,7 +363,6 @@ fn MangaDetail(
                 status
                 selected
                 anchor
-                pull_queue
                 server_progress
                 manga_title=manga.title.clone()
             />
@@ -433,7 +375,7 @@ fn MangaDetail(
 /// ring, and record the mark. A failure flashes the ring red before the
 /// row falls back to its previous state.
 #[allow(clippy::too_many_arguments)]
-async fn save_locally(
+pub(crate) async fn save_locally(
     client: &yomu_client::YomuClient,
     manga_id: Uuid,
     manga_title: String,
@@ -537,7 +479,6 @@ fn ChapterList(
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
-    pull_queue: RwSignal<HashSet<Uuid>>,
     server_progress: ServerProgress,
     manga_title: String,
 ) -> impl IntoView {
@@ -568,6 +509,7 @@ fn ChapterList(
     let manga_title = StoredValue::new(manga_title);
     let local_downloads = crate::use_local_downloads();
     let device_marks = crate::use_device_marks();
+    let pull_queue = crate::use_pull_queue();
     // Storage state per display index, for the selection menu's matrix.
     let states = StoredValue::new({
         let device = offline::device_chapters();
@@ -672,12 +614,31 @@ fn ChapterList(
         menu_open.set(false);
         match action {
             Action::DownloadServer | Action::DownloadBoth => {
-                let dl = ids_where(|s| !s.on_server);
+                // Bulk order: oldest chapter first. The list shows newest
+                // first, so reverse the display-order selection.
+                let mut dl = ids_where(|s| !s.on_server);
+                dl.reverse();
                 if action == Action::DownloadBoth {
-                    pull_queue.update(|q| q.extend(dl.iter().copied()));
-                    // Already-downloaded picks skip the queue and pull now.
-                    let now = ids_where(|s| s.on_server && !s.on_device);
-                    pull_queue.update(|q| q.extend(now.iter().copied()));
+                    // Every selected chapter not yet on this device is
+                    // queued; the background driver (crate::pull) pulls each
+                    // once its server download finishes — already-downloaded
+                    // ones are pulled on its next tick.
+                    let mut both = ids_where(|s| !s.on_device);
+                    both.reverse();
+                    let mtitle = manga_title.get_value();
+                    let ctitles = titles.get_value();
+                    pull_queue.update(|q| {
+                        for id in both {
+                            if !q.iter().any(|e| e.chapter_id == id) {
+                                q.push(crate::PullItem {
+                                    chapter_id: id,
+                                    manga_id,
+                                    manga_title: mtitle.clone(),
+                                    chapter_title: ctitles.get(&id).cloned().unwrap_or_default(),
+                                });
+                            }
+                        }
+                    });
                 }
                 let client = use_client();
                 spawn_local(async move {
@@ -694,7 +655,8 @@ fn ChapterList(
                 });
             }
             Action::DownloadLocal => {
-                let pull = ids_where(|s| s.on_server && !s.on_device);
+                let mut pull = ids_where(|s| s.on_server && !s.on_device);
+                pull.reverse(); // oldest chapter first
                 let client = use_client();
                 let mtitle = manga_title.get_value();
                 let ctitles = titles.get_value();

@@ -432,6 +432,17 @@ pub async fn shell_delete_chapter(chapter_id: Uuid) -> Result<(), String> {
 }
 
 /// Drop a chapter's "on this device" mark (after deleting its files).
+const PULL_QUEUE_KEY: &str = "yomu-pull-queue";
+
+/// The persisted device-pull queue ("download both"), oldest-first.
+pub fn load_pull_queue() -> Vec<crate::PullItem> {
+    read_json(PULL_QUEUE_KEY)
+}
+
+pub fn save_pull_queue(items: &[crate::PullItem]) {
+    write_json(PULL_QUEUE_KEY, &items.to_vec());
+}
+
 pub fn unmark_device_chapter(id: Uuid) {
     let mut marks = device_chapters();
     marks.remove(&id);
