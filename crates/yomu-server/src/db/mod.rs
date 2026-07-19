@@ -1359,7 +1359,10 @@ mod tests {
         let manga = db
             .insert_manga(
                 "fixture",
-                &details("m1", &[("c3", Some(3.0)), ("c1", Some(1.0)), ("c2", Some(2.0))]),
+                &details(
+                    "m1",
+                    &[("c3", Some(3.0)), ("c1", Some(1.0)), ("c2", Some(2.0))],
+                ),
                 false,
             )
             .await

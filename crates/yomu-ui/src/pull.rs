@@ -65,10 +65,7 @@ async fn drive(client: &YomuClient, queue: PullQueue, local: LocalDownloads, mar
     }
     // Walk oldest-first; pull the leading ready run, stop at the first
     // still-downloading item so ascending order is preserved.
-    loop {
-        let Some(item) = queue.with_untracked(|q| q.first().cloned()) else {
-            break;
-        };
+    while let Some(item) = queue.with_untracked(|q| q.first().cloned()) {
         let id = item.chapter_id;
         if marks.with_untracked(|m| m.contains_key(&id)) || failed.contains(&id) {
             if failed.contains(&id) {
