@@ -9,6 +9,7 @@ mod notify;
 pub mod offline;
 mod pager;
 mod pages;
+mod pull;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -142,6 +143,16 @@ pub fn App(config: AppConfig) -> impl IntoView {
     if offline::shell_available() {
         notify::start(conn, YomuClient::new(config.api_base.clone()));
     }
+
+    // Drain the device-pull queue app-wide, so "download both" completes
+    // even after leaving the manga page (or restarting).
+    pull::start(
+        conn,
+        YomuClient::new(config.api_base.clone()),
+        pull_queue,
+        local_downloads,
+        device_marks,
+    );
 
     view! {
         <ServerGate>
