@@ -71,6 +71,23 @@ pub fn use_device_marks() -> DeviceMarks {
     use_context().expect("DeviceMarks provided by App")
 }
 
+/// One chapter queued to pull to this device once its server download
+/// finishes ("download both"). Ordered oldest-first; persisted so it
+/// survives navigation and app restarts.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PullItem {
+    pub chapter_id: uuid::Uuid,
+    pub manga_id: uuid::Uuid,
+    pub manga_title: String,
+    pub chapter_title: String,
+}
+
+pub type PullQueue = RwSignal<Vec<PullItem>>;
+
+pub fn use_pull_queue() -> PullQueue {
+    use_context().expect("PullQueue provided by App")
+}
+
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
@@ -80,6 +97,12 @@ pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(local_downloads);
     let device_marks: DeviceMarks = RwSignal::new(offline::device_chapters());
     provide_context(device_marks);
+    let pull_queue: PullQueue = RwSignal::new(offline::load_pull_queue());
+    provide_context(pull_queue);
+    // Write-through: persist any change so the queue survives restarts.
+    Effect::new(move |_| {
+        pull_queue.with(|q| offline::save_pull_queue(q));
+    });
     offline::apply_theme(offline::theme());
 
     // Whenever the server (re)becomes reachable, sync progress and read
