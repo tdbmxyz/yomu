@@ -190,7 +190,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                     <A href="/library"><span class="tab-icon">"▦"</span>"Library"</A>
                     <A href="/sources"><span class="tab-icon">"⛁"</span>"Sources"</A>
                     <A href="/search"><span class="tab-icon">"⌕"</span>"Search"</A>
-                    <A href="/downloads"><span class="tab-icon">"⭳"</span>"Downloads"</A>
+                    <A href="/downloads"><span class="tab-icon">"↓"</span>"Downloads"</A>
                     <A href="/more"><span class="tab-icon">"≡"</span>"More"</A>
                 </nav>
             </Router>

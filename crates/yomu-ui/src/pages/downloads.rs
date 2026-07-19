@@ -41,6 +41,7 @@ pub fn Downloads() -> impl IntoView {
     // Chapters saved on this device (localStorage marks — a per-device count).
     let device_count = offline::device_chapters().len() as u32;
     let local = crate::use_local_downloads();
+    let pull = crate::use_pull_queue();
 
     let refetch = move || tick.update(|n| *n += 1);
 
@@ -57,7 +58,7 @@ pub fn Downloads() -> impl IntoView {
                 }
                 Some(Ok(resp)) => {
                     let refetch = refetch;
-                    view! { <DownloadsView resp device_count local refetch/> }.into_any()
+                    view! { <DownloadsView resp device_count local pull refetch/> }.into_any()
                 }
             }}
         </section>
@@ -69,6 +70,7 @@ fn DownloadsView(
     resp: DownloadsResponse,
     device_count: u32,
     local: crate::LocalDownloads,
+    pull: crate::PullQueue,
     refetch: impl Fn() + Clone + 'static + Send,
 ) -> impl IntoView {
     let split = |want: fn(&DownloadState) -> bool| -> Vec<DownloadQueueEntry> {
@@ -198,15 +200,37 @@ fn DownloadsView(
 
         <h3 class="shelf-title downloads-section">"On this device"</h3>
         {move || {
+            let queued = pull.get();
+            (!queued.is_empty())
+                .then(|| {
+                    view! {
+                        <p class="muted downloads-waiting-head">
+                            "Waiting for server download"
+                        </p>
+                        <ul class="download-list">
+                            {queued
+                                .into_iter()
+                                .map(|it| view! { <WaitingRow it pull/> })
+                                .collect_view()}
+                        </ul>
+                    }
+                })
+        }}
+        {move || {
             let items: Vec<_> = local.with(|m| {
                 let mut v: Vec<_> = m.iter().map(|(id, d)| (*id, d.clone())).collect();
                 v.sort_by(|a, b| a.1.manga_title.cmp(&b.1.manga_title));
                 v
             });
             if items.is_empty() {
-                view! {
-                    <p class="muted">{format!("{device_count} chapters on this device")}</p>
-                }
+                (pull.get().is_empty())
+                    .then(|| {
+                        view! {
+                            <p class="muted">
+                                {format!("{device_count} chapters on this device")}
+                            </p>
+                        }
+                    })
                     .into_any()
             } else {
                 view! {
@@ -220,6 +244,26 @@ fn DownloadsView(
                     .into_any()
             }
         }}
+    }
+}
+
+/// A chapter queued to pull to this device once its server download
+/// finishes ("download both"); Cancel drops it from the queue.
+#[component]
+fn WaitingRow(it: crate::PullItem, pull: crate::PullQueue) -> impl IntoView {
+    let id = it.chapter_id;
+    let cancel = move |_| pull.update(|q| q.retain(|e| e.chapter_id != id));
+    view! {
+        <li class="download-row">
+            <div class="download-row-head">
+                <a class="download-title" href=format!("/manga/{}", it.manga_id)>
+                    <strong>{it.manga_title}</strong>
+                    " · " {it.chapter_title}
+                </a>
+                <button class="button" on:click=cancel>"Cancel"</button>
+            </div>
+            <span class="muted">"waiting for server download…"</span>
+        </li>
     }
 }
 
