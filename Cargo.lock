@@ -7042,7 +7042,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-client"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -7055,7 +7055,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-domain"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "chrono",
  "serde",
@@ -7065,7 +7065,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-server"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -7094,7 +7094,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-shell"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "reqwest 0.12.28",
  "tauri",
@@ -7105,7 +7105,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-source"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7128,7 +7128,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-ui"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "chrono",
  "js-sys",
@@ -7146,7 +7146,7 @@ dependencies = [
 
 [[package]]
 name = "yomu-web"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
