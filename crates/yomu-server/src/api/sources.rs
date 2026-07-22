@@ -20,17 +20,58 @@ fn proxy_covers(items: &mut [MangaSummary]) {
     }
 }
 
-/// Mark results that are already tracked (matched on the exact
-/// source_key the add flow stores). Decoration only — never fails the
-/// listing.
-async fn annotate_in_library(state: &AppState, source_id: &str, items: &mut [MangaSummary]) {
-    match state.db.library_keys(source_id).await {
-        Ok(keys) => {
-            for item in items {
-                item.in_library = keys.get(&item.key).copied();
-            }
+/// Some sites append a volatile hash to slug URLs (`…/foo-bar-1a2b3c4d`)
+/// and rotate it over time, so a key stored at add-time drifts from the
+/// live listing. Strip a trailing `-<hex>` (≥6 hex chars, short enough to
+/// spare hex-looking words) so the stable stem still matches.
+fn slug_stem(key: &str) -> &str {
+    if let Some(pos) = key.rfind('-') {
+        let suffix = &key[pos + 1..];
+        if suffix.len() >= 6 && suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return &key[..pos];
         }
-        Err(err) => tracing::warn!(%err, "in-library annotation failed"),
+    }
+    key
+}
+
+/// Mark results that are already tracked. Exact `source_key` match first;
+/// failing that, fall back to the slug stem so a rotated suffix still
+/// resolves — and heal the drifted key in place when it does. Decoration
+/// only: never fails the listing.
+async fn annotate_in_library(state: &AppState, source_id: &str, items: &mut [MangaSummary]) {
+    let keys = match state.db.library_keys(source_id).await {
+        Ok(keys) => keys,
+        Err(err) => {
+            tracing::warn!(%err, "in-library annotation failed");
+            return;
+        }
+    };
+    // Stem → id, keeping only unambiguous stems: a collision means we can't
+    // safely say which tracked title an item belongs to, so we don't guess
+    // (and, crucially, never heal the wrong row).
+    let mut stems: std::collections::HashMap<&str, Option<uuid::Uuid>> =
+        std::collections::HashMap::new();
+    for (key, id) in &keys {
+        stems
+            .entry(slug_stem(key))
+            .and_modify(|slot| *slot = None)
+            .or_insert(Some(*id));
+    }
+
+    let mut heals: Vec<(uuid::Uuid, String)> = Vec::new();
+    for item in items {
+        if let Some(id) = keys.get(&item.key).copied() {
+            item.in_library = Some(id);
+        } else if let Some(Some(id)) = stems.get(slug_stem(&item.key)).copied() {
+            item.in_library = Some(id);
+            heals.push((id, item.key.clone()));
+        }
+    }
+
+    for (id, key) in heals {
+        if let Err(err) = state.db.update_source_key(id, &key).await {
+            tracing::warn!(%err, %id, "in-library key heal failed");
+        }
     }
 }
 
@@ -252,4 +293,41 @@ async fn store_page(
         .db
         .write_catalog_page(source_id, sort, page, &keys, now)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slug_stem;
+
+    #[test]
+    fn strips_rotating_hex_suffix() {
+        // Same title, different rotated suffix → same stem.
+        let a = "https://example.test/comics/return-of-the-mount-hua-sect-30e93729";
+        let b = "https://example.test/comics/return-of-the-mount-hua-sect-f886a8af";
+        assert_eq!(slug_stem(a), slug_stem(b));
+        assert_eq!(
+            slug_stem(a),
+            "https://example.test/comics/return-of-the-mount-hua-sect"
+        );
+    }
+
+    #[test]
+    fn spares_short_and_non_hex_trailing_tokens() {
+        // A trailing word that isn't ≥6 hex chars must be left intact, so
+        // stable slugs (and hex-looking words like "cafe"/"dead") still
+        // match only their exact selves.
+        for key in [
+            "https://example.test/manga/solo-leveling",
+            "https://example.test/manga/the-100",
+            "https://example.test/manga/cafe-dead",
+            "https://example.test/manga/chapter-house",
+        ] {
+            assert_eq!(slug_stem(key), key, "should not strip {key}");
+        }
+    }
+
+    #[test]
+    fn keyless_string_is_returned_whole() {
+        assert_eq!(slug_stem("noseparators"), "noseparators");
+    }
 }

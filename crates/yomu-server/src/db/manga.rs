@@ -228,6 +228,18 @@ impl Db {
         rows.into_iter().map(Manga::try_from).collect()
     }
 
+    /// Repoint a manga at its current source URL. Some sites rotate a
+    /// volatile suffix on slug URLs, so the key stored at add-time drifts
+    /// from the live listing; the browse annotation heals it in place.
+    pub async fn update_source_key(&self, id: Uuid, source_key: &str) -> Result<()> {
+        sqlx::query("UPDATE manga SET source_key = ? WHERE id = ?")
+            .bind(source_key)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_last_checked(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
         sqlx::query("UPDATE manga SET last_checked_at = ? WHERE id = ?")
             .bind(at)
