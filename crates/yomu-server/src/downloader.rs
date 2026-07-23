@@ -65,6 +65,8 @@ async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32
         .get_publication(chapter.publication_id)
         .await
         .map_err(|e| e.to_string())?;
+    // LocalFile publications are never queued; the streamer serves their
+    // pages straight from the file once it lands.
     let Origin::Source { source_id, .. } = &publication.origin else {
         return Err("publication is not source-backed".into());
     };

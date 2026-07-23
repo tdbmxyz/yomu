@@ -167,6 +167,7 @@ pub async fn cover(
 
     let publication = state.db.get_publication(id).await?;
     let cover_url = publication.cover_url.ok_or(ApiError::NotFound)?;
+    // LocalFile covers are extracted and served by the streamer once it lands.
     let Origin::Source { source_id, .. } = &publication.origin else {
         return Err(ApiError::Unprocessable(
             "publication is not source-backed".into(),

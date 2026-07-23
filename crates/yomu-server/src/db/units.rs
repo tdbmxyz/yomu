@@ -5,7 +5,7 @@ use yomu_domain::{ChapterRef, ReadingUnit};
 use super::*;
 
 impl Db {
-    /// Merge a fresh chapter listing from the source: new units are
+    /// Merge a fresh unit listing from the source: new units are
     /// inserted, existing ones keep their id and download state. Returns
     /// the newly inserted units.
     pub async fn sync_units(
@@ -183,7 +183,7 @@ impl Db {
         ReadingUnit::try_from(row)
     }
 
-    /// Chapters in reading order: by number when present, source listing
+    /// Units in reading order: by number when present, source listing
     /// order (reversed, sources list newest first) as fallback.
     pub async fn list_units(&self, publication_id: Uuid) -> Result<Vec<ReadingUnit>> {
         let rows = sqlx::query_as::<_, UnitRow>(

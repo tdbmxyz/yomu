@@ -86,6 +86,8 @@ DROP INDEX idx_read_chapters_chapter;
 CREATE INDEX idx_read_units_unit ON read_units(unit_id);
 DROP INDEX idx_progress_manga;
 CREATE INDEX idx_progress_publication ON progress_events(publication_id, at DESC, id DESC);
+DROP INDEX idx_manga_genres_genre;
+CREATE INDEX idx_publication_genres_genre ON publication_genres(genre);
 
 -- The catalog cache only serves scraper search/browse; drop stale rows the
 -- removed built-in local source left behind.

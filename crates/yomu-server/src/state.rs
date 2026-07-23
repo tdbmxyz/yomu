@@ -116,7 +116,7 @@ impl AppState {
         }
     }
 
-    /// Directory holding a downloaded chapter's page files.
+    /// Directory holding a downloaded unit's page files.
     pub fn unit_dir(&self, publication_id: Uuid, unit_id: Uuid) -> PathBuf {
         self.config
             .data_dir

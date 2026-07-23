@@ -20,11 +20,11 @@ impl Notifier {
 
     /// One push per publication per sync round. Failures are logged, never
     /// returned — a broken notifier must not stop the update sweep.
-    pub async fn notify_new_units(&self, manga_title: &str, chapters: &[ReadingUnit]) {
+    pub async fn notify_new_units(&self, title: &str, units: &[ReadingUnit]) {
         let Some(config) = &self.config else {
             return;
         };
-        if chapters.is_empty() {
+        if units.is_empty() {
             return;
         }
         let mut request = self
@@ -33,12 +33,12 @@ impl Notifier {
             .header("X-Tags", "books");
         // HTTP header values are latin-1; a title beyond that moves
         // into the body instead of the X-Title header.
-        match reqwest::header::HeaderValue::from_str(manga_title) {
-            Ok(title) => {
-                request = request.header("X-Title", title).body(message(chapters));
+        match reqwest::header::HeaderValue::from_str(title) {
+            Ok(header) => {
+                request = request.header("X-Title", header).body(message(units));
             }
             Err(_) => {
-                request = request.body(format!("{manga_title}\n{}", message(chapters)));
+                request = request.body(format!("{title}\n{}", message(units)));
             }
         }
         if let Some(token) = &config.token {
@@ -56,8 +56,8 @@ impl Notifier {
 
 /// Body: single chapter title, or "N new chapters — first … last" in the
 /// order the listing produced them.
-fn message(chapters: &[ReadingUnit]) -> String {
-    match chapters {
+fn message(units: &[ReadingUnit]) -> String {
+    match units {
         [one] => one.title.clone(),
         many => format!(
             "{} new chapters — {} … {}",

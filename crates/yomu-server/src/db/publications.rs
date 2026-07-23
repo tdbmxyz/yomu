@@ -162,7 +162,8 @@ impl Db {
         Ok(())
     }
 
-    /// Refresh scan-derived metadata (cover/description) without touching title.
+    /// Refresh scan-derived metadata (cover/description) without touching title
+    /// (both columns are overwritten — pass the current value to keep it).
     #[cfg_attr(
         not(test),
         expect(
@@ -271,7 +272,7 @@ impl Db {
     ) -> Result<std::collections::HashMap<Uuid, (Locator, Option<String>)>> {
         let rows = sqlx::query(
             "SELECT p.publication_id AS publication_id, p.unit_id AS unit_id, p.page AS page,
-                    p.at AS at, ch.title AS title
+                    p.at AS at, u.title AS title
              FROM (
                  SELECT publication_id, unit_id, page, at,
                         ROW_NUMBER() OVER (
@@ -279,7 +280,7 @@ impl Db {
                         ) AS rn
                  FROM progress_events WHERE user_id = ?
              ) p
-             LEFT JOIN reading_units ch ON ch.id = p.unit_id
+             LEFT JOIN reading_units u ON u.id = p.unit_id
              WHERE p.rn = 1",
         )
         .bind(user_id.to_string())
@@ -343,10 +344,10 @@ impl Db {
     /// scrape; the streamer owns their refresh).
     pub async fn list_publications_for_update(&self) -> Result<Vec<Publication>> {
         let rows = sqlx::query_as::<_, PublicationRow>(
-            "SELECT m.* FROM publications m
-             JOIN categories c ON c.id = m.category
-             WHERE c.update_enabled = 1 AND m.file_path IS NULL
-             ORDER BY m.title COLLATE NOCASE",
+            "SELECT p.* FROM publications p
+             JOIN categories c ON c.id = p.category
+             WHERE c.update_enabled = 1 AND p.file_path IS NULL
+             ORDER BY p.title COLLATE NOCASE",
         )
         .fetch_all(&self.pool)
         .await?;

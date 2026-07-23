@@ -93,7 +93,7 @@ impl Db {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
-        // Recover from a crash mid-download: those chapters are re-queued.
+        // Recover from a crash mid-download: those units are re-queued.
         sqlx::query(
             "UPDATE reading_units SET download_state = 'pending' WHERE download_state = 'downloading'",
         )
@@ -403,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn remove_downloads_resets_only_downloaded_rows() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
@@ -411,17 +411,17 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        db.mark_pending(&[chapters[0].id]).await.unwrap();
-        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        db.mark_pending(&[units[0].id]).await.unwrap();
+        db.finish_download(units[0].id, Ok(9)).await.unwrap();
 
         let removed = db
-            .remove_downloads(&[chapters[0].id, chapters[1].id])
+            .remove_downloads(&[units[0].id, units[1].id])
             .await
             .unwrap();
-        assert_eq!(removed, vec![chapters[0].id]); // the 'none' row is skipped
+        assert_eq!(removed, vec![units[0].id]); // the 'none' row is skipped
 
-        let after = db.list_units(manga.id).await.unwrap();
+        let after = db.list_units(publication.id).await.unwrap();
         assert!(matches!(after[0].download, DownloadState::None));
         // page_count survives: still true knowledge about the chapter
         assert_eq!(after[0].page_count, Some(9));
@@ -430,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn library_rollups_and_positions_are_batched_per_manga() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
@@ -439,16 +439,16 @@ mod tests {
             .await
             .unwrap();
         // list_units order: number asc → c1 then c2.
-        let chapters = db.list_units(manga.id).await.unwrap();
-        db.mark_pending(&[chapters[0].id]).await.unwrap();
-        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
-        db.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        db.mark_pending(&[units[0].id]).await.unwrap();
+        db.finish_download(units[0].id, Ok(9)).await.unwrap();
+        db.mark_read(SHARED, &[units[0].id]).await.unwrap();
         db.append_event(
             SHARED,
             &ProgressEvent {
                 id: Uuid::from_u128(1),
-                publication_id: manga.id,
-                unit_id: chapters[1].id,
+                publication_id: publication.id,
+                unit_id: units[1].id,
                 page: 3,
                 device: "test".into(),
                 at: Utc::now(),
@@ -458,21 +458,21 @@ mod tests {
         .unwrap();
 
         let rollups = db.library_rollups(&SHARED.to_string()).await.unwrap();
-        let rollup = rollups.get(&manga.id).unwrap();
+        let rollup = rollups.get(&publication.id).unwrap();
         assert_eq!(rollup.unit_count, 2);
         assert_eq!(rollup.downloaded_count, 1);
         assert_eq!(rollup.unread_count, 1); // one of two marked read
         assert!(rollup.latest_unit_at.is_some());
 
         let positions = db.latest_positions(SHARED).await.unwrap();
-        let (position, title) = positions.get(&manga.id).unwrap();
-        assert_eq!(position.unit_id, chapters[1].id);
+        let (position, title) = positions.get(&publication.id).unwrap();
+        assert_eq!(position.unit_id, units[1].id);
         assert_eq!(position.page(), 3);
-        assert_eq!(title.as_deref(), Some(chapters[1].title.as_str()));
+        assert_eq!(title.as_deref(), Some(units[1].title.as_str()));
 
         // Signed-out scope (no matching user) counts nothing as read.
         let anon = db.library_rollups("").await.unwrap();
-        assert_eq!(anon.get(&manga.id).unwrap().unread_count, 2);
+        assert_eq!(anon.get(&publication.id).unwrap().unread_count, 2);
     }
 
     #[tokio::test]
@@ -480,7 +480,7 @@ mod tests {
         use yomu_domain::Backup;
 
         let source = Db::in_memory().await.unwrap();
-        let manga = source
+        let publication = source
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
@@ -488,15 +488,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = source.list_units(manga.id).await.unwrap();
-        source.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        let units = source.list_units(publication.id).await.unwrap();
+        source.mark_read(SHARED, &[units[0].id]).await.unwrap();
         source
             .append_event(
                 SHARED,
                 &ProgressEvent {
                     id: Uuid::from_u128(7),
-                    publication_id: manga.id,
-                    unit_id: chapters[1].id,
+                    publication_id: publication.id,
+                    unit_id: units[1].id,
                     page: 5,
                     device: "test".into(),
                     at: Utc::now(),
@@ -525,21 +525,21 @@ mod tests {
         // The restored instance mirrors the source's library and reading state.
         let restored = target.list_publications().await.unwrap();
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].id, manga.id);
+        assert_eq!(restored[0].id, publication.id);
         assert!(restored[0].auto_download);
-        let read = target.read_ids(SHARED, manga.id).await.unwrap();
-        assert!(read.contains(&chapters[0].id));
+        let read = target.read_ids(SHARED, publication.id).await.unwrap();
+        assert!(read.contains(&units[0].id));
         let position = target
-            .latest_position(SHARED, manga.id)
+            .latest_position(SHARED, publication.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(position.unit_id, chapters[1].id);
+        assert_eq!(position.unit_id, units[1].id);
         assert_eq!(position.page(), 5);
-        // Restored chapters read live (no page files travelled with the backup).
-        let restored_chapters = target.list_units(manga.id).await.unwrap();
+        // Restored units read live (no page files travelled with the backup).
+        let restored_units = target.list_units(publication.id).await.unwrap();
         assert!(
-            restored_chapters
+            restored_units
                 .iter()
                 .all(|c| matches!(c.download, DownloadState::None))
         );
@@ -603,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn download_queue_lists_and_transitions_states() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details(
@@ -614,8 +614,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        let (pending, downloaded, failed) = (chapters[0].id, chapters[1].id, chapters[2].id);
+        let units = db.list_units(publication.id).await.unwrap();
+        let (pending, downloaded, failed) = (units[0].id, units[1].id, units[2].id);
 
         db.mark_pending(&[pending]).await.unwrap();
         db.mark_pending(&[downloaded]).await.unwrap();
@@ -635,8 +635,8 @@ mod tests {
         assert_eq!(db.downloaded_summary().await.unwrap(), (1, 5));
 
         // Titles come back for labelling.
-        let titles = db.publication_titles(&[manga.id]).await.unwrap();
-        assert_eq!(titles.get(&manga.id).unwrap(), &manga.title);
+        let titles = db.publication_titles(&[publication.id]).await.unwrap();
+        assert_eq!(titles.get(&publication.id).unwrap(), &publication.title);
 
         // dismiss drops pending|failed → none, not downloaded.
         assert_eq!(
@@ -653,7 +653,7 @@ mod tests {
 
         // retry_failed re-queues only failed rows.
         assert_eq!(db.retry_failed(&[failed, downloaded]).await.unwrap(), 1);
-        let after = db.list_units(manga.id).await.unwrap();
+        let after = db.list_units(publication.id).await.unwrap();
         let failed_row = after.iter().find(|c| c.id == failed).unwrap();
         assert!(matches!(failed_row.download, DownloadState::Pending));
     }
@@ -661,12 +661,12 @@ mod tests {
     #[tokio::test]
     async fn library_keys_maps_source_key_to_id() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
         let map = db.library_keys("fixture").await.unwrap();
-        assert_eq!(map.get("m1"), Some(&manga.id));
+        assert_eq!(map.get("m1"), Some(&publication.id));
         assert!(db.library_keys("other-source").await.unwrap().is_empty());
     }
 
@@ -730,7 +730,7 @@ mod tests {
 
         let db = Db::in_memory().await.unwrap();
         // 1. First sync without dates → rows have NULL published_at.
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
@@ -739,7 +739,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            db.list_units(manga.id)
+            db.list_units(publication.id)
                 .await
                 .unwrap()
                 .iter()
@@ -751,28 +751,22 @@ mod tests {
         let mut listing = details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]).chapters;
         listing[0].published_at = Some(day(2));
         listing[1].published_at = Some(day(1));
-        db.sync_units(manga.id, &listing).await.unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        assert_eq!(
-            chapters.iter().filter(|c| c.published_at.is_some()).count(),
-            2
-        );
+        db.sync_units(publication.id, &listing).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        assert_eq!(units.iter().filter(|c| c.published_at.is_some()).count(), 2);
 
         // 3. Source stops printing dates → None must NOT clear stored values.
         listing[0].published_at = None;
         listing[1].published_at = None;
-        db.sync_units(manga.id, &listing).await.unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        assert_eq!(
-            chapters.iter().filter(|c| c.published_at.is_some()).count(),
-            2
-        );
+        db.sync_units(publication.id, &listing).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        assert_eq!(units.iter().filter(|c| c.published_at.is_some()).count(), 2);
 
         // 4. A changed date wins (site-side correction).
         listing[1].published_at = Some(day(5));
-        db.sync_units(manga.id, &listing).await.unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        let c1 = chapters.iter().find(|c| c.source_key == "c1").unwrap();
+        db.sync_units(publication.id, &listing).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        let c1 = units.iter().find(|c| c.source_key == "c1").unwrap();
         assert_eq!(c1.published_at, Some(day(5)));
     }
 
@@ -780,7 +774,7 @@ mod tests {
     async fn library_lifecycle_and_chapter_sync() {
         let db = Db::in_memory().await.unwrap();
 
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
@@ -788,7 +782,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(db.list_units(manga.id).await.unwrap().len(), 2);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 2);
 
         // Duplicate add is a constraint error, not a second row.
         assert!(matches!(
@@ -799,10 +793,10 @@ mod tests {
 
         // Re-sync with one new chapter: only the new one is returned, the
         // existing ones keep their ids.
-        let before = db.list_units(manga.id).await.unwrap();
+        let before = db.list_units(publication.id).await.unwrap();
         let new = db
             .sync_units(
-                manga.id,
+                publication.id,
                 &details(
                     "m1",
                     &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))],
@@ -814,7 +808,7 @@ mod tests {
         let new = new.new_units;
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].number, Some(3.0));
-        let after = db.list_units(manga.id).await.unwrap();
+        let after = db.list_units(publication.id).await.unwrap();
         assert_eq!(after.len(), 3);
         // Reading order: 1, 2, 3.
         assert_eq!(
@@ -836,18 +830,18 @@ mod tests {
         assert!(matches!(done.download, DownloadState::Downloaded { .. }));
         assert_eq!(done.page_count, Some(12));
 
-        db.delete_publication(manga.id).await.unwrap();
+        db.delete_publication(publication.id).await.unwrap();
         assert!(matches!(
-            db.get_publication(manga.id).await,
+            db.get_publication(publication.id).await,
             Err(DbError::NotFound)
         ));
-        assert_eq!(db.list_units(manga.id).await.unwrap().len(), 0);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
     async fn sync_prunes_chapters_that_left_the_listing() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details(
@@ -858,12 +852,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(db.list_units(manga.id).await.unwrap().len(), 3);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 3);
 
         // c3 leaves the listing (re-uploaded as c4). Without reconciliation
         // the old row would linger next to its twin — the duplicate bug.
         db.sync_units(
-            manga.id,
+            publication.id,
             &details(
                 "m1",
                 &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c4", Some(3.0))],
@@ -873,7 +867,7 @@ mod tests {
         .await
         .unwrap();
         let keys: Vec<String> = db
-            .list_units(manga.id)
+            .list_units(publication.id)
             .await
             .unwrap()
             .into_iter()
@@ -885,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn sync_keeps_downloaded_chapters_and_never_wipes_on_empty() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c1", Some(1.0)), ("c2", Some(2.0))]),
@@ -896,7 +890,7 @@ mod tests {
         // c2 is downloaded — it must survive falling out of the listing
         // (its saved pages would otherwise be orphaned).
         let c2 = db
-            .list_units(manga.id)
+            .list_units(publication.id)
             .await
             .unwrap()
             .into_iter()
@@ -906,11 +900,14 @@ mod tests {
         db.set_downloading(c2.id).await.unwrap();
         db.finish_download(c2.id, Ok(5)).await.unwrap();
 
-        db.sync_units(manga.id, &details("m1", &[("c1", Some(1.0))]).chapters)
-            .await
-            .unwrap();
+        db.sync_units(
+            publication.id,
+            &details("m1", &[("c1", Some(1.0))]).chapters,
+        )
+        .await
+        .unwrap();
         let keys: Vec<String> = db
-            .list_units(manga.id)
+            .list_units(publication.id)
             .await
             .unwrap()
             .into_iter()
@@ -923,9 +920,9 @@ mod tests {
         );
 
         // An empty listing must never wipe the library (bad/blocked scrape).
-        db.sync_units(manga.id, &[]).await.unwrap();
+        db.sync_units(publication.id, &[]).await.unwrap();
         assert_eq!(
-            db.list_units(manga.id).await.unwrap().len(),
+            db.list_units(publication.id).await.unwrap().len(),
             2,
             "empty listing left the chapters untouched"
         );
@@ -934,7 +931,7 @@ mod tests {
     #[tokio::test]
     async fn reuploaded_series_merges_twins_instead_of_duplicating() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("old/1", Some(1.0)), ("old/2", Some(2.0))]),
@@ -942,9 +939,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        let old1 = chapters.iter().find(|c| c.source_key == "old/1").unwrap();
-        let old2 = chapters.iter().find(|c| c.source_key == "old/2").unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        let old1 = units.iter().find(|c| c.source_key == "old/1").unwrap();
+        let old2 = units.iter().find(|c| c.source_key == "old/2").unwrap();
 
         // old/1 is downloaded and read, old/2 only read: both kinds of user
         // state must survive the re-upload.
@@ -956,7 +953,7 @@ mod tests {
             SHARED,
             &ProgressEvent {
                 id: Uuid::now_v7(),
-                publication_id: manga.id,
+                publication_id: publication.id,
                 unit_id: old1.id,
                 page: 4,
                 device: "test".into(),
@@ -970,7 +967,7 @@ mod tests {
         // numbers) and adds one genuinely new chapter.
         let sync = db
             .sync_units(
-                manga.id,
+                publication.id,
                 &details(
                     "m1",
                     &[
@@ -984,14 +981,14 @@ mod tests {
             .await
             .unwrap();
 
-        let chapters = db.list_units(manga.id).await.unwrap();
-        let keys: Vec<&str> = chapters.iter().map(|c| c.source_key.as_str()).collect();
+        let units = db.list_units(publication.id).await.unwrap();
+        let keys: Vec<&str> = units.iter().map(|c| c.source_key.as_str()).collect();
         assert_eq!(keys, ["new/1", "new/2", "new/3"], "old twins merged away");
 
         // Download carried over to the twin (pages moved on disk by the
         // caller via the Rename op).
-        let new1 = chapters.iter().find(|c| c.source_key == "new/1").unwrap();
-        let new2 = chapters.iter().find(|c| c.source_key == "new/2").unwrap();
+        let new1 = units.iter().find(|c| c.source_key == "new/1").unwrap();
+        let new2 = units.iter().find(|c| c.source_key == "new/2").unwrap();
         assert!(
             matches!(new1.download, DownloadState::Downloaded { .. }),
             "old/1's download transferred to new/1"
@@ -1007,9 +1004,13 @@ mod tests {
         );
 
         // Read marks and the reading journal follow the twin.
-        let read = db.read_ids(SHARED, manga.id).await.unwrap();
+        let read = db.read_ids(SHARED, publication.id).await.unwrap();
         assert!(read.contains(&new1.id) && read.contains(&new2.id));
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(position.unit_id, new1.id);
 
         // Only the genuinely new chapter is "new" — a re-upload must not
@@ -1025,15 +1026,15 @@ mod tests {
     #[tokio::test]
     async fn progress_journal_merge_and_idempotency() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        let chapter = db.list_units(manga.id).await.unwrap().remove(0);
+        let chapter = db.list_units(publication.id).await.unwrap().remove(0);
 
         let event = |id: u128, at: i64, page: u32| ProgressEvent {
             id: Uuid::from_u128(id),
-            publication_id: manga.id,
+            publication_id: publication.id,
             unit_id: chapter.id,
             page,
             device: "test".into(),
@@ -1047,7 +1048,11 @@ mod tests {
         // Replay (offline sync retry) must be a no-op.
         db.append_event(SHARED, &events[0]).await.unwrap();
 
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
         // Same winner as the in-memory merge rule.
         let expected = merge_position(&events).unwrap();
         assert_eq!(position.page(), expected.page);
@@ -1086,7 +1091,11 @@ mod tests {
         let batch = [bad.clone(), event(4, 300, 9)];
         let (accepted, skipped) = db.append_events(SHARED, &batch).await.unwrap();
         assert_eq!((accepted, skipped), (1, 1));
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(position.page(), 9);
     }
 
@@ -1096,15 +1105,15 @@ mod tests {
         // skipped, not stored — otherwise latest_position points at a
         // chapter that resolves to nothing.
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        let real = db.list_units(manga.id).await.unwrap().remove(0);
+        let real = db.list_units(publication.id).await.unwrap().remove(0);
 
         let good = ProgressEvent {
             id: Uuid::from_u128(1),
-            publication_id: manga.id,
+            publication_id: publication.id,
             unit_id: real.id,
             page: 4,
             device: "test".into(),
@@ -1121,7 +1130,11 @@ mod tests {
         assert_eq!((accepted, skipped), (1, 1));
         // The surviving position is the good event's chapter, not the
         // later-dated dangling one.
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(position.unit_id, real.id);
     }
 
@@ -1173,14 +1186,14 @@ mod tests {
 
         // Positions are per user: Alice's reading doesn't move the shared
         // account's position.
-        let manga = db
+        let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        let chapter = db.list_units(manga.id).await.unwrap().remove(0);
+        let chapter = db.list_units(publication.id).await.unwrap().remove(0);
         let event = ProgressEvent {
             id: Uuid::from_u128(1),
-            publication_id: manga.id,
+            publication_id: publication.id,
             unit_id: chapter.id,
             page: 7,
             device: "test".into(),
@@ -1188,7 +1201,7 @@ mod tests {
         };
         db.append_event(alice.id, &event).await.unwrap();
         assert_eq!(
-            db.latest_position(alice.id, manga.id)
+            db.latest_position(alice.id, publication.id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1196,7 +1209,7 @@ mod tests {
             7
         );
         assert!(
-            db.latest_position(SHARED, manga.id)
+            db.latest_position(SHARED, publication.id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1226,19 +1239,19 @@ mod tests {
             [true, false, false]
         );
 
-        let manga = db
+        let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        assert_eq!(manga.category, "reading");
+        assert_eq!(publication.category, "reading");
         assert_eq!(db.list_publications_for_update().await.unwrap().len(), 1);
 
         // Finished manga drop out of the sweep; unknown categories refuse.
-        let manga = db.set_category(manga.id, "finished").await.unwrap();
-        assert_eq!(manga.category, "finished");
+        let publication = db.set_category(publication.id, "finished").await.unwrap();
+        assert_eq!(publication.category, "finished");
         assert!(db.list_publications_for_update().await.unwrap().is_empty());
         assert!(matches!(
-            db.set_category(manga.id, "dropped").await,
+            db.set_category(publication.id, "dropped").await,
             Err(DbError::Constraint(_))
         ));
 
@@ -1251,7 +1264,7 @@ mod tests {
     #[tokio::test]
     async fn read_marks_are_per_user_and_idempotent() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details(
@@ -1262,13 +1275,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        let ids: Vec<Uuid> = chapters.iter().map(|c| c.id).collect();
+        let units = db.list_units(publication.id).await.unwrap();
+        let ids: Vec<Uuid> = units.iter().map(|c| c.id).collect();
 
         assert_eq!(db.mark_read(SHARED, &ids[..2]).await.unwrap(), 2);
         // Re-marking is a no-op, not an error or a double count.
         assert_eq!(db.mark_read(SHARED, &ids[..2]).await.unwrap(), 0);
-        let read = db.read_ids(SHARED, manga.id).await.unwrap();
+        let read = db.read_ids(SHARED, publication.id).await.unwrap();
         assert_eq!(read.len(), 2);
         assert!(read.contains(&ids[0]) && read.contains(&ids[1]));
 
@@ -1277,10 +1290,15 @@ mod tests {
             .upsert_oidc_user("sub-1", "alice", "Alice")
             .await
             .unwrap();
-        assert!(db.read_ids(alice.id, manga.id).await.unwrap().is_empty());
+        assert!(
+            db.read_ids(alice.id, publication.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         assert_eq!(db.mark_unread(SHARED, &ids[..1]).await.unwrap(), 1);
-        assert_eq!(db.read_ids(SHARED, manga.id).await.unwrap().len(), 1);
+        assert_eq!(db.read_ids(SHARED, publication.id).await.unwrap().len(), 1);
 
         // Unknown chapters are a constraint error, not a silent skip.
         assert!(matches!(
@@ -1289,14 +1307,19 @@ mod tests {
         ));
 
         // Marks go with the manga.
-        db.delete_publication(manga.id).await.unwrap();
-        assert!(db.read_ids(SHARED, manga.id).await.unwrap().is_empty());
+        db.delete_publication(publication.id).await.unwrap();
+        assert!(
+            db.read_ids(SHARED, publication.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn duplicate_chapter_keys_in_one_listing_are_deduped() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
@@ -1307,7 +1330,7 @@ mod tests {
         // is about de-duplicating the doubled c2, not about pruning.
         let new = db
             .sync_units(
-                manga.id,
+                publication.id,
                 &details(
                     "m1",
                     &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c2", Some(2.0))],
@@ -1318,13 +1341,13 @@ mod tests {
             .unwrap();
         let new = new.new_units;
         assert_eq!(new.len(), 1);
-        assert_eq!(db.list_units(manga.id).await.unwrap().len(), 2);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn updates_feed_records_filters_and_prunes() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details("m1", &[("c1", Some(1.0)), ("c2", Some(2.0))]),
@@ -1332,23 +1355,23 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
 
         // Empty find: no row.
-        db.add_update(manga.id, &[]).await.unwrap();
+        db.add_update(publication.id, &[]).await.unwrap();
         let all = db
             .updates_since(DateTime::<Utc>::MIN_UTC, 100)
             .await
             .unwrap();
         assert!(all.is_empty());
 
-        db.add_update(manga.id, &chapters).await.unwrap();
+        db.add_update(publication.id, &units).await.unwrap();
         let all = db
             .updates_since(DateTime::<Utc>::MIN_UTC, 100)
             .await
             .unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].publication_id, manga.id);
+        assert_eq!(all[0].publication_id, publication.id);
         assert_eq!(all[0].publication_title, "Publication m1");
         assert_eq!(all[0].unit_count, 2);
         assert_eq!(all[0].first_title, "Chapter c1");
@@ -1359,7 +1382,7 @@ mod tests {
         assert!(db.updates_since(seen, 100).await.unwrap().is_empty());
 
         // Cap.
-        db.add_update(manga.id, &chapters[..1]).await.unwrap();
+        db.add_update(publication.id, &units[..1]).await.unwrap();
         let capped = db.updates_since(DateTime::<Utc>::MIN_UTC, 1).await.unwrap();
         assert_eq!(capped.len(), 1);
 
@@ -1378,7 +1401,7 @@ mod tests {
     #[tokio::test]
     async fn next_pending_download_is_lowest_number_first() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
+        let publication = db
             .insert_publication(
                 "fixture",
                 &details(
@@ -1389,8 +1412,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_units(manga.id).await.unwrap();
-        let ids: Vec<_> = chapters.iter().map(|c| c.id).collect();
+        let units = db.list_units(publication.id).await.unwrap();
+        let ids: Vec<_> = units.iter().map(|c| c.id).collect();
         db.mark_pending(&ids).await.unwrap();
         let next = db.next_pending_download().await.unwrap().unwrap();
         assert_eq!(next.number, Some(1.0));

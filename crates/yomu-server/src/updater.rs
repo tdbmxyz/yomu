@@ -34,15 +34,15 @@ async fn run(state: AppState) {
 
         // Only categories with update_enabled (paused/finished series
         // don't need to hammer their sources).
-        let manga = match state.db.list_publications_for_update().await {
-            Ok(manga) => manga,
+        let publications = match state.db.list_publications_for_update().await {
+            Ok(publications) => publications,
             Err(err) => {
                 tracing::error!(%err, "listing library for update check");
                 continue;
             }
         };
-        tracing::info!(count = manga.len(), "checking library for new chapters");
-        for entry in manga {
+        tracing::info!(count = publications.len(), "checking library for new units");
+        for entry in publications {
             match sync::refresh_publication(&state, &entry).await {
                 Ok(new) if !new.is_empty() => {
                     // Feed for shell notifications; only the updater
@@ -55,7 +55,7 @@ async fn run(state: AppState) {
                 Ok(_) => {}
                 Err(err) => {
                     // One broken source must not stop the sweep.
-                    tracing::warn!(manga = %entry.title, %err, "update check failed");
+                    tracing::warn!(publication = %entry.title, %err, "update check failed");
                 }
             }
         }

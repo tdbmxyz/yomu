@@ -78,7 +78,7 @@ pub async fn refresh_publication(
             publication = %publication.title,
             new = new_units.len(),
             auto_download = publication.auto_download,
-            "new chapters found"
+            "new units found"
         );
     }
     Ok(new_units)

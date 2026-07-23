@@ -127,6 +127,7 @@ pub async fn page_image(
     }
 
     let publication = state.db.get_publication(chapter.publication_id).await?;
+    // LocalFile pages are served by the streamer once it lands.
     let Origin::Source { source_id, .. } = &publication.origin else {
         return Err(ApiError::Unprocessable(
             "publication is not source-backed".into(),
@@ -182,6 +183,7 @@ async fn live_pages(state: &AppState, chapter: &ReadingUnit) -> Result<Vec<Url>,
     }
 
     let publication = state.db.get_publication(chapter.publication_id).await?;
+    // LocalFile units have no live URLs; the streamer serves them once it lands.
     let Origin::Source { source_id, .. } = &publication.origin else {
         return Err(ApiError::Unprocessable(
             "publication is not source-backed".into(),
