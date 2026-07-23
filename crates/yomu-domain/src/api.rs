@@ -21,7 +21,7 @@ pub struct ApiErrorBody {
     pub message: String,
 }
 
-/// Add a manga found via source search to the library.
+/// Add a publication found via source search to the library.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddPublicationRequest {
     pub source_id: String,
@@ -30,7 +30,7 @@ pub struct AddPublicationRequest {
     pub auto_download: bool,
 }
 
-/// Per-manga settings. `category` is optional so clients toggling one
+/// Per-publication settings. `category` is optional so clients toggling one
 /// setting don't have to know the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePublicationRequest {
@@ -55,13 +55,13 @@ pub struct PublicationWithLocator {
     pub locator: Option<Locator>,
     #[serde(rename = "chapter_count")]
     pub unit_count: u32,
-    /// Chapters the user hasn't read (no read mark).
+    /// Units the user hasn't read (no read mark).
     #[serde(default)]
     pub unread_count: u32,
-    /// Chapters fully downloaded on the server.
+    /// Units fully downloaded on the server.
     #[serde(default)]
     pub downloaded_count: u32,
-    /// When the most recently fetched chapter arrived (drives the client's
+    /// When the most recently fetched unit arrived (drives the client's
     /// "new chapters" ordering).
     #[serde(
         rename = "latest_chapter_at",
@@ -69,7 +69,7 @@ pub struct PublicationWithLocator {
         skip_serializing_if = "Option::is_none"
     )]
     pub latest_unit_at: Option<DateTime<Utc>>,
-    /// Title of the chapter the position points at, for "resume" labels.
+    /// Title of the unit the locator points at, for "resume" labels.
     #[serde(
         rename = "position_chapter_title",
         default,
@@ -89,7 +89,7 @@ pub struct PublicationDetailResponse {
     pub locator: Option<Locator>,
 }
 
-/// Set the current reading position (the server wraps it into a journal
+/// Set the current locator (the server wraps it into a journal
 /// event; `device` identifies the writer).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetLocatorRequest {
@@ -144,7 +144,7 @@ pub struct SourceSearchResults {
     pub error: Option<String>,
 }
 
-/// Queue several chapters for server download (`POST /chapters/download`).
+/// Queue several units for server download (`POST /chapters/download`).
 /// The download worker drains them one by one with the source's politeness
 /// delay, so a large batch is slow by design, not hammering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +153,7 @@ pub struct DownloadUnitsRequest {
     pub unit_ids: Vec<Uuid>,
 }
 
-/// Mark chapters read or unread for the current user
+/// Mark units read or unread for the current user
 /// (`POST /chapters/mark`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkUnitsRequest {
@@ -162,7 +162,7 @@ pub struct MarkUnitsRequest {
     pub read: bool,
 }
 
-/// Outcome of a bulk chapter action.
+/// Outcome of a bulk unit action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkUnitsResponse {
     pub affected: u32,
@@ -245,4 +245,124 @@ pub struct RescanResponse {
     pub updated: u32,
     /// LocalFile publications newly flagged missing by this scan.
     pub missing: u32,
+}
+
+/// Golden wire tests: the renamed envelopes must keep emitting and accepting
+/// the frozen 1.x JSON field names.
+#[cfg(test)]
+mod wire {
+    use super::*;
+    use crate::{Kind, Locations, Origin};
+
+    fn publication() -> Publication {
+        Publication {
+            id: Uuid::from_u128(1),
+            kind: Kind::Comics,
+            origin: Origin::Source {
+                source_id: "fixture".into(),
+                source_key: "solo-farming".into(),
+            },
+            title: "Solo Farming".into(),
+            description: Some("A farm, solo.".into()),
+            cover_url: Some("https://example.com/cover.png".parse().unwrap()),
+            auto_download: true,
+            category: "reading".into(),
+            genres: vec!["fantasy".into()],
+            added_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            last_checked_at: Some("2026-01-02T00:00:00Z".parse().unwrap()),
+            missing_since: None,
+        }
+    }
+
+    fn locator() -> Locator {
+        Locator {
+            unit_id: Uuid::from_u128(9),
+            locations: Locations::Page { page: 3 },
+            at: "2026-01-03T00:00:00Z".parse().unwrap(),
+        }
+    }
+
+    /// The library-list entry: publication fields flattened at the top level
+    /// (through the `PublicationWire` mirror) plus the renamed counters.
+    #[test]
+    fn publication_with_locator_keeps_1x_field_names() {
+        let entry = PublicationWithLocator {
+            publication: publication(),
+            locator: Some(locator()),
+            unit_count: 12,
+            unread_count: 4,
+            downloaded_count: 2,
+            latest_unit_at: Some("2026-01-02T00:00:00Z".parse().unwrap()),
+            locator_unit_title: Some("Chapter 12".into()),
+        };
+        let out = serde_json::to_value(&entry).unwrap();
+        // Flatten + the try_from/into mirror: publication fields sit at the
+        // top level under their wire names.
+        assert_eq!(out["source_id"], "fixture");
+        assert_eq!(out["title"], "Solo Farming");
+        assert!(out.get("publication").is_none());
+        // Renamed envelope fields.
+        assert_eq!(out["position"]["page"], 3);
+        assert!(out.get("locator").is_none());
+        assert_eq!(out["chapter_count"], 12);
+        assert!(out.get("unit_count").is_none());
+        assert_eq!(out["latest_chapter_at"], "2026-01-02T00:00:00Z");
+        assert_eq!(out["position_chapter_title"], "Chapter 12");
+
+        let back: PublicationWithLocator = serde_json::from_value(out).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn publication_detail_response_keeps_1x_keys() {
+        let detail = PublicationDetailResponse {
+            publication: publication(),
+            units: vec![],
+            locator: Some(locator()),
+        };
+        let out = serde_json::to_value(&detail).unwrap();
+        assert!(out.get("manga").is_some());
+        assert!(out.get("chapters").is_some());
+        assert!(out.get("position").is_some());
+        assert!(out.get("publication").is_none());
+        assert!(out.get("units").is_none());
+        assert!(out.get("locator").is_none());
+    }
+
+    #[test]
+    fn set_locator_request_reads_1x_body() {
+        let req: SetLocatorRequest = serde_json::from_str(
+            r#"{"chapter_id":"00000000-0000-0000-0000-000000000009","page":3}"#,
+        )
+        .unwrap();
+        assert_eq!(req.unit_id, Uuid::from_u128(9));
+        assert_eq!(req.page, 3);
+        assert_eq!(req.device, "web");
+    }
+
+    #[test]
+    fn download_units_request_reads_chapter_ids() {
+        let req: DownloadUnitsRequest =
+            serde_json::from_str(r#"{"chapter_ids":["00000000-0000-0000-0000-000000000009"]}"#)
+                .unwrap();
+        assert_eq!(req.unit_ids, vec![Uuid::from_u128(9)]);
+    }
+
+    #[test]
+    fn update_event_serializes_1x_names() {
+        let event = UpdateEvent {
+            publication_id: Uuid::from_u128(1),
+            publication_title: "Solo Farming".into(),
+            unit_count: 3,
+            first_title: "Chapter 10".into(),
+            last_title: "Chapter 12".into(),
+            created_at: "2026-01-02T00:00:00Z".parse().unwrap(),
+        };
+        let out = serde_json::to_value(&event).unwrap();
+        assert_eq!(out["manga_id"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(out["manga_title"], "Solo Farming");
+        assert_eq!(out["chapter_count"], 3);
+        assert!(out.get("publication_id").is_none());
+        assert!(out.get("unit_count").is_none());
+    }
 }

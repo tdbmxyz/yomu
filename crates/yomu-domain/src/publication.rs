@@ -56,6 +56,8 @@ pub struct Publication {
 /// old clients read `source_id`/`source_key` as required strings, so
 /// LocalFile serializes them as `"local"` + the path; deserializing a 1.x
 /// payload with `source_id == "local"` heals into a LocalFile origin.
+/// When both are present (hand-edited backups), an explicit `file_path`
+/// wins over `source_id` and the row heals into LocalFile.
 #[derive(Serialize, Deserialize)]
 struct PublicationWire {
     id: Uuid,
@@ -111,6 +113,7 @@ impl From<Publication> for PublicationWire {
 }
 
 impl TryFrom<PublicationWire> for Publication {
+    // Reserved for future origin validation; conversion currently never fails.
     type Error = String;
 
     fn try_from(w: PublicationWire) -> Result<Self, String> {
@@ -144,7 +147,7 @@ pub fn default_category() -> String {
 }
 
 /// A library category — a reading status (Reading / Paused / Finished by
-/// default). Every manga belongs to exactly one.
+/// default). Every publication belongs to exactly one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Category {
     /// Stable slug, e.g. `"reading"`.
@@ -152,8 +155,8 @@ pub struct Category {
     pub name: String,
     /// Display order.
     pub position: u32,
-    /// Whether the periodic updater checks this category's manga for new
-    /// chapters (paused/finished series shouldn't hammer their sources).
+    /// Whether the periodic updater checks this category's publications for
+    /// new units (paused/finished series shouldn't hammer their sources).
     pub update_enabled: bool,
 }
 
@@ -178,7 +181,7 @@ pub struct ReadingUnit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_count: Option<u32>,
     /// Read mark for the requesting user (bulk-marked or auto-marked as the
-    /// reading position moves past the chapter).
+    /// locator moves past the unit).
     #[serde(default)]
     pub read: bool,
 }

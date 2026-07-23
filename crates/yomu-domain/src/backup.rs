@@ -41,3 +41,45 @@ pub struct RestoreSummary {
     pub read_marks: u32,
     pub progress_events: u32,
 }
+
+/// Golden wire tests: backups written by 1.x must keep their field names.
+#[cfg(test)]
+mod wire {
+    use super::*;
+
+    #[test]
+    fn backup_keeps_1x_keys() {
+        let backup = Backup {
+            version: BACKUP_VERSION,
+            exported_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            categories: vec![],
+            publications: vec![],
+            units: vec![],
+            read_unit_ids: vec![],
+            progress: vec![],
+        };
+        let out = serde_json::to_value(&backup).unwrap();
+        assert!(out.get("manga").is_some());
+        assert!(out.get("chapters").is_some());
+        assert!(out.get("read_chapter_ids").is_some());
+        assert!(out.get("publications").is_none());
+        assert!(out.get("units").is_none());
+        assert!(out.get("read_unit_ids").is_none());
+    }
+
+    #[test]
+    fn restore_summary_keeps_1x_keys() {
+        let summary = RestoreSummary {
+            publications: 2,
+            units: 40,
+            categories: 3,
+            read_marks: 10,
+            progress_events: 5,
+        };
+        let out = serde_json::to_value(&summary).unwrap();
+        assert_eq!(out["manga"], 2);
+        assert_eq!(out["chapters"], 40);
+        assert!(out.get("publications").is_none());
+        assert!(out.get("units").is_none());
+    }
+}
