@@ -127,29 +127,31 @@ pub async fn page_image(
     }
 
     let publication = state.db.get_publication(chapter.publication_id).await?;
-    // LocalFile pages are served by the streamer once it lands.
-    let Origin::Source { source_id, .. } = &publication.origin else {
-        return Err(ApiError::Unprocessable(
-            "publication is not source-backed".into(),
-        ));
-    };
-    let source = state
-        .sources
-        .get(source_id)
-        .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
-
     let urls = live_pages(&state, &chapter).await?;
     let url = urls.get(n as usize).ok_or(ApiError::NotFound)?;
-    match source.image(url).await {
-        Ok(image) => Ok(image_response(image.bytes.to_vec(), image.content_type)),
-        // The cached page list may hold expired CDN URLs; re-resolve the
-        // chapter once and retry before giving up.
-        Err(_) => {
-            state.live_pages.invalidate(chapter.id).await;
-            let urls = live_pages(&state, &chapter).await?;
-            let url = urls.get(n as usize).ok_or(ApiError::NotFound)?;
-            let image = source.image(url).await?;
+    match &publication.origin {
+        // No CDN-expiry retry for local files: `local:` URLs don't expire.
+        Origin::LocalFile { .. } => {
+            let image = state.streamer.image(url).await?;
             Ok(image_response(image.bytes.to_vec(), image.content_type))
+        }
+        Origin::Source { source_id, .. } => {
+            let source = state
+                .sources
+                .get(source_id)
+                .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
+            match source.image(url).await {
+                Ok(image) => Ok(image_response(image.bytes.to_vec(), image.content_type)),
+                // The cached page list may hold expired CDN URLs; re-resolve
+                // the chapter once and retry before giving up.
+                Err(_) => {
+                    state.live_pages.invalidate(chapter.id).await;
+                    let urls = live_pages(&state, &chapter).await?;
+                    let url = urls.get(n as usize).ok_or(ApiError::NotFound)?;
+                    let image = source.image(url).await?;
+                    Ok(image_response(image.bytes.to_vec(), image.content_type))
+                }
+            }
         }
     }
 }
@@ -177,27 +179,26 @@ async fn downloaded_files(
 }
 
 /// Page-URL list for a live-read chapter, resolved once per TTL window.
-async fn live_pages(state: &AppState, chapter: &ReadingUnit) -> Result<Vec<Url>, ApiError> {
-    if let Some(urls) = state.live_pages.get(chapter.id).await {
+async fn live_pages(state: &AppState, unit: &ReadingUnit) -> Result<Vec<Url>, ApiError> {
+    if let Some(urls) = state.live_pages.get(unit.id).await {
         return Ok(urls);
     }
 
-    let publication = state.db.get_publication(chapter.publication_id).await?;
-    // LocalFile units have no live URLs; the streamer serves them once it lands.
-    let Origin::Source { source_id, .. } = &publication.origin else {
-        return Err(ApiError::Unprocessable(
-            "publication is not source-backed".into(),
-        ));
+    let publication = state.db.get_publication(unit.publication_id).await?;
+    let urls = match &publication.origin {
+        Origin::LocalFile { .. } => state.streamer.pages(&unit.source_key).await?,
+        Origin::Source { source_id, .. } => {
+            let source = state
+                .sources
+                .get(source_id)
+                .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
+            source.pages(&unit.source_key).await?
+        }
     };
-    let source = state
-        .sources
-        .get(source_id)
-        .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
-    let urls = source.pages(&chapter.source_key).await?;
 
     // Remember the count for the UI even after restart.
-    let _ = state.db.set_page_count(chapter.id, urls.len() as u32).await;
-    state.live_pages.put(chapter.id, urls.clone()).await;
+    let _ = state.db.set_page_count(unit.id, urls.len() as u32).await;
+    state.live_pages.put(unit.id, urls.clone()).await;
     Ok(urls)
 }
 

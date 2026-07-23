@@ -91,6 +91,8 @@ pub struct AppState {
     pub oidc: Option<Arc<OidcRuntime>>,
     /// Browse pages currently revalidating in the background.
     pub catalog_inflight: Arc<crate::catalog::Inflight>,
+    /// Serves the watched books dir (local-file publications).
+    pub streamer: Arc<crate::streamer::Streamer>,
 }
 
 /// The chapter the download worker is fetching, and how far along.
@@ -104,6 +106,7 @@ pub struct ActiveDownload {
 
 impl AppState {
     pub fn new(config: Config, db: Db, sources: Registry, oidc: Option<OidcRuntime>) -> Self {
+        let streamer = Arc::new(crate::streamer::Streamer::new(config.books.dir.clone()));
         Self {
             config: Arc::new(config),
             db,
@@ -113,6 +116,7 @@ impl AppState {
             download_progress: Arc::new(RwLock::new(None)),
             oidc: oidc.map(Arc::new),
             catalog_inflight: Arc::new(crate::catalog::Inflight::default()),
+            streamer,
         }
     }
 

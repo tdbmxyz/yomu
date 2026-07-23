@@ -35,13 +35,6 @@ pub struct Streamer {
 }
 
 impl Streamer {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub fn new(books_dir: PathBuf) -> Self {
         Self {
             books_dir,
@@ -246,13 +239,6 @@ impl Streamer {
     }
 
     /// Resolve a `local:` URL produced by this streamer back to file bytes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub async fn image(&self, url: &Url) -> Result<ImageData> {
         if url.scheme() != "local" {
             return Err(SourceError::Parse(format!("not a local url: {url}")));

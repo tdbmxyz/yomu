@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 use yomu_domain::{
     AddPublicationRequest, Origin, Publication, PublicationDetailResponse, PublicationWithLocator,
-    RefreshResponse, UpdatePublicationRequest,
+    RefreshResponse, RescanResponse, UpdatePublicationRequest,
 };
 
 use super::ApiError;
@@ -140,10 +140,40 @@ pub async fn refresh(
     Path(id): Path<Uuid>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
     let publication = state.db.get_publication(id).await?;
-    let new_units = sync::refresh_publication(&state, &publication).await?.len() as u32;
+    let new_units = match &publication.origin {
+        // A LocalFile refresh is a targeted rescan, implemented as a full
+        // scan filtered to this publication's outcome: a full disk scan is
+        // cheap and reuses tested code.
+        Origin::LocalFile { .. } => {
+            let before = state.db.list_units(id).await?.len();
+            crate::streamer::scan(&state.streamer, &state.db, None)
+                .await
+                .map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+            (state.db.list_units(id).await?.len().saturating_sub(before)) as u32
+        }
+        Origin::Source { .. } => {
+            sync::refresh_publication(&state, &publication).await?.len() as u32
+        }
+    };
     Ok(Json(RefreshResponse {
         new_units,
         checked_at: chrono::Utc::now(),
+    }))
+}
+
+/// Manual "Rescan files" from the More page.
+pub async fn rescan(
+    State(state): State<AppState>,
+    _user: CurrentUser,
+) -> Result<Json<RescanResponse>, ApiError> {
+    let notifier = crate::notifier::Notifier::new(state.config.notify.clone());
+    let outcome = crate::streamer::scan(&state.streamer, &state.db, Some(&notifier))
+        .await
+        .map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    Ok(Json(RescanResponse {
+        added: outcome.added,
+        updated: outcome.updated,
+        missing: outcome.missing,
     }))
 }
 
@@ -167,17 +197,16 @@ pub async fn cover(
 
     let publication = state.db.get_publication(id).await?;
     let cover_url = publication.cover_url.ok_or(ApiError::NotFound)?;
-    // LocalFile covers are extracted and served by the streamer once it lands.
-    let Origin::Source { source_id, .. } = &publication.origin else {
-        return Err(ApiError::Unprocessable(
-            "publication is not source-backed".into(),
-        ));
+    let image = match &publication.origin {
+        Origin::LocalFile { .. } => state.streamer.image(&cover_url).await?,
+        Origin::Source { source_id, .. } => {
+            let source = state
+                .sources
+                .get(source_id)
+                .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
+            source.image(&cover_url).await?
+        }
     };
-    let source = state
-        .sources
-        .get(source_id)
-        .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
-    let image = source.image(&cover_url).await?;
 
     let ext = crate::downloader::extension_for(&image.content_type, &cover_url);
     let _ = tokio::fs::create_dir_all(&covers_dir).await;

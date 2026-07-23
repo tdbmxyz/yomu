@@ -34,10 +34,6 @@ pub struct ScanOutcome {
 /// updates feed (and ntfy when a notifier is passed) for new units in known
 /// publications, flag vanished files, self-heal unambiguous renames.
 /// Never destructive: rows and progress always survive.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "streamer (2.x) scan; wired into AppState next")
-)]
 pub async fn scan(
     streamer: &Streamer,
     db: &Db,
@@ -121,6 +117,32 @@ pub async fn scan(
     }
 
     Ok(outcome)
+}
+
+/// Startup + periodic scan. Unlike the scraper updater this scans
+/// immediately: touching the disk is cheap and files added while the server
+/// was down should appear right away.
+pub fn spawn(state: crate::state::AppState) {
+    if !state.config.books.enabled {
+        return;
+    }
+    tokio::spawn(async move {
+        let notifier = Notifier::new(state.config.notify.clone());
+        let interval =
+            std::time::Duration::from_secs(state.config.books.scan_interval_secs.max(60));
+        loop {
+            match scan(&state.streamer, &state.db, Some(&notifier)).await {
+                Ok(outcome) => tracing::info!(
+                    added = outcome.added,
+                    updated = outcome.updated,
+                    missing = outcome.missing,
+                    "streamer scan complete"
+                ),
+                Err(err) => tracing::warn!(%err, "streamer scan failed"),
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 /// Re-sync a known publication: new units feed the updates feed + ntfy

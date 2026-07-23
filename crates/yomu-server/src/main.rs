@@ -12,9 +12,7 @@ mod sync;
 mod updater;
 
 use anyhow::Context;
-use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
-use yomu_source::local::LocalSource;
 use yomu_source::registry::Registry;
 
 #[tokio::main]
@@ -25,20 +23,11 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::load().context("loading configuration")?;
 
-    let (mut sources, broken) = Registry::load(&config.sources_dir).map_err(|e| {
+    let (sources, broken) = Registry::load(&config.sources_dir).map_err(|e| {
         anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display())
     })?;
     for definition in &broken {
         tracing::error!(%definition, "skipping invalid source definition");
-    }
-    if config.local.enabled {
-        sources
-            .insert(Arc::new(LocalSource::new(
-                "local",
-                "Local series",
-                config.local.dir.clone(),
-            )))
-            .map_err(|e| anyhow::anyhow!("registering local source: {e}"))?;
     }
     if sources.is_empty() {
         tracing::warn!(
@@ -67,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let state = state::AppState::new(config, db, sources, oidc);
     downloader::spawn(state.clone());
     updater::spawn(state.clone());
+    streamer::spawn(state.clone());
 
     let app = api::router(state.clone());
     let listener = tokio::net::TcpListener::bind(state.config.listen)

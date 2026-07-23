@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/covers", get(sources::cover))
         .route("/search", get(sources::search_all))
         .route("/library", get(library::list).post(library::add))
+        .route("/library/rescan", axum::routing::post(library::rescan))
         .route("/categories", get(categories::list))
         .route("/categories/{id}", axum::routing::put(categories::update))
         .route(
@@ -187,6 +188,10 @@ mod tests {
         );
         assert_eq!(
             status_of("POST", "/api/v1/downloads/dismiss").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of("POST", "/api/v1/library/rescan").await,
             StatusCode::UNAUTHORIZED
         );
     }

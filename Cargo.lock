@@ -7126,7 +7126,6 @@ dependencies = [
  "tracing",
  "url",
  "yomu-domain",
- "zip",
 ]
 
 [[package]]

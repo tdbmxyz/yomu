@@ -20,7 +20,8 @@ pub struct Config {
     /// Directory of source definitions (`*.toml`, see sources.d examples).
     pub sources_dir: PathBuf,
     pub updater: UpdaterConfig,
-    pub local: LocalConfig,
+    #[serde(alias = "local")]
+    pub books: BooksConfig,
     pub auth: AuthConfig,
     pub notify: Option<NotifyConfig>,
     pub catalog: CatalogConfig,
@@ -35,22 +36,26 @@ pub struct UpdaterConfig {
     pub interval_secs: u64,
 }
 
-/// The built-in "local" source: series that already live on the server's
-/// disk as `<dir>/<Series>/<ReadingUnit>/*.png` or `<Series>/<ReadingUnit>.cbz`
-/// (see `yomu_source::local`).
+/// The streamer's watched folder: user-supplied comic files as
+/// `<dir>/<Series>/<Chapter>/*.png`, `<Series>/<Chapter>.cbz`, or
+/// root-level `.cbz` / image dirs (see `crate::streamer`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct LocalConfig {
+pub struct BooksConfig {
     pub enabled: bool,
-    /// Directory holding the local series.
+    /// Directory holding the files. Defaults to the 1.x local-source dir so
+    /// nothing moves on disk for existing deployments.
     pub dir: PathBuf,
+    /// Seconds between periodic rescans (clamped to ≥ 60).
+    pub scan_interval_secs: u64,
 }
 
-impl Default for LocalConfig {
+impl Default for BooksConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             dir: PathBuf::from("local"),
+            scan_interval_secs: 60 * 60,
         }
     }
 }
@@ -123,7 +128,7 @@ impl Default for Config {
             data_dir: PathBuf::from("data"),
             sources_dir: PathBuf::from("sources.d"),
             updater: UpdaterConfig::default(),
-            local: LocalConfig::default(),
+            books: BooksConfig::default(),
             auth: AuthConfig::default(),
             notify: None,
             catalog: CatalogConfig::default(),
