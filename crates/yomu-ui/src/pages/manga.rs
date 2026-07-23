@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use uuid::Uuid;
-use yomu_domain::{Category, Chapter, DownloadState, MangaDetailResponse, UpdateMangaRequest};
+use yomu_domain::{
+    Category, DownloadState, PublicationDetailResponse, ReadingUnit, UpdatePublicationRequest,
+};
 
 use super::{NotFound, param_uuid};
 use crate::offline;
@@ -54,7 +56,7 @@ pub fn MangaPage() -> impl IntoView {
             async move {
                 // The flag marks the detail as served-from-cache (server
                 // unreachable) so rows can show which chapters won't open.
-                offline::cached(conn, &format!("manga:{id}"), || client.manga(id)).await
+                offline::cached(conn, &format!("manga:{id}"), || client.publication(id)).await
             }
         }
     });
@@ -121,7 +123,7 @@ pub fn MangaPage() -> impl IntoView {
     let poll = StoredValue::new(None::<TimeoutHandle>);
     Effect::new(move |_| {
         let busy = detail.get().and_then(|r| r.ok()).is_some_and(|(d, _)| {
-            d.chapters.iter().any(|c| {
+            d.units.iter().any(|c| {
                 matches!(
                     c.download,
                     DownloadState::Pending | DownloadState::Downloading
@@ -150,7 +152,7 @@ pub fn MangaPage() -> impl IntoView {
                         map.clear();
                         for entry in &downloads.queue {
                             if let Some(p) = &entry.progress {
-                                map.insert(entry.chapter_id, (p.page, p.total));
+                                map.insert(entry.unit_id, (p.page, p.total));
                             }
                         }
                     });
@@ -186,7 +188,7 @@ pub fn MangaPage() -> impl IntoView {
 
 #[component]
 fn MangaDetail(
-    detail: MangaDetailResponse,
+    detail: PublicationDetailResponse,
     /// The detail came from the offline cache: the server is unreachable,
     /// so chapters not saved on this device won't open.
     offline: bool,
@@ -200,16 +202,16 @@ fn MangaDetail(
     categories: LocalResource<Result<Vec<Category>, yomu_client::ClientError>>,
 ) -> impl IntoView {
     let client = use_client();
-    let manga = detail.manga.clone();
-    let id = manga.id;
+    let publication = detail.publication.clone();
+    let id = publication.id;
     // "Continue" goes to the last known position — server's answer merged
     // with any unsynced offline events — or the first chapter.
-    let position = offline::effective_position(id, detail.position.clone(), &offline::outbox());
-    let continue_target = position
+    let locator = offline::effective_position(id, detail.locator.clone(), &offline::outbox());
+    let continue_target = locator
         .as_ref()
-        .map(|p| (p.chapter_id, p.page))
-        .or_else(|| detail.chapters.first().map(|c| (c.id, 0)));
-    let continue_label = if position.is_some() {
+        .map(|p| (p.unit_id, p.page()))
+        .or_else(|| detail.units.first().map(|c| (c.id, 0)));
+    let continue_label = if locator.is_some() {
         "Continue reading"
     } else {
         "Start reading"
@@ -220,9 +222,9 @@ fn MangaDetail(
         move |_| {
             let client = client.clone();
             spawn_local(async move {
-                match client.refresh_manga(id).await {
+                match client.refresh_publication(id).await {
                     Ok(r) => {
-                        status.set(Some(match r.new_chapters {
+                        status.set(Some(match r.new_units {
                             0 => "No new chapters".into(),
                             n => format!("{n} new chapter(s)"),
                         }));
@@ -234,17 +236,17 @@ fn MangaDetail(
         }
     };
 
-    let auto_download = manga.auto_download;
+    let auto_download = publication.auto_download;
     let toggle_auto = {
         let client = client.clone();
         move |_| {
             let client = client.clone();
             spawn_local(async move {
-                let req = UpdateMangaRequest {
+                let req = UpdatePublicationRequest {
                     auto_download: !auto_download,
                     category: None,
                 };
-                match client.update_manga(id, &req).await {
+                match client.update_publication(id, &req).await {
                     Ok(_) => refresh.update(|n| *n += 1),
                     Err(err) => status.set(Some(format!("Update failed: {err}"))),
                 }
@@ -252,18 +254,18 @@ fn MangaDetail(
         }
     };
 
-    let current_category = manga.category.clone();
+    let current_category = publication.category.clone();
     let set_category = {
         let client = client.clone();
         move |ev: leptos::ev::Event| {
             let value = event_target_value(&ev);
             let client = client.clone();
             spawn_local(async move {
-                let req = UpdateMangaRequest {
+                let req = UpdatePublicationRequest {
                     auto_download,
                     category: Some(value),
                 };
-                match client.update_manga(id, &req).await {
+                match client.update_publication(id, &req).await {
                     Ok(_) => refresh.update(|n| *n += 1),
                     Err(err) => status.set(Some(format!("Update failed: {err}"))),
                 }
@@ -276,7 +278,7 @@ fn MangaDetail(
         move |_| {
             let client = client.clone();
             spawn_local(async move {
-                match client.delete_manga(id).await {
+                match client.delete_publication(id).await {
                     Ok(()) => {
                         let _ = window().location().set_href("/");
                     }
@@ -291,14 +293,17 @@ fn MangaDetail(
             <div class="manga-head">
                 <crate::cover::Cover manga_id=id large=true/>
                 <div class="manga-head-body">
-                    <h2>{manga.title.clone()}</h2>
-                    {manga
+                    <h2>{publication.title.clone()}</h2>
+                    {publication
                         .description
                         .clone()
                         .map(|d| view! { <p class="muted">{d}</p> })}
                     <p class="muted">
-                        "Source: " {manga.source_id.clone()} " · " {detail.chapters.len()}
-                        " chapters"
+                        "Source: "
+                        {match &publication.origin {
+                            yomu_domain::Origin::Source { source_id, .. } => source_id.clone(),
+                            yomu_domain::Origin::LocalFile { .. } => "local".to_string(),
+                        }} " · " {detail.units.len()} " chapters"
                     </p>
                     <div class="manga-actions">
                         {continue_target
@@ -356,15 +361,15 @@ fn MangaDetail(
             </div>
             <ChapterList
                 manga_id=id
-                chapters=detail.chapters
+                units=detail.units
                 offline
-                position_chapter=position.map(|p| p.chapter_id)
+                position_chapter=locator.map(|p| p.unit_id)
                 refresh
                 status
                 selected
                 anchor
                 server_progress
-                manga_title=manga.title.clone()
+                manga_title=publication.title.clone()
             />
         </section>
     }
@@ -472,7 +477,7 @@ pub(crate) async fn save_locally(
 #[component]
 fn ChapterList(
     manga_id: Uuid,
-    chapters: Vec<Chapter>,
+    units: Vec<ReadingUnit>,
     offline: bool,
     position_chapter: Option<Uuid>,
     refresh: RwSignal<u32>,
@@ -488,20 +493,20 @@ fn ChapterList(
     // the server's prefix "mark read" logic. Reversing here keeps this
     // component's indices (ids, selection range, rendering) consistent
     // among themselves.
-    let mut chapters: Vec<Chapter> = chapters.into_iter().rev().collect();
+    let mut units: Vec<ReadingUnit> = units.into_iter().rev().collect();
     // Read marks queued while offline overlay the server's answer, so
     // marking works (and shows) without a connection.
     let pending = offline::pending_marks();
     if !pending.is_empty() {
-        for chapter in &mut chapters {
-            if let Some(read) = pending.get(&chapter.id) {
-                chapter.read = *read;
+        for unit in &mut units {
+            if let Some(read) = pending.get(&unit.id) {
+                unit.read = *read;
             }
         }
     }
-    let ids = StoredValue::new(chapters.iter().map(|c| c.id).collect::<Vec<_>>());
+    let ids = StoredValue::new(units.iter().map(|c| c.id).collect::<Vec<_>>());
     let titles = StoredValue::new(
-        chapters
+        units
             .iter()
             .map(|c| (c.id, c.title.clone()))
             .collect::<std::collections::HashMap<Uuid, String>>(),
@@ -513,7 +518,7 @@ fn ChapterList(
     // Storage state per display index, for the selection menu's matrix.
     let states = StoredValue::new({
         let device = offline::device_chapters();
-        chapters
+        units
             .iter()
             .map(|c| crate::chapter_actions::ChapterState {
                 on_server: matches!(c.download, DownloadState::Downloaded { .. }),
@@ -595,7 +600,7 @@ fn ChapterList(
         }
         let client = use_client();
         spawn_local(async move {
-            if client.mark_chapters(&mark_ids, read).await.is_err() {
+            if client.mark_units(&mark_ids, read).await.is_err() {
                 offline::queue_marks(&mark_ids, read);
                 status.set(Some("Marked offline — will sync when back online".into()));
             }
@@ -642,7 +647,7 @@ fn ChapterList(
                 }
                 let client = use_client();
                 spawn_local(async move {
-                    match client.download_chapters(&dl).await {
+                    match client.download_units(&dl).await {
                         Ok(r) => {
                             status.set(Some(match r.affected {
                                 0 => "Nothing new to download".into(),
@@ -781,15 +786,15 @@ fn ChapterList(
             </Show>
         </div>
         <ul class="chapter-list">
-            {chapters
+            {units
                 .into_iter()
                 .enumerate()
-                .map(|(index, chapter)| {
-                    let current = position_chapter == Some(chapter.id);
+                .map(|(index, unit)| {
+                    let current = position_chapter == Some(unit.id);
                     view! {
                         <ChapterItem
                             manga_id
-                            chapter
+                            unit
                             offline
                             current
                             index
@@ -818,7 +823,7 @@ fn ChapterList(
 #[component]
 fn ChapterItem(
     manga_id: Uuid,
-    chapter: Chapter,
+    unit: ReadingUnit,
     offline: bool,
     current: bool,
     index: usize,
@@ -828,8 +833,8 @@ fn ChapterItem(
     toggle: Callback<usize>,
     server_progress: ServerProgress,
 ) -> impl IntoView {
-    let id = chapter.id;
-    let read = chapter.read;
+    let id = unit.id;
+    let read = unit.read;
     let local_downloads = crate::use_local_downloads();
     let row_progress = move || {
         if let Some(d) = local_downloads.with(|m| m.get(&id).cloned()) {
@@ -919,13 +924,13 @@ fn ChapterItem(
     // per-tier buttons; actions live in the selection menu.
     let device_marks = crate::use_device_marks();
     let on_device = move || device_marks.with(|m| m.contains_key(&id));
-    let on_server = matches!(chapter.download, DownloadState::Downloaded { .. });
+    let on_server = matches!(unit.download, DownloadState::Downloaded { .. });
     let dl_busy = matches!(
-        chapter.download,
+        unit.download,
         DownloadState::Pending | DownloadState::Downloading
     );
-    let dl_failed = matches!(chapter.download, DownloadState::Failed { .. });
-    let failed_reason = match &chapter.download {
+    let dl_failed = matches!(unit.download, DownloadState::Failed { .. });
+    let failed_reason = match &unit.download {
         DownloadState::Failed { reason, .. } => Some(format!("Download failed: {reason}")),
         _ => None,
     };
@@ -992,9 +997,9 @@ fn ChapterItem(
                 </span>
             </Show>
             <a class="chapter-title" href=format!("/read/{manga_id}/{id}")>
-                {chapter.title.clone()}
+                {unit.title.clone()}
             </a>
-            {chapter
+            {unit
                 .published_at
                 .map(|at| {
                     view! {

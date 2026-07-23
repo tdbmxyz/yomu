@@ -56,8 +56,10 @@ pub fn More() -> impl IntoView {
                     Ok(backup) => match serde_json::to_string(&backup) {
                         Ok(json) => {
                             if download_json("yomu-backup.json", &json).is_ok() {
-                                backup_status
-                                    .set(Some(format!("Exported {} manga.", backup.manga.len())));
+                                backup_status.set(Some(format!(
+                                    "Exported {} manga.",
+                                    backup.publications.len()
+                                )));
                             } else {
                                 backup_status.set(Some("Could not start the download.".into()));
                             }
@@ -103,7 +105,7 @@ pub fn More() -> impl IntoView {
                 match client.restore(&backup).await {
                     Ok(s) => backup_status.set(Some(format!(
                         "Restored {} manga, {} chapters, {} read marks.",
-                        s.manga, s.chapters, s.read_marks
+                        s.publications, s.units, s.read_marks
                     ))),
                     Err(e) => backup_status.set(Some(format!("Restore failed: {e}"))),
                 }

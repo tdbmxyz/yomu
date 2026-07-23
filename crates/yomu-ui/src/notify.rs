@@ -84,7 +84,7 @@ fn advance_watermark(updates: &[UpdateEvent]) {
 
 /// Body matching the server's ntfy push for the same event.
 fn message(event: &UpdateEvent) -> String {
-    match event.chapter_count {
+    match event.unit_count {
         1 => event.first_title.clone(),
         n => format!(
             "{n} new chapters — {} … {}",
@@ -99,7 +99,7 @@ async fn notify(event: &UpdateEvent) {
     // Fold the whole UUID — the first bytes alone are a v7 timestamp,
     // shared by manga added around the same time.
     let id = event
-        .manga_id
+        .publication_id
         .as_bytes()
         .chunks(4)
         .map(|c| i32::from_le_bytes(c.try_into().expect("4 bytes")))
@@ -109,7 +109,7 @@ async fn notify(event: &UpdateEvent) {
     let _ = js_sys::Reflect::set(
         &options,
         &"title".into(),
-        &event.manga_title.as_str().into(),
+        &event.publication_title.as_str().into(),
     );
     let _ = js_sys::Reflect::set(&options, &"body".into(), &message(event).as_str().into());
     let args = js_sys::Object::new();

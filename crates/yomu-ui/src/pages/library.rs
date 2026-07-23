@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use yomu_domain::{Category, MangaWithPosition, UpdateCategoryRequest};
+use yomu_domain::{Category, PublicationWithLocator, UpdateCategoryRequest};
 
 use crate::offline;
 use crate::use_client;
@@ -45,7 +45,7 @@ pub fn Library() -> impl IntoView {
         let sweep_client = client.clone();
         Effect::new(move |_| {
             if let Some(Ok(entries)) = library.get() {
-                let ids = entries.iter().map(|entry| entry.manga.id).collect();
+                let ids = entries.iter().map(|entry| entry.publication.id).collect();
                 crate::cover::sweep_device_covers(conn, &sweep_client, ids);
             }
         });
@@ -94,16 +94,16 @@ pub fn Library() -> impl IntoView {
                             selected
                                 .get()
                                 .as_ref()
-                                .is_none_or(|c| entry.manga.category == *c)
+                                .is_none_or(|c| entry.publication.category == *c)
                         })
                         .filter(|entry| {
                             needle.is_empty()
-                                || entry.manga.title.to_lowercase().contains(&needle)
+                                || entry.publication.title.to_lowercase().contains(&needle)
                         })
                         .filter(|entry| {
                             genre
                                 .as_ref()
-                                .is_none_or(|g| entry.manga.genres.contains(g))
+                                .is_none_or(|g| entry.publication.genres.contains(g))
                         })
                         .collect();
                     if filtered.is_empty() {
@@ -128,7 +128,7 @@ pub fn Library() -> impl IntoView {
                                 .into_iter()
                                 .map(|entry| {
                                     let device = device_counts
-                                        .get(&entry.manga.id)
+                                        .get(&entry.publication.id)
                                         .copied()
                                         .unwrap_or(0);
                                     let meta = if entry.unread_count > 0 {
@@ -136,8 +136,8 @@ pub fn Library() -> impl IntoView {
                                     } else {
                                         format!(
                                             "{} chapter{}",
-                                            entry.chapter_count,
-                                            if entry.chapter_count == 1 { "" } else { "s" },
+                                            entry.unit_count,
+                                            if entry.unit_count == 1 { "" } else { "s" },
                                         )
                                     };
                                     let badge = (entry.unread_count > 0)
@@ -145,23 +145,23 @@ pub fn Library() -> impl IntoView {
                                     view! {
                                         <a
                                             class="manga-card"
-                                            href=format!("/manga/{}", entry.manga.id)
+                                            href=format!("/manga/{}", entry.publication.id)
                                         >
                                             <span class="cover-wrap">
-                                                <crate::cover::Cover manga_id=entry.manga.id/>
+                                                <crate::cover::Cover manga_id=entry.publication.id/>
                                                 {badge
                                                     .map(|b| {
                                                         view! { <span class="unread-badge">{b}</span> }
                                                     })}
-                                                {(entry.chapter_count > 0
+                                                {(entry.unit_count > 0
                                                     || entry.downloaded_count > 0
                                                     || device > 0)
                                                     .then(|| {
                                                         view! {
                                                             <span class="count-strip">
-                                                                {(entry.chapter_count > 0)
+                                                                {(entry.unit_count > 0)
                                                                     .then(|| {
-                                                                        view! { <span>{entry.chapter_count}</span> }
+                                                                        view! { <span>{entry.unit_count}</span> }
                                                                     })}
                                                                 {(entry.downloaded_count > 0)
                                                                     .then(|| {
@@ -181,7 +181,7 @@ pub fn Library() -> impl IntoView {
                                                         }
                                                     })}
                                             </span>
-                                            <span class="manga-title">{entry.manga.title.clone()}</span>
+                                            <span class="manga-title">{entry.publication.title.clone()}</span>
                                             <span class="muted manga-meta">{meta}</span>
                                         </a>
                                     }
@@ -204,13 +204,13 @@ pub fn Library() -> impl IntoView {
 /// library (client-side, so filtering stays instant and offline-friendly).
 #[component]
 fn LibraryFilters(
-    entries: Vec<MangaWithPosition>,
+    entries: Vec<PublicationWithLocator>,
     search: RwSignal<String>,
     active_genre: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let mut genres: Vec<String> = entries
         .iter()
-        .flat_map(|e| e.manga.genres.iter().cloned())
+        .flat_map(|e| e.publication.genres.iter().cloned())
         .collect();
     genres.sort_by_key(|g| g.to_lowercase());
     genres.dedup();
@@ -272,11 +272,16 @@ fn LibraryFilters(
 #[component]
 fn CategoryTabs(
     list: Vec<Category>,
-    entries: Vec<MangaWithPosition>,
+    entries: Vec<PublicationWithLocator>,
     selected: RwSignal<Option<String>>,
     refresh: RwSignal<u32>,
 ) -> impl IntoView {
-    let count_of = move |id: &str| entries.iter().filter(|e| e.manga.category == id).count();
+    let count_of = move |id: &str| {
+        entries
+            .iter()
+            .filter(|e| e.publication.category == id)
+            .count()
+    };
 
     // Reactive: appears when a category tab is active, reflects its flag.
     let toggle_update = {

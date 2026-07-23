@@ -14,7 +14,7 @@
 //! - **reader prefs**: paged/vertical mode per manga.
 
 use uuid::Uuid;
-use yomu_domain::{Position, ProgressEvent, PushEventsRequest, merge_position};
+use yomu_domain::{Locations, Locator, ProgressEvent, PushEventsRequest, merge_position};
 
 const OUTBOX_KEY: &str = "yomu-outbox";
 const DEVICE_KEY: &str = "yomu-device-chapters";
@@ -126,20 +126,24 @@ pub async fn flush_outbox(client: &yomu_client::YomuClient) {
 /// Best local knowledge of a manga's position: the (possibly stale) server
 /// answer merged with any unsynced local events — same rule as everywhere.
 pub fn effective_position(
-    manga_id: Uuid,
-    server: Option<Position>,
+    publication_id: Uuid,
+    server: Option<Locator>,
     now_events: &[ProgressEvent],
-) -> Option<Position> {
-    let local = merge_position(now_events.iter().filter(|e| e.manga_id == manga_id));
+) -> Option<Locator> {
+    let local = merge_position(
+        now_events
+            .iter()
+            .filter(|e| e.publication_id == publication_id),
+    );
     match (server, local) {
-        (Some(server), Some(local)) if local.at > server.at => Some(Position {
-            chapter_id: local.chapter_id,
-            page: local.page,
+        (Some(server), Some(local)) if local.at > server.at => Some(Locator {
+            unit_id: local.unit_id,
+            locations: Locations::Page { page: local.page },
             at: local.at,
         }),
-        (None, Some(local)) => Some(Position {
-            chapter_id: local.chapter_id,
-            page: local.page,
+        (None, Some(local)) => Some(Locator {
+            unit_id: local.unit_id,
+            locations: Locations::Page { page: local.page },
             at: local.at,
         }),
         (server, _) => server,
@@ -196,7 +200,7 @@ pub async fn save_chapter_with_progress(
         return Ok(SaveOutcome::Cancelled);
     }
     let meta = client
-        .chapter_pages(chapter_id)
+        .unit_pages(chapter_id)
         .await
         .map_err(|e| e.to_string())?;
     let total = meta.page_count;
@@ -478,10 +482,10 @@ pub async fn flush_marks(client: &yomu_client::YomuClient) {
     let read: Vec<Uuid> = read.into_iter().map(|(id, _)| *id).collect();
     let unread: Vec<Uuid> = unread.into_iter().map(|(id, _)| *id).collect();
     let mut flushed: Vec<Uuid> = Vec::new();
-    if !read.is_empty() && client.mark_chapters(&read, true).await.is_ok() {
+    if !read.is_empty() && client.mark_units(&read, true).await.is_ok() {
         flushed.extend(read);
     }
-    if !unread.is_empty() && client.mark_chapters(&unread, false).await.is_ok() {
+    if !unread.is_empty() && client.mark_units(&unread, false).await.is_ok() {
         flushed.extend(unread);
     }
     if !flushed.is_empty() {

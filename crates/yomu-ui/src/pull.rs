@@ -55,10 +55,10 @@ async fn drive(client: &YomuClient, queue: PullQueue, local: LocalDownloads, mar
     for e in &downloads.queue {
         match e.state {
             DownloadState::Pending | DownloadState::Downloading => {
-                busy.insert(e.chapter_id);
+                busy.insert(e.unit_id);
             }
             DownloadState::Failed { .. } => {
-                failed.insert(e.chapter_id);
+                failed.insert(e.unit_id);
             }
             _ => {}
         }
