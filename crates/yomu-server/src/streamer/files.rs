@@ -317,7 +317,7 @@ pub(super) struct Discovered {
 }
 
 impl Streamer {
-    /// Walk the books dir top level. Series directories (holding chapter
+    /// Walk the books dir top level. Series directories (holding unit
     /// dirs / .cbz) become multi-unit publications; root-level .cbz files
     /// and loose image directories become single-unit ones. Anything else
     /// is skipped with one info line — the folder will legitimately hold
@@ -326,9 +326,22 @@ impl Streamer {
         let mut out = Vec::new();
         let mut reader = match tokio::fs::read_dir(&self.books_dir).await {
             Ok(reader) => reader,
-            Err(_) => return out, // missing dir = empty library, not an error
+            // Missing dir = empty library, not an error.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return out,
+            Err(err) => {
+                tracing::warn!(%err, "streamer: cannot read books dir");
+                return out;
+            }
         };
-        while let Some(entry) = reader.next_entry().await.ok().flatten() {
+        loop {
+            let entry = match reader.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(%err, "streamer: directory walk aborted early");
+                    break;
+                }
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') || name == "details.json" {
                 continue;
@@ -365,10 +378,10 @@ impl Streamer {
             }));
         }
 
-        // A directory is a series when it holds chapter dirs or archives;
+        // A directory is a series when it holds unit dirs or archives;
         // a directory of loose images is a single-unit publication.
         let dir = self.books_dir.join(name);
-        let mut has_chapters = false;
+        let mut has_units = false;
         let mut has_images = false;
         let mut reader = tokio::fs::read_dir(&dir).await.map_err(io_err)?;
         while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
@@ -379,12 +392,12 @@ impl Streamer {
             if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
                 || child.to_lowercase().ends_with(".cbz")
             {
-                has_chapters = true;
+                has_units = true;
             } else if is_image_name(&child) {
                 has_images = true;
             }
         }
-        if has_chapters {
+        if has_units {
             return Ok(Some(Discovered {
                 path: name.to_string(),
                 details: self.series_details(name).await?,

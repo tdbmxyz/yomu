@@ -1,13 +1,14 @@
 //! Server-side streamer: turns user-supplied comic files (CBZ archives,
 //! image directories) in the configured books dir into library entries and
-//! serves their pages. The scan half lands next; file resolution in `files`.
+//! serves their pages. Scanning and upserting live here; file resolution
+//! (walking, CBZ reading, `local:` URLs) in `files`.
 
 mod files;
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
-use yomu_domain::Origin;
+use yomu_domain::{Origin, Publication};
 
 pub use files::Streamer;
 
@@ -44,7 +45,7 @@ pub async fn scan(
 ) -> Result<ScanOutcome, ScanError> {
     let discovered = streamer.discover().await;
     let existing = db.list_local_publications().await?;
-    let by_path: HashMap<&str, &yomu_domain::Publication> = existing
+    let by_path: HashMap<&str, &Publication> = existing
         .iter()
         .filter_map(|p| match &p.origin {
             Origin::LocalFile { path } => Some((path.as_str(), p)),
@@ -53,11 +54,11 @@ pub async fn scan(
         .collect();
 
     let mut outcome = ScanOutcome::default();
-    let discovered_paths: HashSet<&str> = discovered.iter().map(|d| d.path.as_str()).collect();
-    let mut seen = HashSet::new();
+    // Every path the scan accounts for: all discovered paths up front, plus
+    // the old paths of healed renames as the loop finds them.
+    let mut seen: HashSet<&str> = discovered.iter().map(|d| d.path.as_str()).collect();
 
     for found in &discovered {
-        seen.insert(found.path.clone());
         if let Some(publication) = by_path.get(found.path.as_str()).copied() {
             let changed = sync_known(db, notifier, publication, found).await?;
             if changed {
@@ -74,25 +75,22 @@ pub async fn scan(
             .iter()
             .filter(|p| p.title == found.details.summary.title)
             .filter(|p| match &p.origin {
-                Origin::LocalFile { path } => {
-                    !discovered_paths.contains(path.as_str()) && !seen.contains(path)
-                }
+                Origin::LocalFile { path } => !seen.contains(path.as_str()),
                 Origin::Source { .. } => false,
             })
             .collect();
         match candidates.as_slice() {
             [only] => {
+                // Re-point clears missing_since; sync_known then re-keys
+                // units by number/title twin-matching, refreshes metadata
+                // and genres, and feeds the updates feed for new units —
+                // identical to the known-publication path. `only` is a
+                // pre-repoint snapshot, but sync_known only needs its id
+                // and title (a stale missing_since just re-clears).
                 db.repoint_local_publication(only.id, &found.path).await?;
-                // sync_units re-keys units by number/title twin-matching.
-                db.sync_units(only.id, &found.details.chapters).await?;
-                db.update_local_metadata(
-                    only.id,
-                    found.details.description.as_deref(),
-                    found.details.summary.cover_url.as_deref(),
-                )
-                .await?;
+                sync_known(db, notifier, only, found).await?;
                 if let Origin::LocalFile { path } = &only.origin {
-                    seen.insert(path.clone());
+                    seen.insert(path.as_str());
                 }
                 outcome.updated += 1;
             }
@@ -114,7 +112,7 @@ pub async fn scan(
         let Origin::LocalFile { path } = &publication.origin else {
             continue;
         };
-        if !seen.contains(path) && publication.missing_since.is_none() {
+        if !seen.contains(path.as_str()) && publication.missing_since.is_none() {
             db.set_missing_since(publication.id, Some(Utc::now()))
                 .await?;
             outcome.missing += 1;
@@ -130,7 +128,7 @@ pub async fn scan(
 async fn sync_known(
     db: &Db,
     notifier: Option<&Notifier>,
-    publication: &yomu_domain::Publication,
+    publication: &Publication,
     found: &files::Discovered,
 ) -> Result<bool, ScanError> {
     let sync = db
