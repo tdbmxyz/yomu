@@ -153,9 +153,24 @@ units the handler resolves images from disk through the streamer instead
 of proxying a scraper source; response shape identical. Device-download
 (Tauri offline save) works unchanged since it consumes those endpoints.
 
+**Covers.** `GET /manga/{id}/cover` currently falls back to
+`source.image(cover_url)` through the source registry when the cover
+isn't cached. For LocalFile publications that fallback resolves through
+the streamer (cover file or first page from disk) instead — the
+registry no longer knows "local".
+
+**Per-publication refresh.** `POST /manga/{id}/refresh` (the Refresh
+button on the publication page) calls `refresh_manga` through the
+source registry today. For LocalFile origin it instead runs a targeted
+streamer rescan of that publication's path and returns the new-unit
+count in the same response shape. The button stays visible.
+
 **Updater.** `list_manga_for_update` (renamed accordingly) excludes
 LocalFile origins — the rescan is their updater. `auto_download` and
 download states are not offered for LocalFile publications in the UI.
+
+**Catalog cache.** Migration 0011 deletes catalog-cache rows with
+`source_id='local'`; the cache only serves scraper search/browse.
 
 ## Database (migration 0011)
 
@@ -188,6 +203,8 @@ Progress journal data is untouched; UUIDs never change.
   selected kind is cached per device (localStorage) and restored on
   relaunch, so the phone reopens straight into Comics and the e-ink
   tablet (later) into Novels. No segmented bar, no extra vertical space.
+  Category tabs, title search, and genre chips are kind-agnostic and
+  compose with the kind filter — they filter within the selected kind.
 - **Home:** Continue-reading and Updates remain cross-kind (they are
   activity feeds, not library views).
 - **Sources page:** scrapers only; the local source entry disappears
@@ -214,6 +231,11 @@ surface is **frozen at 1.x names** so deployed APKs keep working:
   `manga_id`, `chapter_id`, `chapters`, … on both serialization and
   deserialization. New fields (`kind`, `origin`, `missing_since`) are
   additive; old clients ignore them.
+- `source_id`/`source_key` are **required** fields in the 1.x `Manga`
+  JSON, so LocalFile publications serialize them as `source_id:
+  "local"` and `source_key: <1.x-style local: key>` on the frozen wire
+  (exactly what converted rows carried before migration). Old clients
+  keep deserializing and rendering them; new clients read `origin`.
 - Progress sync payloads byte-compatible with 1.x clients.
 
 **Backup/restore:**
