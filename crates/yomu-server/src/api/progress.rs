@@ -4,8 +4,8 @@ use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 use yomu_domain::{
-    EventsResponse, Position, ProgressEvent, PushEventsRequest, PushEventsResponse,
-    SetPositionRequest,
+    EventsResponse, Locations, Locator, ProgressEvent, PushEventsRequest, PushEventsResponse,
+    SetLocatorRequest,
 };
 
 use super::ApiError;
@@ -18,12 +18,12 @@ use crate::state::AppState;
 pub async fn set_position(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
-    Path(manga_id): Path<Uuid>,
-    Json(req): Json<SetPositionRequest>,
-) -> Result<Json<Position>, ApiError> {
-    // The chapter must belong to the manga; catches stale/foreign ids.
-    let chapter = state.db.get_chapter(req.chapter_id).await?;
-    if chapter.manga_id != manga_id {
+    Path(publication_id): Path<Uuid>,
+    Json(req): Json<SetLocatorRequest>,
+) -> Result<Json<Locator>, ApiError> {
+    // The unit must belong to the publication; catches stale/foreign ids.
+    let unit = state.db.get_unit(req.unit_id).await?;
+    if unit.publication_id != publication_id {
         return Err(ApiError::Unprocessable(
             "chapter does not belong to this manga".into(),
         ));
@@ -31,17 +31,17 @@ pub async fn set_position(
 
     let event = ProgressEvent {
         id: Uuid::now_v7(),
-        manga_id,
-        chapter_id: req.chapter_id,
+        publication_id,
+        unit_id: req.unit_id,
         page: req.page,
         device: req.device,
         at: Utc::now(),
     };
     state.db.append_event(user.id, &event).await?;
     auto_mark_read(&state, user.id, std::slice::from_ref(&event)).await;
-    Ok(Json(Position {
-        chapter_id: event.chapter_id,
-        page: event.page,
+    Ok(Json(Locator {
+        unit_id: event.unit_id,
+        locations: Locations::Page { page: event.page },
         at: event.at,
     }))
 }
@@ -55,16 +55,19 @@ pub async fn set_position(
 async fn auto_mark_read(state: &AppState, user_id: Uuid, events: &[ProgressEvent]) {
     let mut by_manga: std::collections::HashMap<Uuid, Vec<&ProgressEvent>> = Default::default();
     for event in events {
-        by_manga.entry(event.manga_id).or_default().push(event);
+        by_manga
+            .entry(event.publication_id)
+            .or_default()
+            .push(event);
     }
-    for (manga_id, events) in by_manga {
-        // Deleted manga: no chapters, nothing to mark.
-        let Ok(chapters) = state.db.list_chapters(manga_id).await else {
+    for (publication_id, events) in by_manga {
+        // Deleted publication: no units, nothing to mark.
+        let Ok(chapters) = state.db.list_units(publication_id).await else {
             continue;
         };
         let mut ids = std::collections::HashSet::new();
         for event in events {
-            let Some(idx) = chapters.iter().position(|c| c.id == event.chapter_id) else {
+            let Some(idx) = chapters.iter().position(|c| c.id == event.unit_id) else {
                 continue;
             };
             ids.extend(chapters[..idx].iter().map(|c| c.id));
@@ -72,7 +75,7 @@ async fn auto_mark_read(state: &AppState, user_id: Uuid, events: &[ProgressEvent
                 .page_count
                 .is_some_and(|n| event.page.saturating_add(1) >= n)
             {
-                ids.insert(event.chapter_id);
+                ids.insert(event.unit_id);
             }
         }
         if ids.is_empty() {
@@ -80,13 +83,13 @@ async fn auto_mark_read(state: &AppState, user_id: Uuid, events: &[ProgressEvent
         }
         let ids: Vec<Uuid> = ids.into_iter().collect();
         if let Err(err) = state.db.mark_read(user_id, &ids).await {
-            tracing::warn!(%err, %manga_id, "auto-marking chapters read");
+            tracing::warn!(%err, %publication_id, "auto-marking chapters read");
         }
     }
 }
 
 /// Offline client pushing its journal on reconnect. Idempotent: events are
-/// keyed by their client-generated ids. Events for manga deleted meanwhile
+/// keyed by their client-generated ids. Events for publications deleted meanwhile
 /// are skipped (reported in the response) rather than failing the batch —
 /// a permanently failing batch would wedge the client's outbox forever.
 pub async fn push_events(

@@ -5,8 +5,8 @@ use axum::response::{IntoResponse, Response};
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    BulkChaptersResponse, Chapter, DownloadChaptersRequest, DownloadState, MarkChaptersRequest,
-    PagesResponse,
+    BulkUnitsResponse, DownloadState, DownloadUnitsRequest, MarkUnitsRequest, Origin,
+    PagesResponse, ReadingUnit,
 };
 
 use super::ApiError;
@@ -18,8 +18,8 @@ pub async fn download(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(id): Path<Uuid>,
-) -> Result<(StatusCode, Json<Chapter>), ApiError> {
-    let chapter = state.db.get_chapter(id).await?;
+) -> Result<(StatusCode, Json<ReadingUnit>), ApiError> {
+    let chapter = state.db.get_unit(id).await?;
     if matches!(
         chapter.download,
         DownloadState::Downloaded { .. } | DownloadState::Downloading | DownloadState::Pending
@@ -28,7 +28,7 @@ pub async fn download(
     }
     state.db.mark_pending(&[id]).await?;
     state.download_notify.notify_one();
-    Ok((StatusCode::ACCEPTED, Json(state.db.get_chapter(id).await?)))
+    Ok((StatusCode::ACCEPTED, Json(state.db.get_unit(id).await?)))
 }
 
 /// Enqueue a batch of chapters. They join the same single-worker queue as
@@ -38,15 +38,15 @@ pub async fn download(
 pub async fn download_many(
     State(state): State<AppState>,
     _user: CurrentUser,
-    Json(req): Json<DownloadChaptersRequest>,
-) -> Result<(StatusCode, Json<BulkChaptersResponse>), ApiError> {
-    let queued = state.db.mark_pending(&req.chapter_ids).await?;
+    Json(req): Json<DownloadUnitsRequest>,
+) -> Result<(StatusCode, Json<BulkUnitsResponse>), ApiError> {
+    let queued = state.db.mark_pending(&req.unit_ids).await?;
     if queued > 0 {
         state.download_notify.notify_one();
     }
     Ok((
         StatusCode::ACCEPTED,
-        Json(BulkChaptersResponse { affected: queued }),
+        Json(BulkUnitsResponse { affected: queued }),
     ))
 }
 
@@ -55,16 +55,16 @@ pub async fn download_many(
 pub async fn remove_downloads(
     State(state): State<AppState>,
     _user: CurrentUser,
-    Json(req): Json<DownloadChaptersRequest>,
-) -> Result<Json<BulkChaptersResponse>, ApiError> {
-    let removed = state.db.remove_downloads(&req.chapter_ids).await?;
+    Json(req): Json<DownloadUnitsRequest>,
+) -> Result<Json<BulkUnitsResponse>, ApiError> {
+    let removed = state.db.remove_downloads(&req.unit_ids).await?;
     for id in &removed {
-        if let Ok(chapter) = state.db.get_chapter(*id).await {
-            let _ = tokio::fs::remove_dir_all(state.chapter_dir(chapter.manga_id, *id)).await;
+        if let Ok(chapter) = state.db.get_unit(*id).await {
+            let _ = tokio::fs::remove_dir_all(state.unit_dir(chapter.publication_id, *id)).await;
         }
     }
     state.live_pages.invalidate_many(&removed).await;
-    Ok(Json(BulkChaptersResponse {
+    Ok(Json(BulkUnitsResponse {
         affected: removed.len() as u32,
     }))
 }
@@ -73,14 +73,14 @@ pub async fn remove_downloads(
 pub async fn mark(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<MarkChaptersRequest>,
-) -> Result<Json<BulkChaptersResponse>, ApiError> {
+    Json(req): Json<MarkUnitsRequest>,
+) -> Result<Json<BulkUnitsResponse>, ApiError> {
     let affected = if req.read {
-        state.db.mark_read(user.id, &req.chapter_ids).await?
+        state.db.mark_read(user.id, &req.unit_ids).await?
     } else {
-        state.db.mark_unread(user.id, &req.chapter_ids).await?
+        state.db.mark_unread(user.id, &req.unit_ids).await?
     };
-    Ok(Json(BulkChaptersResponse { affected }))
+    Ok(Json(BulkUnitsResponse { affected }))
 }
 
 /// Page count for the reader. For non-downloaded chapters this resolves the
@@ -89,11 +89,11 @@ pub async fn pages(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PagesResponse>, ApiError> {
-    let chapter = state.db.get_chapter(id).await?;
+    let chapter = state.db.get_unit(id).await?;
 
     if let Some(files) = downloaded_files(&state, &chapter).await {
         return Ok(Json(PagesResponse {
-            chapter_id: id,
+            unit_id: id,
             page_count: files.len() as u32,
             downloaded: true,
         }));
@@ -101,7 +101,7 @@ pub async fn pages(
 
     let urls = live_pages(&state, &chapter).await?;
     Ok(Json(PagesResponse {
-        chapter_id: id,
+        unit_id: id,
         page_count: urls.len() as u32,
         downloaded: false,
     }))
@@ -113,7 +113,7 @@ pub async fn page_image(
     State(state): State<AppState>,
     Path((id, n)): Path<(Uuid, u32)>,
 ) -> Result<Response, ApiError> {
-    let chapter = state.db.get_chapter(id).await?;
+    let chapter = state.db.get_unit(id).await?;
 
     if let Some(files) = downloaded_files(&state, &chapter).await {
         let path = files.get(n as usize).ok_or(ApiError::NotFound)?;
@@ -126,10 +126,15 @@ pub async fn page_image(
         ));
     }
 
-    let manga = state.db.get_manga(chapter.manga_id).await?;
+    let publication = state.db.get_publication(chapter.publication_id).await?;
+    let Origin::Source { source_id, .. } = &publication.origin else {
+        return Err(ApiError::Unprocessable(
+            "publication is not source-backed".into(),
+        ));
+    };
     let source = state
         .sources
-        .get(&manga.source_id)
+        .get(source_id)
         .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
 
     let urls = live_pages(&state, &chapter).await?;
@@ -151,7 +156,10 @@ pub async fn page_image(
 /// Page files of a downloaded chapter — `None` when the chapter isn't
 /// downloaded *or* its directory vanished (wiped disk, moved data_dir), in
 /// which case serving falls back to the live path instead of erroring.
-async fn downloaded_files(state: &AppState, chapter: &Chapter) -> Option<Vec<std::path::PathBuf>> {
+async fn downloaded_files(
+    state: &AppState,
+    chapter: &ReadingUnit,
+) -> Option<Vec<std::path::PathBuf>> {
     if !matches!(chapter.download, DownloadState::Downloaded { .. }) {
         return None;
     }
@@ -168,15 +176,20 @@ async fn downloaded_files(state: &AppState, chapter: &Chapter) -> Option<Vec<std
 }
 
 /// Page-URL list for a live-read chapter, resolved once per TTL window.
-async fn live_pages(state: &AppState, chapter: &Chapter) -> Result<Vec<Url>, ApiError> {
+async fn live_pages(state: &AppState, chapter: &ReadingUnit) -> Result<Vec<Url>, ApiError> {
     if let Some(urls) = state.live_pages.get(chapter.id).await {
         return Ok(urls);
     }
 
-    let manga = state.db.get_manga(chapter.manga_id).await?;
+    let publication = state.db.get_publication(chapter.publication_id).await?;
+    let Origin::Source { source_id, .. } = &publication.origin else {
+        return Err(ApiError::Unprocessable(
+            "publication is not source-backed".into(),
+        ));
+    };
     let source = state
         .sources
-        .get(&manga.source_id)
+        .get(source_id)
         .ok_or_else(|| ApiError::Unprocessable("source no longer configured".into()))?;
     let urls = source.pages(&chapter.source_key).await?;
 

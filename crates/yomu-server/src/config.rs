@@ -15,7 +15,7 @@ pub struct Config {
     /// Built web frontend; served with SPA fallback when set.
     pub static_dir: Option<PathBuf>,
     pub db_path: PathBuf,
-    /// Downloaded chapters live here: <data_dir>/<manga id>/<chapter id>/.
+    /// Downloaded units live here: <data_dir>/<publication id>/<unit id>/.
     pub data_dir: PathBuf,
     /// Directory of source definitions (`*.toml`, see sources.d examples).
     pub sources_dir: PathBuf,
@@ -36,7 +36,7 @@ pub struct UpdaterConfig {
 }
 
 /// The built-in "local" source: series that already live on the server's
-/// disk as `<dir>/<Series>/<Chapter>/*.png` or `<Series>/<Chapter>.cbz`
+/// disk as `<dir>/<Series>/<ReadingUnit>/*.png` or `<Series>/<ReadingUnit>.cbz`
 /// (see `yomu_source::local`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

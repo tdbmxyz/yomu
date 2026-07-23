@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use yomu_domain::Chapter;
+use yomu_domain::{Origin, ReadingUnit};
 
 use crate::state::AppState;
 
@@ -24,10 +24,10 @@ async fn run(state: AppState) {
                 let outcome = download_chapter(&state, &chapter).await;
                 let succeeded = outcome.is_ok();
                 match state.db.finish_download(chapter.id, outcome).await {
-                    // Manga deleted while we were downloading: the files
+                    // Publication deleted while we were downloading: the files
                     // just published belong to nothing — remove them.
                     Ok(false) => {
-                        let dir = state.chapter_dir(chapter.manga_id, chapter.id);
+                        let dir = state.unit_dir(chapter.publication_id, chapter.id);
                         let _ = tokio::fs::remove_dir_all(&dir).await;
                         if let Some(parent) = dir.parent() {
                             let _ = tokio::fs::remove_dir(parent).await; // only if empty
@@ -41,7 +41,7 @@ async fn run(state: AppState) {
                     }
                     Err(err) => tracing::error!(%err, "recording download outcome"),
                 }
-                // Chapter left the worker: no active progress until the next.
+                // ReadingUnit left the worker: no active progress until the next.
                 *state.download_progress.write().await = None;
                 continue; // drain the queue before sleeping
             }
@@ -59,25 +59,28 @@ async fn run(state: AppState) {
 /// Fetch every page of the chapter into its directory.
 /// Files are `0000.<ext>`, `0001.<ext>`… so a directory listing sorts into
 /// reading order without any index file.
-async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, String> {
-    let manga = state
+async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32, String> {
+    let publication = state
         .db
-        .get_manga(chapter.manga_id)
+        .get_publication(chapter.publication_id)
         .await
         .map_err(|e| e.to_string())?;
+    let Origin::Source { source_id, .. } = &publication.origin else {
+        return Err("publication is not source-backed".into());
+    };
     let source = state
         .sources
-        .get(&manga.source_id)
-        .ok_or_else(|| format!("source {:?} not configured", manga.source_id))?;
+        .get(source_id)
+        .ok_or_else(|| format!("source {source_id:?} not configured"))?;
 
-    tracing::info!(manga = %manga.title, chapter = %chapter.title, "downloading");
+    tracing::info!(publication = %publication.title, chapter = %chapter.title, "downloading");
 
     let pages = source
         .pages(&chapter.source_key)
         .await
         .map_err(|e| e.to_string())?;
 
-    let dir = state.chapter_dir(chapter.manga_id, chapter.id);
+    let dir = state.unit_dir(chapter.publication_id, chapter.id);
     let partial = dir.with_extension("partial");
     let _ = tokio::fs::remove_dir_all(&partial).await;
     tokio::fs::create_dir_all(&partial)
@@ -111,7 +114,7 @@ async fn download_chapter(state: &AppState, chapter: &Chapter) -> Result<u32, St
 
 async fn fetch_pages(
     state: &AppState,
-    chapter_id: uuid::Uuid,
+    unit_id: uuid::Uuid,
     source: &dyn yomu_source::Source,
     pages: &[url::Url],
     partial: &std::path::Path,
@@ -121,7 +124,7 @@ async fn fetch_pages(
         // Publish page progress for the Downloads UI before fetching each
         // page (so a slow page shows as "downloading page N", not stalled).
         *state.download_progress.write().await = Some(crate::state::ActiveDownload {
-            chapter_id,
+            unit_id,
             page: index as u32 + 1,
             total,
         });
@@ -138,9 +141,9 @@ async fn fetch_pages(
 /// Downloaded page files for a chapter, in reading order.
 pub async fn page_files(
     state: &AppState,
-    chapter: &Chapter,
+    chapter: &ReadingUnit,
 ) -> std::io::Result<Vec<std::path::PathBuf>> {
-    let dir = state.chapter_dir(chapter.manga_id, chapter.id);
+    let dir = state.unit_dir(chapter.publication_id, chapter.id);
     let mut entries = Vec::new();
     let mut reader = tokio::fs::read_dir(&dir).await?;
     while let Some(entry) = reader.next_entry().await? {

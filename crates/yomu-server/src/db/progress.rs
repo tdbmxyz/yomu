@@ -1,6 +1,6 @@
 use sqlx::Row;
 use uuid::Uuid;
-use yomu_domain::{Position, ProgressEvent};
+use yomu_domain::{Locations, Locator, ProgressEvent};
 
 use super::*;
 
@@ -9,14 +9,14 @@ impl Db {
     /// harmless, which makes offline sync retries safe.
     pub async fn append_event(&self, user_id: Uuid, event: &ProgressEvent) -> Result<()> {
         sqlx::query(
-            "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
+            "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page, device, at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(event.id.to_string())
         .bind(user_id.to_string())
-        .bind(event.manga_id.to_string())
-        .bind(event.chapter_id.to_string())
+        .bind(event.publication_id.to_string())
+        .bind(event.unit_id.to_string())
         .bind(event.page)
         .bind(&event.device)
         .bind(event.at)
@@ -31,7 +31,7 @@ impl Db {
         Ok(())
     }
 
-    /// Append a whole offline journal in one transaction. Events for manga
+    /// Append a whole offline journal in one transaction. Events for publications
     /// the server no longer knows (deleted meanwhile) are *skipped*, not
     /// errors: they can never apply, and one of them must not wedge the
     /// client's outbox behind an eternally failing batch.
@@ -45,16 +45,16 @@ impl Db {
         let (mut accepted, mut skipped) = (0, 0);
         for event in events {
             let known: bool =
-                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM manga WHERE id = ?)")
-                    .bind(event.manga_id.to_string())
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM publications WHERE id = ?)")
+                    .bind(event.publication_id.to_string())
                     .fetch_one(&mut *tx)
                     .await?;
-            // The single-event path validates the chapter via get_chapter; the
+            // The single-event path validates the chapter via get_unit; the
             // offline batch must too, or a client desync stores a position
             // pointing at a chapter that resolves to nothing.
             let chapter_known: bool =
-                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chapters WHERE id = ?)")
-                    .bind(event.chapter_id.to_string())
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM reading_units WHERE id = ?)")
+                    .bind(event.unit_id.to_string())
                     .fetch_one(&mut *tx)
                     .await?;
             if !known || !chapter_known {
@@ -62,14 +62,14 @@ impl Db {
                 continue;
             }
             sqlx::query(
-                "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
+                "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page, device, at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(event.id.to_string())
             .bind(user_id.to_string())
-            .bind(event.manga_id.to_string())
-            .bind(event.chapter_id.to_string())
+            .bind(event.publication_id.to_string())
+            .bind(event.unit_id.to_string())
             .bind(event.page)
             .bind(&event.device)
             .bind(event.at)
@@ -84,19 +84,25 @@ impl Db {
 
     /// A user's merged current position (max at, id tie-break — same rule
     /// as `yomu_domain::merge_position`).
-    pub async fn latest_position(&self, user_id: Uuid, manga_id: Uuid) -> Result<Option<Position>> {
+    pub async fn latest_position(
+        &self,
+        user_id: Uuid,
+        publication_id: Uuid,
+    ) -> Result<Option<Locator>> {
         let row = sqlx::query(
-            "SELECT chapter_id, page, at FROM progress_events
-             WHERE manga_id = ? AND user_id = ? ORDER BY at DESC, id DESC LIMIT 1",
+            "SELECT unit_id, page, at FROM progress_events
+             WHERE publication_id = ? AND user_id = ? ORDER BY at DESC, id DESC LIMIT 1",
         )
-        .bind(manga_id.to_string())
+        .bind(publication_id.to_string())
         .bind(user_id.to_string())
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| {
-            Ok(Position {
-                chapter_id: parse_uuid(row.get::<String, _>("chapter_id"))?,
-                page: row.get::<i64, _>("page") as u32,
+            Ok(Locator {
+                unit_id: parse_uuid(row.get::<String, _>("unit_id"))?,
+                locations: Locations::Page {
+                    page: row.get::<i64, _>("page") as u32,
+                },
                 at: row.get("at"),
             })
         })

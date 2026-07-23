@@ -19,9 +19,9 @@ pub async fn export(
         version: BACKUP_VERSION,
         exported_at: chrono::Utc::now(),
         categories: state.db.list_categories().await?,
-        manga: state.db.list_manga().await?,
-        chapters: state.db.export_chapters().await?,
-        read_chapter_ids: state.db.read_all_ids(user.id).await?,
+        publications: state.db.list_publications().await?,
+        units: state.db.export_units().await?,
+        read_unit_ids: state.db.read_all_ids(user.id).await?,
         progress: state.db.export_events(user.id).await?,
     }))
 }

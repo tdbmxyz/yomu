@@ -1,27 +1,28 @@
 use chrono::Utc;
 use uuid::Uuid;
-use yomu_domain::{Chapter, ChapterRef};
+use yomu_domain::{ChapterRef, ReadingUnit};
 
 use super::*;
 
 impl Db {
-    /// Merge a fresh chapter listing from the source: new chapters are
+    /// Merge a fresh chapter listing from the source: new units are
     /// inserted, existing ones keep their id and download state. Returns
-    /// the newly inserted chapters.
-    pub async fn sync_chapters(
+    /// the newly inserted units.
+    pub async fn sync_units(
         &self,
-        manga_id: Uuid,
+        publication_id: Uuid,
         listing: &[ChapterRef],
-    ) -> Result<ChapterSync> {
+    ) -> Result<UnitSync> {
         let now = Utc::now();
         let mut tx = self.pool.begin().await?;
-        let existing: std::collections::HashSet<String> =
-            sqlx::query_scalar::<_, String>("SELECT source_key FROM chapters WHERE manga_id = ?")
-                .bind(manga_id.to_string())
-                .fetch_all(&mut *tx)
-                .await?
-                .into_iter()
-                .collect();
+        let existing: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+            "SELECT source_key FROM reading_units WHERE publication_id = ?",
+        )
+        .bind(publication_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
 
         // A scraped listing can contain the same chapter twice; keep the
         // first occurrence, otherwise the second upsert discards an id we
@@ -36,17 +37,17 @@ impl Db {
         for chapter in &listing {
             let id = Uuid::now_v7();
             sqlx::query(
-                "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
+                "INSERT INTO reading_units (id, publication_id, source_key, title, number, source_order,
                                        scanlator, fetched_at, published_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT (manga_id, source_key)
+                 ON CONFLICT (publication_id, source_key)
                  DO UPDATE SET title = excluded.title, number = excluded.number,
                                source_order = excluded.source_order,
                                published_at = COALESCE(excluded.published_at,
-                                                       chapters.published_at)",
+                                                       reading_units.published_at)",
             )
             .bind(id.to_string())
-            .bind(manga_id.to_string())
+            .bind(publication_id.to_string())
             .bind(&chapter.key)
             .bind(&chapter.title)
             .bind(chapter.number)
@@ -72,17 +73,17 @@ impl Db {
         // away. Stale rows without a twin are dropped only when nothing is
         // saved locally (state 'none'/'failed'), so downloaded content is
         // never discarded. Guarded by a non-empty listing so a transient
-        // empty/failed scrape can't wipe a manga (selector sources already
+        // empty/failed scrape can't wipe a publication (selector sources already
         // error on an empty chapter list, but be defensive).
         let mut file_ops = Vec::new();
         let mut merged_twins = std::collections::HashSet::new();
         if !current_keys.is_empty() {
-            type ChapterMergeRow = (String, String, Option<f64>, String, String, Option<i64>);
-            let rows: Vec<ChapterMergeRow> = sqlx::query_as(
+            type UnitMergeRow = (String, String, Option<f64>, String, String, Option<i64>);
+            let rows: Vec<UnitMergeRow> = sqlx::query_as(
                 "SELECT id, source_key, number, title, download_state, page_count
-                 FROM chapters WHERE manga_id = ?",
+                 FROM reading_units WHERE publication_id = ?",
             )
-            .bind(manga_id.to_string())
+            .bind(publication_id.to_string())
             .fetch_all(&mut *tx)
             .await?;
             let (stale, mut live): (Vec<_>, Vec<_>) = rows
@@ -107,25 +108,23 @@ impl Db {
                         // (the journal's one exception to append-only: the
                         // chapter it points at is being replaced).
                         sqlx::query(
-                            "INSERT OR IGNORE INTO read_chapters (user_id, chapter_id, at)
-                             SELECT user_id, ?, at FROM read_chapters WHERE chapter_id = ?",
+                            "INSERT OR IGNORE INTO read_units (user_id, unit_id, at)
+                             SELECT user_id, ?, at FROM read_units WHERE unit_id = ?",
                         )
                         .bind(twin_id.to_string())
                         .bind(id.to_string())
                         .execute(&mut *tx)
                         .await?;
-                        sqlx::query(
-                            "UPDATE progress_events SET chapter_id = ? WHERE chapter_id = ?",
-                        )
-                        .bind(twin_id.to_string())
-                        .bind(id.to_string())
-                        .execute(&mut *tx)
-                        .await?;
+                        sqlx::query("UPDATE progress_events SET unit_id = ? WHERE unit_id = ?")
+                            .bind(twin_id.to_string())
+                            .bind(id.to_string())
+                            .execute(&mut *tx)
+                            .await?;
                         if state == "downloaded" && live[i].4 != "downloaded" {
                             sqlx::query(
-                                "UPDATE chapters
+                                "UPDATE reading_units
                                  SET download_state = 'downloaded', download_error = NULL,
-                                     downloaded_at = (SELECT downloaded_at FROM chapters WHERE id = ?),
+                                     downloaded_at = (SELECT downloaded_at FROM reading_units WHERE id = ?),
                                      page_count = ?
                                  WHERE id = ?",
                             )
@@ -135,14 +134,14 @@ impl Db {
                             .execute(&mut *tx)
                             .await?;
                             live[i].4 = "downloaded".into();
-                            file_ops.push(ChapterFileOp::Rename {
+                            file_ops.push(UnitFileOp::Rename {
                                 from: id,
                                 to: twin_id,
                             });
                         } else {
-                            file_ops.push(ChapterFileOp::Remove { chapter: id });
+                            file_ops.push(UnitFileOp::Remove { unit: id });
                         }
-                        sqlx::query("DELETE FROM chapters WHERE id = ?")
+                        sqlx::query("DELETE FROM reading_units WHERE id = ?")
                             .bind(id.to_string())
                             .execute(&mut *tx)
                             .await?;
@@ -151,11 +150,11 @@ impl Db {
                     // No twin (or an ambiguous set): keep downloaded/in-flight
                     // rows, drop the rest.
                     _ if state == "none" || state == "failed" => {
-                        sqlx::query("DELETE FROM chapters WHERE id = ?")
+                        sqlx::query("DELETE FROM reading_units WHERE id = ?")
                             .bind(id.to_string())
                             .execute(&mut *tx)
                             .await?;
-                        file_ops.push(ChapterFileOp::Remove { chapter: id });
+                        file_ops.push(UnitFileOp::Remove { unit: id });
                     }
                     _ => {}
                 }
@@ -163,42 +162,42 @@ impl Db {
         }
         tx.commit().await?;
 
-        let mut new_chapters = Vec::new();
+        let mut new_units = Vec::new();
         for id in new_ids {
             if !merged_twins.contains(&id) {
-                new_chapters.push(self.get_chapter(id).await?);
+                new_units.push(self.get_unit(id).await?);
             }
         }
-        Ok(ChapterSync {
-            new_chapters,
+        Ok(UnitSync {
+            new_units,
             file_ops,
         })
     }
 
-    pub async fn get_chapter(&self, id: Uuid) -> Result<Chapter> {
-        let row = sqlx::query_as::<_, ChapterRow>("SELECT * FROM chapters WHERE id = ?")
+    pub async fn get_unit(&self, id: Uuid) -> Result<ReadingUnit> {
+        let row = sqlx::query_as::<_, UnitRow>("SELECT * FROM reading_units WHERE id = ?")
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?
             .ok_or(DbError::NotFound)?;
-        Chapter::try_from(row)
+        ReadingUnit::try_from(row)
     }
 
     /// Chapters in reading order: by number when present, source listing
     /// order (reversed, sources list newest first) as fallback.
-    pub async fn list_chapters(&self, manga_id: Uuid) -> Result<Vec<Chapter>> {
-        let rows = sqlx::query_as::<_, ChapterRow>(
-            "SELECT * FROM chapters WHERE manga_id = ?
+    pub async fn list_units(&self, publication_id: Uuid) -> Result<Vec<ReadingUnit>> {
+        let rows = sqlx::query_as::<_, UnitRow>(
+            "SELECT * FROM reading_units WHERE publication_id = ?
              ORDER BY number IS NULL, number ASC, source_order DESC",
         )
-        .bind(manga_id.to_string())
+        .bind(publication_id.to_string())
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Chapter::try_from).collect()
+        rows.into_iter().map(ReadingUnit::try_from).collect()
     }
 
     pub async fn set_page_count(&self, id: Uuid, page_count: u32) -> Result<()> {
-        sqlx::query("UPDATE chapters SET page_count = ? WHERE id = ?")
+        sqlx::query("UPDATE reading_units SET page_count = ? WHERE id = ?")
             .bind(page_count)
             .bind(id.to_string())
             .execute(&self.pool)

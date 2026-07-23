@@ -27,22 +27,22 @@ struct LiveEntry {
 /// Page-URL lists of chapters read live (not downloaded), so a reading
 /// session doesn't re-scrape the chapter page for every image. Entries
 /// expire (TTL), are bounded, and are dropped when the chapter is
-/// downloaded, fails to serve, or its manga is deleted.
+/// downloaded, fails to serve, or its publication is deleted.
 #[derive(Default)]
 pub struct LivePages {
     entries: RwLock<HashMap<Uuid, LiveEntry>>,
 }
 
 impl LivePages {
-    pub async fn get(&self, chapter_id: Uuid) -> Option<Vec<Url>> {
+    pub async fn get(&self, unit_id: Uuid) -> Option<Vec<Url>> {
         let entries = self.entries.read().await;
-        let entry = entries.get(&chapter_id)?;
+        let entry = entries.get(&unit_id)?;
         (entry.resolved_at.elapsed() < LIVE_PAGES_TTL).then(|| entry.urls.clone())
     }
 
-    pub async fn put(&self, chapter_id: Uuid, urls: Vec<Url>) {
+    pub async fn put(&self, unit_id: Uuid, urls: Vec<Url>) {
         let mut entries = self.entries.write().await;
-        if entries.len() >= LIVE_PAGES_MAX && !entries.contains_key(&chapter_id) {
+        if entries.len() >= LIVE_PAGES_MAX && !entries.contains_key(&unit_id) {
             // Evict the oldest entry; the map stays small enough to scan.
             if let Some(oldest) = entries
                 .iter()
@@ -53,7 +53,7 @@ impl LivePages {
             }
         }
         entries.insert(
-            chapter_id,
+            unit_id,
             LiveEntry {
                 urls,
                 resolved_at: Instant::now(),
@@ -61,13 +61,13 @@ impl LivePages {
         );
     }
 
-    pub async fn invalidate(&self, chapter_id: Uuid) {
-        self.entries.write().await.remove(&chapter_id);
+    pub async fn invalidate(&self, unit_id: Uuid) {
+        self.entries.write().await.remove(&unit_id);
     }
 
-    pub async fn invalidate_many(&self, chapter_ids: &[Uuid]) {
+    pub async fn invalidate_many(&self, unit_ids: &[Uuid]) {
         let mut entries = self.entries.write().await;
-        for id in chapter_ids {
+        for id in unit_ids {
             entries.remove(id);
         }
     }
@@ -96,7 +96,7 @@ pub struct AppState {
 /// The chapter the download worker is fetching, and how far along.
 #[derive(Clone, Copy)]
 pub struct ActiveDownload {
-    pub chapter_id: Uuid,
+    pub unit_id: Uuid,
     /// Pages written so far (1-based).
     pub page: u32,
     pub total: u32,
@@ -117,10 +117,10 @@ impl AppState {
     }
 
     /// Directory holding a downloaded chapter's page files.
-    pub fn chapter_dir(&self, manga_id: Uuid, chapter_id: Uuid) -> PathBuf {
+    pub fn unit_dir(&self, publication_id: Uuid, unit_id: Uuid) -> PathBuf {
         self.config
             .data_dir
-            .join(manga_id.to_string())
-            .join(chapter_id.to_string())
+            .join(publication_id.to_string())
+            .join(unit_id.to_string())
     }
 }

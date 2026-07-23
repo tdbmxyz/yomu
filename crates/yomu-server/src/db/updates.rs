@@ -1,23 +1,24 @@
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
-use yomu_domain::{Chapter, UpdateEvent};
+use yomu_domain::{ReadingUnit, UpdateEvent};
 
 use super::*;
 
 impl Db {
-    /// Record one updater find: `chapters` are the round's new chapters
-    /// for this manga, in listing order (see `sync::refresh_manga`).
-    pub async fn add_update(&self, manga_id: Uuid, chapters: &[Chapter]) -> Result<()> {
-        let (Some(first), Some(last)) = (chapters.first(), chapters.last()) else {
+    /// Record one updater find: `units` are the round's new units for this
+    /// publication, in listing order (see `sync::refresh_publication`).
+    /// The `chapter_count` column name is 1.x legacy, kept by migration 0011.
+    pub async fn add_update(&self, publication_id: Uuid, units: &[ReadingUnit]) -> Result<()> {
+        let (Some(first), Some(last)) = (units.first(), units.last()) else {
             return Ok(());
         };
         sqlx::query(
-            "INSERT INTO updates (manga_id, chapter_count, first_title, last_title, created_at)
+            "INSERT INTO updates (publication_id, chapter_count, first_title, last_title, created_at)
              VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(manga_id.to_string())
-        .bind(chapters.len() as u32)
+        .bind(publication_id.to_string())
+        .bind(units.len() as u32)
         .bind(&first.title)
         .bind(&last.title)
         .bind(Utc::now().to_rfc3339())
@@ -27,16 +28,16 @@ impl Db {
     }
 
     /// Events strictly newer than `since`, newest first, joined with the
-    /// manga title (events for since-removed manga are dropped).
+    /// publication title (events for since-removed publications are dropped).
     pub async fn updates_since(
         &self,
         since: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<UpdateEvent>> {
         let rows = sqlx::query(
-            "SELECT u.manga_id, u.chapter_count, u.first_title, u.last_title, u.created_at,
-                    m.title AS manga_title
-             FROM updates u JOIN manga m ON m.id = u.manga_id
+            "SELECT u.publication_id, u.chapter_count, u.first_title, u.last_title, u.created_at,
+                    m.title AS publication_title
+             FROM updates u JOIN publications m ON m.id = u.publication_id
              WHERE u.created_at > ?
              ORDER BY u.created_at DESC, u.id DESC
              LIMIT ?",
@@ -47,14 +48,14 @@ impl Db {
         .await?;
         rows.into_iter()
             .map(|row| {
-                let manga_id: String = row.get("manga_id");
+                let publication_id: String = row.get("publication_id");
                 let created_at: String = row.get("created_at");
                 Ok(UpdateEvent {
-                    manga_id: manga_id
+                    publication_id: publication_id
                         .parse()
-                        .map_err(|e| DbError::Corrupt(format!("updates.manga_id: {e}")))?,
-                    manga_title: row.get("manga_title"),
-                    chapter_count: row.get("chapter_count"),
+                        .map_err(|e| DbError::Corrupt(format!("updates.publication_id: {e}")))?,
+                    publication_title: row.get("publication_title"),
+                    unit_count: row.get("chapter_count"),
                     first_title: row.get("first_title"),
                     last_title: row.get("last_title"),
                     created_at: DateTime::parse_from_rfc3339(&created_at)

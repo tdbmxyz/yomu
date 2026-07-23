@@ -1,11 +1,11 @@
-//! Chapter re-sync shared by the add flow, the refresh endpoint and the
-//! periodic updater: fetch the source listing, merge new chapters, queue
-//! downloads when the manga wants them.
+//! Unit re-sync shared by the add flow, the refresh endpoint and the
+//! periodic updater: fetch the source listing, merge new units, queue
+//! downloads when the publication wants them.
 
 use chrono::Utc;
-use yomu_domain::{Chapter, Manga};
+use yomu_domain::{Origin, Publication, ReadingUnit};
 
-use crate::db::ChapterFileOp;
+use crate::db::UnitFileOp;
 use crate::state::AppState;
 
 #[derive(Debug, thiserror::Error)]
@@ -18,18 +18,36 @@ pub enum SyncError {
     Db(#[from] crate::db::DbError),
 }
 
-/// Returns the newly discovered chapters (twins merged into re-uploads
-/// excluded — see `ChapterSync::new_chapters`).
-pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<Vec<Chapter>, SyncError> {
+/// Returns the newly discovered units (twins merged into re-uploads
+/// excluded — see `UnitSync::new_units`).
+pub async fn refresh_publication(
+    state: &AppState,
+    publication: &Publication,
+) -> Result<Vec<ReadingUnit>, SyncError> {
+    // LocalFile publications have nothing to scrape; their refresh arrives
+    // with the streamer.
+    let Origin::Source {
+        source_id,
+        source_key,
+    } = &publication.origin
+    else {
+        return Err(SyncError::UnknownSource("local".into()));
+    };
     let source = state
         .sources
-        .get(&manga.source_id)
-        .ok_or_else(|| SyncError::UnknownSource(manga.source_id.clone()))?;
+        .get(source_id)
+        .ok_or_else(|| SyncError::UnknownSource(source_id.clone()))?;
 
-    let details = source.manga(&manga.source_key).await?;
-    let sync = state.db.sync_chapters(manga.id, &details.chapters).await?;
-    state.db.set_genres(manga.id, &details.genres).await?;
-    state.db.set_last_checked(manga.id, Utc::now()).await?;
+    let details = source.manga(source_key).await?;
+    let sync = state
+        .db
+        .sync_units(publication.id, &details.chapters)
+        .await?;
+    state.db.set_genres(publication.id, &details.genres).await?;
+    state
+        .db
+        .set_last_checked(publication.id, Utc::now())
+        .await?;
 
     // The DB layer only moves rows; apply its page-directory follow-ups
     // (dropped duplicates, downloads handed over to a re-uploaded twin).
@@ -37,31 +55,31 @@ pub async fn refresh_manga(state: &AppState, manga: &Manga) -> Result<Vec<Chapte
     // harmless, a missing one falls back to live reading.
     for op in &sync.file_ops {
         match op {
-            ChapterFileOp::Remove { chapter } => {
-                let _ = tokio::fs::remove_dir_all(state.chapter_dir(manga.id, *chapter)).await;
+            UnitFileOp::Remove { unit } => {
+                let _ = tokio::fs::remove_dir_all(state.unit_dir(publication.id, *unit)).await;
             }
-            ChapterFileOp::Rename { from, to } => {
-                let to_dir = state.chapter_dir(manga.id, *to);
+            UnitFileOp::Rename { from, to } => {
+                let to_dir = state.unit_dir(publication.id, *to);
                 let _ = tokio::fs::remove_dir_all(&to_dir).await;
-                let _ = tokio::fs::rename(state.chapter_dir(manga.id, *from), to_dir).await;
+                let _ = tokio::fs::rename(state.unit_dir(publication.id, *from), to_dir).await;
             }
         }
     }
-    let new_chapters = sync.new_chapters;
+    let new_units = sync.new_units;
 
-    if manga.auto_download && !new_chapters.is_empty() {
-        let ids: Vec<_> = new_chapters.iter().map(|c| c.id).collect();
+    if publication.auto_download && !new_units.is_empty() {
+        let ids: Vec<_> = new_units.iter().map(|c| c.id).collect();
         state.db.mark_pending(&ids).await?;
         state.download_notify.notify_one();
     }
 
-    if !new_chapters.is_empty() {
+    if !new_units.is_empty() {
         tracing::info!(
-            manga = %manga.title,
-            new = new_chapters.len(),
-            auto_download = manga.auto_download,
+            publication = %publication.title,
+            new = new_units.len(),
+            auto_download = publication.auto_download,
             "new chapters found"
         );
     }
-    Ok(new_chapters)
+    Ok(new_units)
 }
