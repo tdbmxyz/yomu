@@ -132,11 +132,11 @@ fn ReaderInner() -> impl IntoView {
     // merge reconciles once we're back.
     let report = {
         let client = client.clone();
-        move |chapter: uuid::Uuid, p: u32| {
+        move |unit: uuid::Uuid, p: u32| {
             let client = client.clone();
             spawn_local(async move {
                 let req = SetLocatorRequest {
-                    unit_id: chapter,
+                    unit_id: unit,
                     page: p,
                     device: "web".into(),
                 };
@@ -144,7 +144,7 @@ fn ReaderInner() -> impl IntoView {
                     offline::outbox_push(ProgressEvent {
                         id: offline::uuid_v7_js(),
                         publication_id: manga_id,
-                        unit_id: chapter,
+                        unit_id: unit,
                         page: p,
                         device: "web-offline".into(),
                         at: Utc::now(),

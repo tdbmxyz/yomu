@@ -229,7 +229,7 @@ impl YomuClient {
         self.send(req).await
     }
 
-    // ---- chapters & pages ----
+    // ---- units & pages ----
 
     pub async fn download_unit(&self, id: Uuid) -> Result<ReadingUnit> {
         let req = self
@@ -238,7 +238,7 @@ impl YomuClient {
         self.send(req).await
     }
 
-    /// Queue several chapters; the server's single download worker drains
+    /// Queue several units; the server's single download worker drains
     /// them with the source's politeness delay.
     pub async fn download_units(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req =
@@ -250,7 +250,7 @@ impl YomuClient {
         self.send(req).await
     }
 
-    /// Remove the server copies of these chapters.
+    /// Remove the server copies of these units.
     pub async fn remove_downloads(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req = self
             .http
@@ -278,17 +278,17 @@ impl YomuClient {
 
     /// Image URL of one page (for `<img src>`); served from disk or proxied
     /// live by the server.
-    pub fn page_url(&self, chapter_id: Uuid, page: u32) -> Option<Url> {
+    pub fn page_url(&self, unit_id: Uuid, page: u32) -> Option<Url> {
         self.base
-            .join(&format!("api/v1/chapters/{chapter_id}/pages/{page}"))
+            .join(&format!("api/v1/chapters/{unit_id}/pages/{page}"))
             .ok()
     }
 
     /// Fetch a page image and discard the body — used to warm caches
     /// (browser service worker) for offline reading.
-    pub async fn fetch_page(&self, chapter_id: Uuid, page: u32) -> Result<()> {
+    pub async fn fetch_page(&self, unit_id: Uuid, page: u32) -> Result<()> {
         let url = self
-            .page_url(chapter_id, page)
+            .page_url(unit_id, page)
             .ok_or_else(|| ClientError::Transport("invalid page url".into()))?;
         self.check_status(self.http.get(url)).await.map(|_| ())
     }
@@ -307,7 +307,7 @@ impl YomuClient {
         self.send(req).await
     }
 
-    /// Journal sync for offline clients. Events for manga the server no
+    /// Journal sync for offline clients. Events for publications the server no
     /// longer knows are consumed (`skipped`), not errors — see
     /// [`PushEventsResponse`].
     pub async fn push_events(&self, req: &PushEventsRequest) -> Result<PushEventsResponse> {

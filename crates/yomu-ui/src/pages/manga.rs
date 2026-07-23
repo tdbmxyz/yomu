@@ -300,6 +300,7 @@ fn MangaDetail(
                         .map(|d| view! { <p class="muted">{d}</p> })}
                     <p class="muted">
                         "Source: "
+                        // Mirrors the wire convention: LocalFile serializes as source_id "local".
                         {match &publication.origin {
                             yomu_domain::Origin::Source { source_id, .. } => source_id.clone(),
                             yomu_domain::Origin::LocalFile { .. } => "local".to_string(),
