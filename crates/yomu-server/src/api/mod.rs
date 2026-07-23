@@ -197,6 +197,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rescan_rejects_when_books_folder_is_disabled() {
+        // The background scan loop gates on `books.enabled`; the manual
+        // endpoint must too, or it would scan the default dir anyway.
+        let mut config = Config::default();
+        config.books.enabled = false;
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/library/rescan")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
     async fn health_stays_open() {
         assert_eq!(status_of("GET", "/api/v1/health").await, StatusCode::OK);
     }

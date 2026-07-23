@@ -165,6 +165,8 @@ fn extract(figment: Figment) -> anyhow::Result<Config> {
     if let Some(local) = root.remove("local") {
         root.entry("books".to_owned()).or_insert(local);
     }
+    // Trade-off: the Dict round-trip discards figment provenance, so a type
+    // error here names the field but not the file/env var it came from.
     let config = Figment::from(Serialized::defaults(Config::default()))
         .merge(Serialized::defaults(root))
         .extract::<Config>()?;

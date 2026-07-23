@@ -146,9 +146,7 @@ pub async fn refresh(
         // cheap and reuses tested code.
         Origin::LocalFile { .. } => {
             let before = state.db.list_units(id).await?.len();
-            crate::streamer::scan(&state.streamer, &state.db, None)
-                .await
-                .map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+            crate::streamer::scan(&state.streamer, &state.db, None).await?;
             (state.db.list_units(id).await?.len().saturating_sub(before)) as u32
         }
         Origin::Source { .. } => {
@@ -166,10 +164,18 @@ pub async fn rescan(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Result<Json<RescanResponse>, ApiError> {
+    // The background loop gates on this flag too; without the guard a manual
+    // rescan on a disabled deployment would scan the default dir.
+    if !state.config.books.enabled {
+        return Err(ApiError::Unprocessable(
+            "the books folder is disabled on this server".into(),
+        ));
+    }
+    // Rescan announces new units (it acts as the local counterpart of the
+    // periodic updater); per-publication refresh is interactive — the user is
+    // looking at the result — so it passes no notifier.
     let notifier = crate::notifier::Notifier::new(state.config.notify.clone());
-    let outcome = crate::streamer::scan(&state.streamer, &state.db, Some(&notifier))
-        .await
-        .map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    let outcome = crate::streamer::scan(&state.streamer, &state.db, Some(&notifier)).await?;
     Ok(Json(RescanResponse {
         added: outcome.added,
         updated: outcome.updated,
@@ -198,7 +204,11 @@ pub async fn cover(
     let publication = state.db.get_publication(id).await?;
     let cover_url = publication.cover_url.ok_or(ApiError::NotFound)?;
     let image = match &publication.origin {
-        Origin::LocalFile { .. } => state.streamer.image(&cover_url).await?,
+        Origin::LocalFile { .. } => state
+            .streamer
+            .image(&cover_url)
+            .await
+            .map_err(super::error::local_file_err)?,
         Origin::Source { source_id, .. } => {
             let source = state
                 .sources

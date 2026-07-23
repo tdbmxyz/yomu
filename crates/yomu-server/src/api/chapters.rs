@@ -132,7 +132,11 @@ pub async fn page_image(
     match &publication.origin {
         // No CDN-expiry retry for local files: `local:` URLs don't expire.
         Origin::LocalFile { .. } => {
-            let image = state.streamer.image(url).await?;
+            let image = state
+                .streamer
+                .image(url)
+                .await
+                .map_err(super::error::local_file_err)?;
             Ok(image_response(image.bytes.to_vec(), image.content_type))
         }
         Origin::Source { source_id, .. } => {
@@ -186,7 +190,11 @@ async fn live_pages(state: &AppState, unit: &ReadingUnit) -> Result<Vec<Url>, Ap
 
     let publication = state.db.get_publication(unit.publication_id).await?;
     let urls = match &publication.origin {
-        Origin::LocalFile { .. } => state.streamer.pages(&unit.source_key).await?,
+        Origin::LocalFile { .. } => state
+            .streamer
+            .pages(&unit.source_key)
+            .await
+            .map_err(super::error::local_file_err)?,
         Origin::Source { source_id, .. } => {
             let source = state
                 .sources
