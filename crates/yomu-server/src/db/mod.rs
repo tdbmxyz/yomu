@@ -557,6 +557,118 @@ mod tests {
         );
     }
 
+    /// A backup exported by a 1.x server (literal JSON, incl. a local-source
+    /// manga) must restore into the 2.0 schema with origins converted and the
+    /// user's reading state intact.
+    #[tokio::test]
+    async fn restore_accepts_a_1x_backup_file() {
+        let json = r#"{
+            "version": 1,
+            "exported_at": "2026-01-01T00:00:00Z",
+            "categories": [
+                {"id":"reading","name":"Reading","position":0,"update_enabled":true}
+            ],
+            "manga": [
+                {"id":"00000000-0000-0000-0000-00000000000a","source_id":"fixture",
+                 "source_key":"m1","title":"Scraped","auto_download":false,
+                 "category":"reading","added_at":"2026-01-01T00:00:00Z"},
+                {"id":"00000000-0000-0000-0000-00000000000b","source_id":"local",
+                 "source_key":"Solo Farming","title":"Solo Farming","auto_download":false,
+                 "category":"reading","added_at":"2026-01-01T00:00:00Z"}
+            ],
+            "chapters": [
+                {"id":"00000000-0000-0000-0000-0000000000a1",
+                 "manga_id":"00000000-0000-0000-0000-00000000000a","source_key":"c1",
+                 "title":"Chapter 1","source_order":0,
+                 "fetched_at":"2026-01-01T00:00:00Z","download":{"state":"none"},"read":false},
+                {"id":"00000000-0000-0000-0000-0000000000b1",
+                 "manga_id":"00000000-0000-0000-0000-00000000000b",
+                 "source_key":"Solo Farming/Chapter 1","title":"Chapter 1","source_order":0,
+                 "fetched_at":"2026-01-01T00:00:00Z","download":{"state":"none"},"read":false}
+            ],
+            "read_chapter_ids": ["00000000-0000-0000-0000-0000000000a1"],
+            "progress": [
+                {"id":"00000000-0000-0000-0000-0000000000e1",
+                 "manga_id":"00000000-0000-0000-0000-00000000000b",
+                 "chapter_id":"00000000-0000-0000-0000-0000000000b1",
+                 "page":4,"device":"phone","at":"2026-01-02T00:00:00Z"}
+            ]
+        }"#;
+        let backup: yomu_domain::Backup = serde_json::from_str(json).unwrap();
+
+        let db = Db::in_memory().await.unwrap();
+        let summary = db.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(
+            (
+                summary.publications,
+                summary.units,
+                summary.read_marks,
+                summary.progress_events
+            ),
+            (2, 2, 1, 1)
+        );
+
+        let scraped = db
+            .get_publication(Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            scraped.origin,
+            Origin::Source {
+                source_id: "fixture".into(),
+                source_key: "m1".into(),
+            }
+        );
+        let local = db
+            .get_publication(Uuid::parse_str("00000000-0000-0000-0000-00000000000b").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            local.origin,
+            Origin::LocalFile {
+                path: "Solo Farming".into()
+            }
+        );
+        let position = db.latest_position(SHARED, local.id).await.unwrap().unwrap();
+        assert_eq!(position.page(), 4);
+    }
+
+    /// The kind column must round-trip through a backup, not be forced to
+    /// comics on import — a later-slice novel restored from backup stays one.
+    #[tokio::test]
+    async fn restore_preserves_publication_kind() {
+        let backup = yomu_domain::Backup {
+            version: yomu_domain::BACKUP_VERSION,
+            exported_at: Utc::now(),
+            categories: Vec::new(),
+            publications: vec![Publication {
+                id: Uuid::from_u128(0xF0),
+                kind: Kind::Novels,
+                origin: Origin::LocalFile {
+                    path: "A Novel".into(),
+                },
+                title: "A Novel".into(),
+                description: None,
+                cover_url: None,
+                auto_download: false,
+                category: "reading".into(),
+                genres: Vec::new(),
+                added_at: Utc::now(),
+                last_checked_at: None,
+                missing_since: None,
+            }],
+            units: Vec::new(),
+            read_unit_ids: Vec::new(),
+            progress: Vec::new(),
+        };
+
+        let db = Db::in_memory().await.unwrap();
+        let summary = db.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(summary.publications, 1);
+        let restored = db.get_publication(Uuid::from_u128(0xF0)).await.unwrap();
+        assert_eq!(restored.kind, Kind::Novels);
+    }
+
     #[tokio::test]
     async fn genres_are_stored_and_batched() {
         let db = Db::in_memory().await.unwrap();

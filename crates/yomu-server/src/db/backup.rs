@@ -52,14 +52,20 @@ impl Db {
                 } => (Some(source_id.as_str()), Some(source_key.as_str()), None),
                 Origin::LocalFile { path } => (None, None, Some(path.as_str())),
             };
+            let kind = match publication.kind {
+                yomu_domain::Kind::Comics => "comics",
+                yomu_domain::Kind::Novels => "novels",
+                yomu_domain::Kind::Pdf => "pdf",
+            };
             let r = sqlx::query(
                 "INSERT INTO publications (id, kind, source_id, source_key, file_path, title,
                                            description, cover_url, auto_download, category,
                                            added_at, last_checked_at, missing_since)
-                 VALUES (?, 'comics', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(publication.id.to_string())
+            .bind(kind)
             .bind(source_id)
             .bind(source_key)
             .bind(file_path)
