@@ -53,13 +53,29 @@ pub fn Library() -> impl IntoView {
 
     // None = "All".
     let selected = RwSignal::new(None::<String>);
+    let selected_kind = RwSignal::new(offline::library_kind());
+    // A cached kind that no longer has content falls back to Comics rather
+    // than showing a confusing empty library.
+    Effect::new(move |_| {
+        if let Some(Ok(entries)) = library.get() {
+            let kind = selected_kind.get_untracked();
+            if kind != yomu_domain::Kind::Comics
+                && !entries.iter().any(|e| e.publication.kind == kind)
+            {
+                selected_kind.set(yomu_domain::Kind::Comics);
+            }
+        }
+    });
     // In-library filters, applied client-side over the loaded list.
     let search = RwSignal::new(String::new());
     let active_genre = RwSignal::new(None::<String>);
 
     view! {
         <section>
-            <h2>"Library"</h2>
+            {move || {
+                let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
+                view! { <KindSwitcher entries selected_kind/> }
+            }}
             {move || {
                 categories
                     .get()
@@ -90,6 +106,7 @@ pub fn Library() -> impl IntoView {
                     let genre = active_genre.get();
                     let filtered: Vec<_> = list
                         .into_iter()
+                        .filter(|entry| entry.publication.kind == selected_kind.get())
                         .filter(|entry| {
                             selected
                                 .get()
@@ -263,6 +280,74 @@ fn LibraryFilters(
                         </div>
                     }
                 })}
+        </div>
+    }
+}
+
+fn kind_label(kind: yomu_domain::Kind) -> &'static str {
+    match kind {
+        yomu_domain::Kind::Comics => "Comics",
+        yomu_domain::Kind::Novels => "Novels",
+        yomu_domain::Kind::Pdf => "PDF",
+    }
+}
+
+/// The page title is the kind switcher: "Comics ▾". Kinds with nothing in
+/// them are hidden (Comics always shows); with one kind the title is inert.
+#[component]
+fn KindSwitcher(
+    entries: Vec<PublicationWithLocator>,
+    selected_kind: RwSignal<yomu_domain::Kind>,
+) -> impl IntoView {
+    use yomu_domain::Kind;
+    let open = RwSignal::new(false);
+    let mut kinds = vec![Kind::Comics];
+    for kind in [Kind::Novels, Kind::Pdf] {
+        if entries.iter().any(|e| e.publication.kind == kind) {
+            kinds.push(kind);
+        }
+    }
+    let multiple = kinds.len() > 1;
+    view! {
+        <div class="kind-switcher">
+            <button
+                class="kind-title"
+                on:click=move |_| {
+                    if multiple {
+                        open.update(|o| *o = !*o);
+                    }
+                }
+            >
+                <h2>{move || kind_label(selected_kind.get())}</h2>
+                {multiple.then(|| view! { <span class="kind-chevron">"▾"</span> })}
+            </button>
+            {move || {
+                open.get()
+                    .then(|| {
+                        view! {
+                            <div class="kind-menu">
+                                {kinds
+                                    .clone()
+                                    .into_iter()
+                                    .map(|kind| {
+                                        view! {
+                                            <button
+                                                class:active=move || selected_kind.get() == kind
+                                                on:click=move |_| {
+                                                    selected_kind.set(kind);
+                                                    offline::set_library_kind(kind);
+                                                    open.set(false);
+                                                }
+                                            >
+                                                {kind_label(kind)}
+                                            </button>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </div>
+                        }
+                    })
+            }}
         </div>
     }
 }

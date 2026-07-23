@@ -692,6 +692,32 @@ pub fn set_theme(theme: Theme) {
     apply_theme(theme);
 }
 
+const LIBRARY_KIND_KEY: &str = "yomu-library-kind";
+
+/// The library kind this device last viewed; restored on relaunch so a
+/// phone reopens straight into Comics.
+pub fn library_kind() -> yomu_domain::Kind {
+    match storage()
+        .and_then(|s| s.get_item(LIBRARY_KIND_KEY).ok().flatten())
+        .as_deref()
+    {
+        Some("novels") => yomu_domain::Kind::Novels,
+        Some("pdf") => yomu_domain::Kind::Pdf,
+        _ => yomu_domain::Kind::Comics,
+    }
+}
+
+pub fn set_library_kind(kind: yomu_domain::Kind) {
+    let key = match kind {
+        yomu_domain::Kind::Comics => "comics",
+        yomu_domain::Kind::Novels => "novels",
+        yomu_domain::Kind::Pdf => "pdf",
+    };
+    if let Some(storage) = storage() {
+        let _ = storage.set_item(LIBRARY_KIND_KEY, key);
+    }
+}
+
 /// Reflect the theme onto `<html data-theme>`, where the CSS reads it.
 pub fn apply_theme(theme: Theme) {
     if let Some(root) = web_sys::window()

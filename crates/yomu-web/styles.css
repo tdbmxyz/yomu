@@ -1505,3 +1505,24 @@ body:has(.reader-overlay.flow) main {
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
 }
+
+/* Library kind switcher: the title is the control. */
+.kind-switcher { position: relative; display: inline-block; }
+.kind-title {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: inherit; font: inherit;
+}
+.kind-title h2 { margin: 0; }
+.kind-chevron { font-size: 0.7em; opacity: 0.55; }
+.kind-menu {
+  position: absolute; top: 100%; left: 0; z-index: 30; min-width: 9rem;
+  display: flex; flex-direction: column; padding: 0.25rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.kind-menu button {
+  text-align: left; padding: 0.45rem 0.6rem; border: none; border-radius: 6px;
+  background: none; color: inherit; font: inherit; cursor: pointer;
+}
+.kind-menu button.active { background: var(--accent); color: var(--accent-contrast); }
