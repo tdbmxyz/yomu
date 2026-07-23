@@ -7,7 +7,10 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use uuid::Uuid;
-use yomu_domain::{Category, Chapter, ChapterRef, DownloadState, Manga, ProgressEvent, User};
+use yomu_domain::{
+    Category, ChapterRef, DownloadState, Kind, Origin, ProgressEvent, Publication, ReadingUnit,
+    User,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -25,32 +28,33 @@ pub enum DbError {
 
 pub type Result<T> = std::result::Result<T, DbError>;
 
-/// What a chapter sync did, beyond upserting rows. `file_ops` are the
+/// What a unit sync did, beyond upserting rows. `file_ops` are the
 /// filesystem follow-ups the caller must apply: this module only owns rows,
-/// the downloaded pages live under `data_dir/<manga>/<chapter>/` (see
-/// `AppState::chapter_dir`).
-pub struct ChapterSync {
-    /// Chapters that weren't known before, in listing order. Twins that
-    /// merely replaced a re-uploaded chapter the user already had are not
+/// the downloaded pages live under `data_dir/<publication>/<unit>/` (see
+/// `AppState::unit_dir`).
+pub struct UnitSync {
+    /// Units that weren't known before, in listing order. Twins that
+    /// merely replaced a re-uploaded unit the user already had are not
     /// included (they must not re-notify or re-trigger auto-download).
-    pub new_chapters: Vec<Chapter>,
-    pub file_ops: Vec<ChapterFileOp>,
+    pub new_units: Vec<ReadingUnit>,
+    pub file_ops: Vec<UnitFileOp>,
 }
 
-/// Per-manga chapter aggregates for the library list (see `library_rollups`).
+/// Per-publication unit aggregates for the library list (see
+/// `library_rollups`).
 #[derive(Debug, Clone, Default)]
 pub struct LibraryRollup {
-    pub chapter_count: u32,
+    pub unit_count: u32,
     pub downloaded_count: u32,
     pub unread_count: u32,
-    pub latest_chapter_at: Option<DateTime<Utc>>,
+    pub latest_unit_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChapterFileOp {
-    /// The chapter row was deleted; drop its page directory.
-    Remove { chapter: Uuid },
-    /// A downloaded chapter was merged into its re-uploaded twin; move the
+pub enum UnitFileOp {
+    /// The unit row was deleted; drop its page directory.
+    Remove { unit: Uuid },
+    /// A downloaded unit was merged into its re-uploaded twin; move the
     /// pages so the twin serves them without re-downloading.
     Rename { from: Uuid, to: Uuid },
 }
@@ -89,9 +93,9 @@ impl Db {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
-        // Recover from a crash mid-download: those chapters are re-queued.
+        // Recover from a crash mid-download: those units are re-queued.
         sqlx::query(
-            "UPDATE chapters SET download_state = 'pending' WHERE download_state = 'downloading'",
+            "UPDATE reading_units SET download_state = 'pending' WHERE download_state = 'downloading'",
         )
         .execute(&pool)
         .await?;
@@ -102,29 +106,29 @@ impl Db {
 mod backup;
 mod catalog;
 mod categories;
-mod chapters;
 mod downloads;
-mod manga;
 mod progress;
+mod publications;
 mod read_marks;
+mod units;
 mod updates;
 mod users;
 
-async fn insert_chapters(
+async fn insert_units(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    manga_id: Uuid,
+    publication_id: Uuid,
     chapters: &[ChapterRef],
     now: DateTime<Utc>,
 ) -> Result<()> {
     for chapter in chapters {
         sqlx::query(
-            "INSERT INTO chapters (id, manga_id, source_key, title, number, source_order,
+            "INSERT INTO reading_units (id, publication_id, source_key, title, number, source_order,
                                    scanlator, fetched_at, published_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (manga_id, source_key) DO NOTHING",
+             ON CONFLICT (publication_id, source_key) DO NOTHING",
         )
         .bind(Uuid::now_v7().to_string())
-        .bind(manga_id.to_string())
+        .bind(publication_id.to_string())
         .bind(&chapter.key)
         .bind(&chapter.title)
         .bind(chapter.number)
@@ -138,22 +142,22 @@ async fn insert_chapters(
     Ok(())
 }
 
-/// Replace a manga's genre rows within a transaction.
+/// Replace a publication's genre rows within a transaction.
 async fn write_genres(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    manga_id: Uuid,
+    publication_id: Uuid,
     genres: &[String],
 ) -> Result<()> {
-    sqlx::query("DELETE FROM manga_genres WHERE manga_id = ?")
-        .bind(manga_id.to_string())
+    sqlx::query("DELETE FROM publication_genres WHERE publication_id = ?")
+        .bind(publication_id.to_string())
         .execute(&mut **tx)
         .await?;
     for genre in genres {
         sqlx::query(
-            "INSERT INTO manga_genres (manga_id, genre) VALUES (?, ?)
-             ON CONFLICT (manga_id, genre) DO NOTHING",
+            "INSERT INTO publication_genres (publication_id, genre) VALUES (?, ?)
+             ON CONFLICT (publication_id, genre) DO NOTHING",
         )
-        .bind(manga_id.to_string())
+        .bind(publication_id.to_string())
         .bind(genre)
         .execute(&mut **tx)
         .await?;
@@ -176,10 +180,12 @@ fn parse_url_opt(s: Option<String>) -> Result<Option<url::Url>> {
 // ---- row types ----
 
 #[derive(sqlx::FromRow)]
-struct MangaRow {
+struct PublicationRow {
     id: String,
-    source_id: String,
-    source_key: String,
+    kind: String,
+    source_id: Option<String>,
+    source_key: Option<String>,
+    file_path: Option<String>,
     title: String,
     description: Option<String>,
     cover_url: Option<String>,
@@ -187,25 +193,41 @@ struct MangaRow {
     category: String,
     added_at: DateTime<Utc>,
     last_checked_at: Option<DateTime<Utc>>,
+    missing_since: Option<DateTime<Utc>>,
 }
 
-impl TryFrom<MangaRow> for Manga {
+impl TryFrom<PublicationRow> for Publication {
     type Error = DbError;
 
-    fn try_from(row: MangaRow) -> Result<Self> {
-        Ok(Manga {
+    fn try_from(row: PublicationRow) -> Result<Self> {
+        let kind = match row.kind.as_str() {
+            "comics" => Kind::Comics,
+            "novels" => Kind::Novels,
+            "pdf" => Kind::Pdf,
+            other => return Err(DbError::Corrupt(format!("kind {other:?}"))),
+        };
+        let origin = match (row.source_id, row.source_key, row.file_path) {
+            (Some(source_id), Some(source_key), None) => Origin::Source {
+                source_id,
+                source_key,
+            },
+            (None, None, Some(path)) => Origin::LocalFile { path },
+            _ => return Err(DbError::Corrupt(format!("publication {} origin", row.id))),
+        };
+        Ok(Publication {
             id: parse_uuid(row.id)?,
-            source_id: row.source_id,
-            source_key: row.source_key,
+            kind,
+            origin,
             title: row.title,
             description: row.description,
             cover_url: parse_url_opt(row.cover_url)?,
             auto_download: row.auto_download,
             category: row.category,
-            // Genres live in manga_genres; accessors attach them.
+            // Genres live in publication_genres; accessors attach them.
             genres: Vec::new(),
             added_at: row.added_at,
             last_checked_at: row.last_checked_at,
+            missing_since: row.missing_since,
         })
     }
 }
@@ -253,9 +275,9 @@ impl From<CategoryRow> for Category {
 }
 
 #[derive(sqlx::FromRow)]
-struct ChapterRow {
+struct UnitRow {
     id: String,
-    manga_id: String,
+    publication_id: String,
     source_key: String,
     title: String,
     number: Option<f64>,
@@ -269,10 +291,10 @@ struct ChapterRow {
     page_count: Option<i64>,
 }
 
-impl TryFrom<ChapterRow> for Chapter {
+impl TryFrom<UnitRow> for ReadingUnit {
     type Error = DbError;
 
-    fn try_from(row: ChapterRow) -> Result<Self> {
+    fn try_from(row: UnitRow) -> Result<Self> {
         let download = match row.download_state.as_str() {
             "none" => DownloadState::None,
             "pending" => DownloadState::Pending,
@@ -290,9 +312,9 @@ impl TryFrom<ChapterRow> for Chapter {
             },
             other => return Err(DbError::Corrupt(format!("download_state {other:?}"))),
         };
-        Ok(Chapter {
+        Ok(ReadingUnit {
             id: parse_uuid(row.id)?,
-            manga_id: parse_uuid(row.manga_id)?,
+            publication_id: parse_uuid(row.publication_id)?,
             source_key: row.source_key,
             title: row.title,
             number: row.number,
@@ -312,8 +334,8 @@ impl TryFrom<ChapterRow> for Chapter {
 struct EventRow {
     seq: i64,
     id: String,
-    manga_id: String,
-    chapter_id: String,
+    publication_id: String,
+    unit_id: String,
     page: i64,
     device: String,
     at: DateTime<Utc>,
@@ -325,8 +347,8 @@ impl TryFrom<EventRow> for ProgressEvent {
     fn try_from(row: EventRow) -> Result<Self> {
         Ok(ProgressEvent {
             id: parse_uuid(row.id)?,
-            manga_id: parse_uuid(row.manga_id)?,
-            chapter_id: parse_uuid(row.chapter_id)?,
+            publication_id: parse_uuid(row.publication_id)?,
+            unit_id: parse_uuid(row.unit_id)?,
             page: row.page as u32,
             device: row.device,
             at: row.at,
@@ -346,7 +368,7 @@ mod tests {
         MangaDetails {
             summary: MangaSummary {
                 key: key.into(),
-                title: format!("Manga {key}"),
+                title: format!("Publication {key}"),
                 cover_url: None,
                 in_library: None,
             },
@@ -381,25 +403,25 @@ mod tests {
     #[tokio::test]
     async fn remove_downloads_resets_only_downloaded_rows() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
                 false,
             )
             .await
             .unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        db.mark_pending(&[chapters[0].id]).await.unwrap();
-        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        db.mark_pending(&[units[0].id]).await.unwrap();
+        db.finish_download(units[0].id, Ok(9)).await.unwrap();
 
         let removed = db
-            .remove_downloads(&[chapters[0].id, chapters[1].id])
+            .remove_downloads(&[units[0].id, units[1].id])
             .await
             .unwrap();
-        assert_eq!(removed, vec![chapters[0].id]); // the 'none' row is skipped
+        assert_eq!(removed, vec![units[0].id]); // the 'none' row is skipped
 
-        let after = db.list_chapters(manga.id).await.unwrap();
+        let after = db.list_units(publication.id).await.unwrap();
         assert!(matches!(after[0].download, DownloadState::None));
         // page_count survives: still true knowledge about the chapter
         assert_eq!(after[0].page_count, Some(9));
@@ -408,25 +430,25 @@ mod tests {
     #[tokio::test]
     async fn library_rollups_and_positions_are_batched_per_manga() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
                 false,
             )
             .await
             .unwrap();
-        // list_chapters order: number asc → c1 then c2.
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        db.mark_pending(&[chapters[0].id]).await.unwrap();
-        db.finish_download(chapters[0].id, Ok(9)).await.unwrap();
-        db.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        // list_units order: number asc → c1 then c2.
+        let units = db.list_units(publication.id).await.unwrap();
+        db.mark_pending(&[units[0].id]).await.unwrap();
+        db.finish_download(units[0].id, Ok(9)).await.unwrap();
+        db.mark_read(SHARED, &[units[0].id]).await.unwrap();
         db.append_event(
             SHARED,
             &ProgressEvent {
                 id: Uuid::from_u128(1),
-                manga_id: manga.id,
-                chapter_id: chapters[1].id,
+                publication_id: publication.id,
+                unit_id: units[1].id,
                 page: 3,
                 device: "test".into(),
                 at: Utc::now(),
@@ -436,21 +458,21 @@ mod tests {
         .unwrap();
 
         let rollups = db.library_rollups(&SHARED.to_string()).await.unwrap();
-        let rollup = rollups.get(&manga.id).unwrap();
-        assert_eq!(rollup.chapter_count, 2);
+        let rollup = rollups.get(&publication.id).unwrap();
+        assert_eq!(rollup.unit_count, 2);
         assert_eq!(rollup.downloaded_count, 1);
         assert_eq!(rollup.unread_count, 1); // one of two marked read
-        assert!(rollup.latest_chapter_at.is_some());
+        assert!(rollup.latest_unit_at.is_some());
 
         let positions = db.latest_positions(SHARED).await.unwrap();
-        let (position, title) = positions.get(&manga.id).unwrap();
-        assert_eq!(position.chapter_id, chapters[1].id);
-        assert_eq!(position.page, 3);
-        assert_eq!(title.as_deref(), Some(chapters[1].title.as_str()));
+        let (position, title) = positions.get(&publication.id).unwrap();
+        assert_eq!(position.unit_id, units[1].id);
+        assert_eq!(position.page(), 3);
+        assert_eq!(title.as_deref(), Some(units[1].title.as_str()));
 
         // Signed-out scope (no matching user) counts nothing as read.
         let anon = db.library_rollups("").await.unwrap();
-        assert_eq!(anon.get(&manga.id).unwrap().unread_count, 2);
+        assert_eq!(anon.get(&publication.id).unwrap().unread_count, 2);
     }
 
     #[tokio::test]
@@ -458,23 +480,23 @@ mod tests {
         use yomu_domain::Backup;
 
         let source = Db::in_memory().await.unwrap();
-        let manga = source
-            .insert_manga(
+        let publication = source
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
                 true,
             )
             .await
             .unwrap();
-        let chapters = source.list_chapters(manga.id).await.unwrap();
-        source.mark_read(SHARED, &[chapters[0].id]).await.unwrap();
+        let units = source.list_units(publication.id).await.unwrap();
+        source.mark_read(SHARED, &[units[0].id]).await.unwrap();
         source
             .append_event(
                 SHARED,
                 &ProgressEvent {
                     id: Uuid::from_u128(7),
-                    manga_id: manga.id,
-                    chapter_id: chapters[1].id,
+                    publication_id: publication.id,
+                    unit_id: units[1].id,
                     page: 5,
                     device: "test".into(),
                     at: Utc::now(),
@@ -487,37 +509,37 @@ mod tests {
             version: yomu_domain::BACKUP_VERSION,
             exported_at: Utc::now(),
             categories: source.list_categories().await.unwrap(),
-            manga: source.list_manga().await.unwrap(),
-            chapters: source.export_chapters().await.unwrap(),
-            read_chapter_ids: source.read_all_ids(SHARED).await.unwrap(),
+            publications: source.list_publications().await.unwrap(),
+            units: source.export_units().await.unwrap(),
+            read_unit_ids: source.read_all_ids(SHARED).await.unwrap(),
             progress: source.export_events(SHARED).await.unwrap(),
         };
 
         let target = Db::in_memory().await.unwrap();
         let summary = target.import_backup(SHARED, &backup).await.unwrap();
-        assert_eq!(summary.manga, 1);
-        assert_eq!(summary.chapters, 2);
+        assert_eq!(summary.publications, 1);
+        assert_eq!(summary.units, 2);
         assert_eq!(summary.read_marks, 1);
         assert_eq!(summary.progress_events, 1);
 
         // The restored instance mirrors the source's library and reading state.
-        let restored = target.list_manga().await.unwrap();
+        let restored = target.list_publications().await.unwrap();
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].id, manga.id);
+        assert_eq!(restored[0].id, publication.id);
         assert!(restored[0].auto_download);
-        let read = target.read_ids(SHARED, manga.id).await.unwrap();
-        assert!(read.contains(&chapters[0].id));
+        let read = target.read_ids(SHARED, publication.id).await.unwrap();
+        assert!(read.contains(&units[0].id));
         let position = target
-            .latest_position(SHARED, manga.id)
+            .latest_position(SHARED, publication.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(position.chapter_id, chapters[1].id);
-        assert_eq!(position.page, 5);
-        // Restored chapters read live (no page files travelled with the backup).
-        let restored_chapters = target.list_chapters(manga.id).await.unwrap();
+        assert_eq!(position.unit_id, units[1].id);
+        assert_eq!(position.page(), 5);
+        // Restored units read live (no page files travelled with the backup).
+        let restored_units = target.list_units(publication.id).await.unwrap();
         assert!(
-            restored_chapters
+            restored_units
                 .iter()
                 .all(|c| matches!(c.download, DownloadState::None))
         );
@@ -526,8 +548,8 @@ mod tests {
         let again = target.import_backup(SHARED, &backup).await.unwrap();
         assert_eq!(
             (
-                again.manga,
-                again.chapters,
+                again.publications,
+                again.units,
                 again.read_marks,
                 again.progress_events
             ),
@@ -535,11 +557,123 @@ mod tests {
         );
     }
 
+    /// A backup exported by a 1.x server (literal JSON, incl. a local-source
+    /// manga) must restore into the 2.0 schema with origins converted and the
+    /// user's reading state intact.
+    #[tokio::test]
+    async fn restore_accepts_a_1x_backup_file() {
+        let json = r#"{
+            "version": 1,
+            "exported_at": "2026-01-01T00:00:00Z",
+            "categories": [
+                {"id":"reading","name":"Reading","position":0,"update_enabled":true}
+            ],
+            "manga": [
+                {"id":"00000000-0000-0000-0000-00000000000a","source_id":"fixture",
+                 "source_key":"m1","title":"Scraped","auto_download":false,
+                 "category":"reading","added_at":"2026-01-01T00:00:00Z"},
+                {"id":"00000000-0000-0000-0000-00000000000b","source_id":"local",
+                 "source_key":"Solo Farming","title":"Solo Farming","auto_download":false,
+                 "category":"reading","added_at":"2026-01-01T00:00:00Z"}
+            ],
+            "chapters": [
+                {"id":"00000000-0000-0000-0000-0000000000a1",
+                 "manga_id":"00000000-0000-0000-0000-00000000000a","source_key":"c1",
+                 "title":"Chapter 1","source_order":0,
+                 "fetched_at":"2026-01-01T00:00:00Z","download":{"state":"none"},"read":false},
+                {"id":"00000000-0000-0000-0000-0000000000b1",
+                 "manga_id":"00000000-0000-0000-0000-00000000000b",
+                 "source_key":"Solo Farming/Chapter 1","title":"Chapter 1","source_order":0,
+                 "fetched_at":"2026-01-01T00:00:00Z","download":{"state":"none"},"read":false}
+            ],
+            "read_chapter_ids": ["00000000-0000-0000-0000-0000000000a1"],
+            "progress": [
+                {"id":"00000000-0000-0000-0000-0000000000e1",
+                 "manga_id":"00000000-0000-0000-0000-00000000000b",
+                 "chapter_id":"00000000-0000-0000-0000-0000000000b1",
+                 "page":4,"device":"phone","at":"2026-01-02T00:00:00Z"}
+            ]
+        }"#;
+        let backup: yomu_domain::Backup = serde_json::from_str(json).unwrap();
+
+        let db = Db::in_memory().await.unwrap();
+        let summary = db.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(
+            (
+                summary.publications,
+                summary.units,
+                summary.read_marks,
+                summary.progress_events
+            ),
+            (2, 2, 1, 1)
+        );
+
+        let scraped = db
+            .get_publication(Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            scraped.origin,
+            Origin::Source {
+                source_id: "fixture".into(),
+                source_key: "m1".into(),
+            }
+        );
+        let local = db
+            .get_publication(Uuid::parse_str("00000000-0000-0000-0000-00000000000b").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            local.origin,
+            Origin::LocalFile {
+                path: "Solo Farming".into()
+            }
+        );
+        let position = db.latest_position(SHARED, local.id).await.unwrap().unwrap();
+        assert_eq!(position.page(), 4);
+    }
+
+    /// The kind column must round-trip through a backup, not be forced to
+    /// comics on import — a later-slice novel restored from backup stays one.
+    #[tokio::test]
+    async fn restore_preserves_publication_kind() {
+        let backup = yomu_domain::Backup {
+            version: yomu_domain::BACKUP_VERSION,
+            exported_at: Utc::now(),
+            categories: Vec::new(),
+            publications: vec![Publication {
+                id: Uuid::from_u128(0xF0),
+                kind: Kind::Novels,
+                origin: Origin::LocalFile {
+                    path: "A Novel".into(),
+                },
+                title: "A Novel".into(),
+                description: None,
+                cover_url: None,
+                auto_download: false,
+                category: "reading".into(),
+                genres: Vec::new(),
+                added_at: Utc::now(),
+                last_checked_at: None,
+                missing_since: None,
+            }],
+            units: Vec::new(),
+            read_unit_ids: Vec::new(),
+            progress: Vec::new(),
+        };
+
+        let db = Db::in_memory().await.unwrap();
+        let summary = db.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(summary.publications, 1);
+        let restored = db.get_publication(Uuid::from_u128(0xF0)).await.unwrap();
+        assert_eq!(restored.kind, Kind::Novels);
+    }
+
     #[tokio::test]
     async fn genres_are_stored_and_batched() {
         let db = Db::in_memory().await.unwrap();
         let a = db
-            .insert_manga(
+            .insert_publication(
                 "fixture",
                 &details_with_genres("m1", &[("c1", Some(1.0))], &["Action", "Fantasy"]),
                 false,
@@ -547,7 +681,7 @@ mod tests {
             .await
             .unwrap();
         let b = db
-            .insert_manga(
+            .insert_publication(
                 "fixture",
                 &details_with_genres("m2", &[("c1", Some(1.0))], &["Fantasy", "Romance"]),
                 false,
@@ -555,14 +689,14 @@ mod tests {
             .await
             .unwrap();
 
-        // insert_manga returns the genres it wrote; get_manga reloads them.
+        // insert_publication returns the genres it wrote; get_publication reloads them.
         assert_eq!(a.genres, vec!["Action", "Fantasy"]);
         assert_eq!(
-            db.get_manga(a.id).await.unwrap().genres,
+            db.get_publication(a.id).await.unwrap().genres,
             vec!["Action", "Fantasy"]
         );
-        // list_manga attaches genres per row from one grouped query.
-        let listed = db.list_manga().await.unwrap();
+        // list_publications attaches genres per row from one grouped query.
+        let listed = db.list_publications().await.unwrap();
         let listed_b = listed.iter().find(|m| m.id == b.id).unwrap();
         assert_eq!(listed_b.genres, vec!["Fantasy", "Romance"]);
 
@@ -570,7 +704,7 @@ mod tests {
         db.set_genres(a.id, &["Drama".into()]).await.unwrap();
         assert_eq!(db.genres_for(a.id).await.unwrap(), vec!["Drama"]);
 
-        let map = db.genres_by_manga().await.unwrap();
+        let map = db.genres_by_publication().await.unwrap();
         assert_eq!(map.get(&a.id).unwrap(), &vec!["Drama".to_string()]);
         assert_eq!(
             map.get(&b.id).unwrap(),
@@ -581,8 +715,8 @@ mod tests {
     #[tokio::test]
     async fn download_queue_lists_and_transitions_states() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details(
                     "m1",
@@ -592,8 +726,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        let (pending, downloaded, failed) = (chapters[0].id, chapters[1].id, chapters[2].id);
+        let units = db.list_units(publication.id).await.unwrap();
+        let (pending, downloaded, failed) = (units[0].id, units[1].id, units[2].id);
 
         db.mark_pending(&[pending]).await.unwrap();
         db.mark_pending(&[downloaded]).await.unwrap();
@@ -613,8 +747,8 @@ mod tests {
         assert_eq!(db.downloaded_summary().await.unwrap(), (1, 5));
 
         // Titles come back for labelling.
-        let titles = db.manga_titles(&[manga.id]).await.unwrap();
-        assert_eq!(titles.get(&manga.id).unwrap(), &manga.title);
+        let titles = db.publication_titles(&[publication.id]).await.unwrap();
+        assert_eq!(titles.get(&publication.id).unwrap(), &publication.title);
 
         // dismiss drops pending|failed → none, not downloaded.
         assert_eq!(
@@ -631,7 +765,7 @@ mod tests {
 
         // retry_failed re-queues only failed rows.
         assert_eq!(db.retry_failed(&[failed, downloaded]).await.unwrap(), 1);
-        let after = db.list_chapters(manga.id).await.unwrap();
+        let after = db.list_units(publication.id).await.unwrap();
         let failed_row = after.iter().find(|c| c.id == failed).unwrap();
         assert!(matches!(failed_row.download, DownloadState::Pending));
     }
@@ -639,12 +773,12 @@ mod tests {
     #[tokio::test]
     async fn library_keys_maps_source_key_to_id() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
         let map = db.library_keys("fixture").await.unwrap();
-        assert_eq!(map.get("m1"), Some(&manga.id));
+        assert_eq!(map.get("m1"), Some(&publication.id));
         assert!(db.library_keys("other-source").await.unwrap().is_empty());
     }
 
@@ -708,8 +842,8 @@ mod tests {
 
         let db = Db::in_memory().await.unwrap();
         // 1. First sync without dates → rows have NULL published_at.
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
                 false,
@@ -717,7 +851,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            db.list_chapters(manga.id)
+            db.list_units(publication.id)
                 .await
                 .unwrap()
                 .iter()
@@ -729,28 +863,22 @@ mod tests {
         let mut listing = details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]).chapters;
         listing[0].published_at = Some(day(2));
         listing[1].published_at = Some(day(1));
-        db.sync_chapters(manga.id, &listing).await.unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        assert_eq!(
-            chapters.iter().filter(|c| c.published_at.is_some()).count(),
-            2
-        );
+        db.sync_units(publication.id, &listing).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        assert_eq!(units.iter().filter(|c| c.published_at.is_some()).count(), 2);
 
         // 3. Source stops printing dates → None must NOT clear stored values.
         listing[0].published_at = None;
         listing[1].published_at = None;
-        db.sync_chapters(manga.id, &listing).await.unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        assert_eq!(
-            chapters.iter().filter(|c| c.published_at.is_some()).count(),
-            2
-        );
+        db.sync_units(publication.id, &listing).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        assert_eq!(units.iter().filter(|c| c.published_at.is_some()).count(), 2);
 
         // 4. A changed date wins (site-side correction).
         listing[1].published_at = Some(day(5));
-        db.sync_chapters(manga.id, &listing).await.unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        let c1 = chapters.iter().find(|c| c.source_key == "c1").unwrap();
+        db.sync_units(publication.id, &listing).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        let c1 = units.iter().find(|c| c.source_key == "c1").unwrap();
         assert_eq!(c1.published_at, Some(day(5)));
     }
 
@@ -758,29 +886,29 @@ mod tests {
     async fn library_lifecycle_and_chapter_sync() {
         let db = Db::in_memory().await.unwrap();
 
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
                 false,
             )
             .await
             .unwrap();
-        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 2);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 2);
 
         // Duplicate add is a constraint error, not a second row.
         assert!(matches!(
-            db.insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            db.insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
                 .await,
             Err(DbError::Constraint(_))
         ));
 
         // Re-sync with one new chapter: only the new one is returned, the
         // existing ones keep their ids.
-        let before = db.list_chapters(manga.id).await.unwrap();
+        let before = db.list_units(publication.id).await.unwrap();
         let new = db
-            .sync_chapters(
-                manga.id,
+            .sync_units(
+                publication.id,
                 &details(
                     "m1",
                     &[("c3", Some(3.0)), ("c2", Some(2.0)), ("c1", Some(1.0))],
@@ -789,10 +917,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let new = new.new_chapters;
+        let new = new.new_units;
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].number, Some(3.0));
-        let after = db.list_chapters(manga.id).await.unwrap();
+        let after = db.list_units(publication.id).await.unwrap();
         assert_eq!(after.len(), 3);
         // Reading order: 1, 2, 3.
         assert_eq!(
@@ -810,23 +938,23 @@ mod tests {
         db.set_downloading(picked.id).await.unwrap();
         db.finish_download(picked.id, Ok(12)).await.unwrap();
         assert!(db.next_pending_download().await.unwrap().is_none());
-        let done = db.get_chapter(picked.id).await.unwrap();
+        let done = db.get_unit(picked.id).await.unwrap();
         assert!(matches!(done.download, DownloadState::Downloaded { .. }));
         assert_eq!(done.page_count, Some(12));
 
-        db.delete_manga(manga.id).await.unwrap();
+        db.delete_publication(publication.id).await.unwrap();
         assert!(matches!(
-            db.get_manga(manga.id).await,
+            db.get_publication(publication.id).await,
             Err(DbError::NotFound)
         ));
-        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 0);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
     async fn sync_prunes_chapters_that_left_the_listing() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details(
                     "m1",
@@ -836,12 +964,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 3);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 3);
 
         // c3 leaves the listing (re-uploaded as c4). Without reconciliation
         // the old row would linger next to its twin — the duplicate bug.
-        db.sync_chapters(
-            manga.id,
+        db.sync_units(
+            publication.id,
             &details(
                 "m1",
                 &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c4", Some(3.0))],
@@ -851,7 +979,7 @@ mod tests {
         .await
         .unwrap();
         let keys: Vec<String> = db
-            .list_chapters(manga.id)
+            .list_units(publication.id)
             .await
             .unwrap()
             .into_iter()
@@ -863,8 +991,8 @@ mod tests {
     #[tokio::test]
     async fn sync_keeps_downloaded_chapters_and_never_wipes_on_empty() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c1", Some(1.0)), ("c2", Some(2.0))]),
                 false,
@@ -874,7 +1002,7 @@ mod tests {
         // c2 is downloaded — it must survive falling out of the listing
         // (its saved pages would otherwise be orphaned).
         let c2 = db
-            .list_chapters(manga.id)
+            .list_units(publication.id)
             .await
             .unwrap()
             .into_iter()
@@ -884,11 +1012,14 @@ mod tests {
         db.set_downloading(c2.id).await.unwrap();
         db.finish_download(c2.id, Ok(5)).await.unwrap();
 
-        db.sync_chapters(manga.id, &details("m1", &[("c1", Some(1.0))]).chapters)
-            .await
-            .unwrap();
+        db.sync_units(
+            publication.id,
+            &details("m1", &[("c1", Some(1.0))]).chapters,
+        )
+        .await
+        .unwrap();
         let keys: Vec<String> = db
-            .list_chapters(manga.id)
+            .list_units(publication.id)
             .await
             .unwrap()
             .into_iter()
@@ -901,9 +1032,9 @@ mod tests {
         );
 
         // An empty listing must never wipe the library (bad/blocked scrape).
-        db.sync_chapters(manga.id, &[]).await.unwrap();
+        db.sync_units(publication.id, &[]).await.unwrap();
         assert_eq!(
-            db.list_chapters(manga.id).await.unwrap().len(),
+            db.list_units(publication.id).await.unwrap().len(),
             2,
             "empty listing left the chapters untouched"
         );
@@ -912,17 +1043,17 @@ mod tests {
     #[tokio::test]
     async fn reuploaded_series_merges_twins_instead_of_duplicating() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("old/1", Some(1.0)), ("old/2", Some(2.0))]),
                 false,
             )
             .await
             .unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        let old1 = chapters.iter().find(|c| c.source_key == "old/1").unwrap();
-        let old2 = chapters.iter().find(|c| c.source_key == "old/2").unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        let old1 = units.iter().find(|c| c.source_key == "old/1").unwrap();
+        let old2 = units.iter().find(|c| c.source_key == "old/2").unwrap();
 
         // old/1 is downloaded and read, old/2 only read: both kinds of user
         // state must survive the re-upload.
@@ -934,8 +1065,8 @@ mod tests {
             SHARED,
             &ProgressEvent {
                 id: Uuid::now_v7(),
-                manga_id: manga.id,
-                chapter_id: old1.id,
+                publication_id: publication.id,
+                unit_id: old1.id,
                 page: 4,
                 device: "test".into(),
                 at: Utc::now(),
@@ -947,8 +1078,8 @@ mod tests {
         // The site re-uploads the whole series under new URLs (same chapter
         // numbers) and adds one genuinely new chapter.
         let sync = db
-            .sync_chapters(
-                manga.id,
+            .sync_units(
+                publication.id,
                 &details(
                     "m1",
                     &[
@@ -962,21 +1093,21 @@ mod tests {
             .await
             .unwrap();
 
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        let keys: Vec<&str> = chapters.iter().map(|c| c.source_key.as_str()).collect();
+        let units = db.list_units(publication.id).await.unwrap();
+        let keys: Vec<&str> = units.iter().map(|c| c.source_key.as_str()).collect();
         assert_eq!(keys, ["new/1", "new/2", "new/3"], "old twins merged away");
 
         // Download carried over to the twin (pages moved on disk by the
         // caller via the Rename op).
-        let new1 = chapters.iter().find(|c| c.source_key == "new/1").unwrap();
-        let new2 = chapters.iter().find(|c| c.source_key == "new/2").unwrap();
+        let new1 = units.iter().find(|c| c.source_key == "new/1").unwrap();
+        let new2 = units.iter().find(|c| c.source_key == "new/2").unwrap();
         assert!(
             matches!(new1.download, DownloadState::Downloaded { .. }),
             "old/1's download transferred to new/1"
         );
         assert_eq!(new1.page_count, Some(9));
         assert!(
-            sync.file_ops.contains(&ChapterFileOp::Rename {
+            sync.file_ops.contains(&UnitFileOp::Rename {
                 from: old1.id,
                 to: new1.id
             }),
@@ -985,15 +1116,19 @@ mod tests {
         );
 
         // Read marks and the reading journal follow the twin.
-        let read = db.read_ids(SHARED, manga.id).await.unwrap();
+        let read = db.read_ids(SHARED, publication.id).await.unwrap();
         assert!(read.contains(&new1.id) && read.contains(&new2.id));
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
-        assert_eq!(position.chapter_id, new1.id);
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position.unit_id, new1.id);
 
         // Only the genuinely new chapter is "new" — a re-upload must not
         // re-notify or re-download the whole series.
         let new_keys: Vec<&str> = sync
-            .new_chapters
+            .new_units
             .iter()
             .map(|c| c.source_key.as_str())
             .collect();
@@ -1003,16 +1138,16 @@ mod tests {
     #[tokio::test]
     async fn progress_journal_merge_and_idempotency() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        let chapter = db.list_chapters(manga.id).await.unwrap().remove(0);
+        let chapter = db.list_units(publication.id).await.unwrap().remove(0);
 
         let event = |id: u128, at: i64, page: u32| ProgressEvent {
             id: Uuid::from_u128(id),
-            manga_id: manga.id,
-            chapter_id: chapter.id,
+            publication_id: publication.id,
+            unit_id: chapter.id,
             page,
             device: "test".into(),
             at: DateTime::from_timestamp(at, 0).unwrap(),
@@ -1025,11 +1160,15 @@ mod tests {
         // Replay (offline sync retry) must be a no-op.
         db.append_event(SHARED, &events[0]).await.unwrap();
 
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
         // Same winner as the in-memory merge rule.
         let expected = merge_position(&events).unwrap();
-        assert_eq!(position.page, expected.page);
-        assert_eq!(position.page, 8);
+        assert_eq!(position.page(), expected.page);
+        assert_eq!(position.page(), 8);
 
         // Cursor pages by arrival order, not event id: replaying doesn't
         // move it, later inserts extend it.
@@ -1047,7 +1186,7 @@ mod tests {
 
         // Unknown manga is a constraint error (client sent garbage).
         let bad = ProgressEvent {
-            manga_id: Uuid::from_u128(999),
+            publication_id: Uuid::from_u128(999),
             ..events[0].clone()
         };
         let bad = ProgressEvent {
@@ -1064,33 +1203,37 @@ mod tests {
         let batch = [bad.clone(), event(4, 300, 9)];
         let (accepted, skipped) = db.append_events(SHARED, &batch).await.unwrap();
         assert_eq!((accepted, skipped), (1, 1));
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
-        assert_eq!(position.page, 9);
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position.page(), 9);
     }
 
     #[tokio::test]
     async fn batch_append_skips_events_with_unknown_chapter() {
-        // A known manga but a garbage chapter_id (client desync) must be
+        // A known manga but a garbage unit_id (client desync) must be
         // skipped, not stored — otherwise latest_position points at a
         // chapter that resolves to nothing.
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        let real = db.list_chapters(manga.id).await.unwrap().remove(0);
+        let real = db.list_units(publication.id).await.unwrap().remove(0);
 
         let good = ProgressEvent {
             id: Uuid::from_u128(1),
-            manga_id: manga.id,
-            chapter_id: real.id,
+            publication_id: publication.id,
+            unit_id: real.id,
             page: 4,
             device: "test".into(),
             at: DateTime::from_timestamp(100, 0).unwrap(),
         };
         let dangling = ProgressEvent {
             id: Uuid::from_u128(2),
-            chapter_id: Uuid::from_u128(9999),
+            unit_id: Uuid::from_u128(9999),
             at: DateTime::from_timestamp(200, 0).unwrap(),
             ..good.clone()
         };
@@ -1099,8 +1242,12 @@ mod tests {
         assert_eq!((accepted, skipped), (1, 1));
         // The surviving position is the good event's chapter, not the
         // later-dated dangling one.
-        let position = db.latest_position(SHARED, manga.id).await.unwrap().unwrap();
-        assert_eq!(position.chapter_id, real.id);
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position.unit_id, real.id);
     }
 
     #[tokio::test]
@@ -1151,30 +1298,30 @@ mod tests {
 
         // Positions are per user: Alice's reading doesn't move the shared
         // account's position.
-        let manga = db
-            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        let chapter = db.list_chapters(manga.id).await.unwrap().remove(0);
+        let chapter = db.list_units(publication.id).await.unwrap().remove(0);
         let event = ProgressEvent {
             id: Uuid::from_u128(1),
-            manga_id: manga.id,
-            chapter_id: chapter.id,
+            publication_id: publication.id,
+            unit_id: chapter.id,
             page: 7,
             device: "test".into(),
             at: Utc::now(),
         };
         db.append_event(alice.id, &event).await.unwrap();
         assert_eq!(
-            db.latest_position(alice.id, manga.id)
+            db.latest_position(alice.id, publication.id)
                 .await
                 .unwrap()
                 .unwrap()
-                .page,
+                .page(),
             7
         );
         assert!(
-            db.latest_position(SHARED, manga.id)
+            db.latest_position(SHARED, publication.id)
                 .await
                 .unwrap()
                 .is_none()
@@ -1204,33 +1351,33 @@ mod tests {
             [true, false, false]
         );
 
-        let manga = db
-            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
-        assert_eq!(manga.category, "reading");
-        assert_eq!(db.list_manga_for_update().await.unwrap().len(), 1);
+        assert_eq!(publication.category, "reading");
+        assert_eq!(db.list_publications_for_update().await.unwrap().len(), 1);
 
         // Finished manga drop out of the sweep; unknown categories refuse.
-        let manga = db.set_category(manga.id, "finished").await.unwrap();
-        assert_eq!(manga.category, "finished");
-        assert!(db.list_manga_for_update().await.unwrap().is_empty());
+        let publication = db.set_category(publication.id, "finished").await.unwrap();
+        assert_eq!(publication.category, "finished");
+        assert!(db.list_publications_for_update().await.unwrap().is_empty());
         assert!(matches!(
-            db.set_category(manga.id, "dropped").await,
+            db.set_category(publication.id, "dropped").await,
             Err(DbError::Constraint(_))
         ));
 
         // Re-enabling updates for a category brings its manga back.
         let finished = db.set_category_update("finished", true).await.unwrap();
         assert!(finished.update_enabled);
-        assert_eq!(db.list_manga_for_update().await.unwrap().len(), 1);
+        assert_eq!(db.list_publications_for_update().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn read_marks_are_per_user_and_idempotent() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details(
                     "m1",
@@ -1240,13 +1387,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        let ids: Vec<Uuid> = chapters.iter().map(|c| c.id).collect();
+        let units = db.list_units(publication.id).await.unwrap();
+        let ids: Vec<Uuid> = units.iter().map(|c| c.id).collect();
 
         assert_eq!(db.mark_read(SHARED, &ids[..2]).await.unwrap(), 2);
         // Re-marking is a no-op, not an error or a double count.
         assert_eq!(db.mark_read(SHARED, &ids[..2]).await.unwrap(), 0);
-        let read = db.read_ids(SHARED, manga.id).await.unwrap();
+        let read = db.read_ids(SHARED, publication.id).await.unwrap();
         assert_eq!(read.len(), 2);
         assert!(read.contains(&ids[0]) && read.contains(&ids[1]));
 
@@ -1255,10 +1402,15 @@ mod tests {
             .upsert_oidc_user("sub-1", "alice", "Alice")
             .await
             .unwrap();
-        assert!(db.read_ids(alice.id, manga.id).await.unwrap().is_empty());
+        assert!(
+            db.read_ids(alice.id, publication.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         assert_eq!(db.mark_unread(SHARED, &ids[..1]).await.unwrap(), 1);
-        assert_eq!(db.read_ids(SHARED, manga.id).await.unwrap().len(), 1);
+        assert_eq!(db.read_ids(SHARED, publication.id).await.unwrap().len(), 1);
 
         // Unknown chapters are a constraint error, not a silent skip.
         assert!(matches!(
@@ -1267,15 +1419,20 @@ mod tests {
         ));
 
         // Marks go with the manga.
-        db.delete_manga(manga.id).await.unwrap();
-        assert!(db.read_ids(SHARED, manga.id).await.unwrap().is_empty());
+        db.delete_publication(publication.id).await.unwrap();
+        assert!(
+            db.read_ids(SHARED, publication.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn duplicate_chapter_keys_in_one_listing_are_deduped() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
             .await
             .unwrap();
 
@@ -1284,8 +1441,8 @@ mod tests {
         // kept in the listing so reconciliation doesn't prune it — this test
         // is about de-duplicating the doubled c2, not about pruning.
         let new = db
-            .sync_chapters(
-                manga.id,
+            .sync_units(
+                publication.id,
                 &details(
                     "m1",
                     &[("c1", Some(1.0)), ("c2", Some(2.0)), ("c2", Some(2.0))],
@@ -1294,41 +1451,41 @@ mod tests {
             )
             .await
             .unwrap();
-        let new = new.new_chapters;
+        let new = new.new_units;
         assert_eq!(new.len(), 1);
-        assert_eq!(db.list_chapters(manga.id).await.unwrap().len(), 2);
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn updates_feed_records_filters_and_prunes() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details("m1", &[("c1", Some(1.0)), ("c2", Some(2.0))]),
                 false,
             )
             .await
             .unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
 
         // Empty find: no row.
-        db.add_update(manga.id, &[]).await.unwrap();
+        db.add_update(publication.id, &[]).await.unwrap();
         let all = db
             .updates_since(DateTime::<Utc>::MIN_UTC, 100)
             .await
             .unwrap();
         assert!(all.is_empty());
 
-        db.add_update(manga.id, &chapters).await.unwrap();
+        db.add_update(publication.id, &units).await.unwrap();
         let all = db
             .updates_since(DateTime::<Utc>::MIN_UTC, 100)
             .await
             .unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].manga_id, manga.id);
-        assert_eq!(all[0].manga_title, "Manga m1");
-        assert_eq!(all[0].chapter_count, 2);
+        assert_eq!(all[0].publication_id, publication.id);
+        assert_eq!(all[0].publication_title, "Publication m1");
+        assert_eq!(all[0].unit_count, 2);
         assert_eq!(all[0].first_title, "Chapter c1");
         assert_eq!(all[0].last_title, "Chapter c2");
 
@@ -1337,7 +1494,7 @@ mod tests {
         assert!(db.updates_since(seen, 100).await.unwrap().is_empty());
 
         // Cap.
-        db.add_update(manga.id, &chapters[..1]).await.unwrap();
+        db.add_update(publication.id, &units[..1]).await.unwrap();
         let capped = db.updates_since(DateTime::<Utc>::MIN_UTC, 1).await.unwrap();
         assert_eq!(capped.len(), 1);
 
@@ -1356,8 +1513,8 @@ mod tests {
     #[tokio::test]
     async fn next_pending_download_is_lowest_number_first() {
         let db = Db::in_memory().await.unwrap();
-        let manga = db
-            .insert_manga(
+        let publication = db
+            .insert_publication(
                 "fixture",
                 &details(
                     "m1",
@@ -1367,10 +1524,206 @@ mod tests {
             )
             .await
             .unwrap();
-        let chapters = db.list_chapters(manga.id).await.unwrap();
-        let ids: Vec<_> = chapters.iter().map(|c| c.id).collect();
+        let units = db.list_units(publication.id).await.unwrap();
+        let ids: Vec<_> = units.iter().map(|c| c.id).collect();
         db.mark_pending(&ids).await.unwrap();
         let next = db.next_pending_download().await.unwrap().unwrap();
         assert_eq!(next.number, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn local_publications_lifecycle() {
+        use yomu_domain::Origin;
+
+        let db = Db::in_memory().await.unwrap();
+        // A scraped publication must never show up in the local listing.
+        db.insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+
+        let local = db
+            .insert_local_publication("Solo Farming", &details("Solo Farming", &[("c1", None)]))
+            .await
+            .unwrap();
+        assert_eq!(
+            local.origin,
+            Origin::LocalFile {
+                path: "Solo Farming".into()
+            }
+        );
+        assert!(local.missing_since.is_none());
+        assert_eq!(db.list_units(local.id).await.unwrap().len(), 1);
+
+        // Duplicate path is a constraint error, not a second row.
+        assert!(matches!(
+            db.insert_local_publication("Solo Farming", &details("Solo Farming", &[]))
+                .await,
+            Err(DbError::Constraint(_))
+        ));
+
+        let listed = db.list_local_publications().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, local.id);
+        // ... and the updater sweep skips it (nothing to scrape).
+        assert_eq!(db.list_publications_for_update().await.unwrap().len(), 1);
+        assert!(matches!(
+            &db.list_publications_for_update().await.unwrap()[0].origin,
+            Origin::Source { .. }
+        ));
+
+        // Vanished file: flagged, then healed by a repoint to the new path.
+        let at = Utc::now();
+        db.set_missing_since(local.id, Some(at)).await.unwrap();
+        assert!(
+            db.get_publication(local.id)
+                .await
+                .unwrap()
+                .missing_since
+                .is_some()
+        );
+        db.repoint_local_publication(local.id, "Solo Farming v2")
+            .await
+            .unwrap();
+        let healed = db.get_publication(local.id).await.unwrap();
+        assert_eq!(
+            healed.origin,
+            Origin::LocalFile {
+                path: "Solo Farming v2".into()
+            }
+        );
+        assert!(healed.missing_since.is_none());
+
+        // Metadata refresh touches cover/description, never the title.
+        db.update_local_metadata(local.id, Some("new desc"), None)
+            .await
+            .unwrap();
+        let updated = db.get_publication(local.id).await.unwrap();
+        assert_eq!(updated.description.as_deref(), Some("new desc"));
+        assert_eq!(updated.title, "Publication Solo Farming");
+    }
+
+    /// Build a 1.x database raw (migrations 0001–0010), seed it like a deployed
+    /// instance — a scraped manga and a local-source one, with progress and read
+    /// marks — then apply 0011 and assert nothing was lost in the conversion.
+    #[tokio::test]
+    async fn migration_0011_converts_a_1x_database() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for sql in [
+            include_str!("../../migrations/0001_library.sql"),
+            include_str!("../../migrations/0002_progress_seq.sql"),
+            include_str!("../../migrations/0003_categories.sql"),
+            include_str!("../../migrations/0004_auth.sql"),
+            include_str!("../../migrations/0005_read_marks.sql"),
+            include_str!("../../migrations/0006_progress_user_seq_index.sql"),
+            include_str!("../../migrations/0007_chapter_published_at.sql"),
+            include_str!("../../migrations/0008_catalog.sql"),
+            include_str!("../../migrations/0009_genres.sql"),
+            include_str!("../../migrations/0010_updates.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+
+        let shared = Uuid::nil().to_string();
+        sqlx::raw_sql(
+            "INSERT INTO manga (id, source_id, source_key, title, auto_download, added_at)
+             VALUES ('00000000-0000-0000-0000-00000000000a', 'fixture', 'm1', 'Scraped', 1,
+                     '2026-01-01T00:00:00Z'),
+                    ('00000000-0000-0000-0000-00000000000b', 'local', 'Solo Farming', 'Solo Farming',
+                     0, '2026-01-01T00:00:00Z');
+             INSERT INTO chapters (id, manga_id, source_key, title, source_order, fetched_at)
+             VALUES ('00000000-0000-0000-0000-0000000000a1',
+                     '00000000-0000-0000-0000-00000000000a', 'c1', 'Chapter 1', 0,
+                     '2026-01-01T00:00:00Z'),
+                    ('00000000-0000-0000-0000-0000000000b1',
+                     '00000000-0000-0000-0000-00000000000b', 'Solo Farming/Chapter 1',
+                     'Chapter 1', 0, '2026-01-01T00:00:00Z');
+             INSERT INTO manga_genres (manga_id, genre)
+             VALUES ('00000000-0000-0000-0000-00000000000a', 'Action');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO progress_events (id, user_id, manga_id, chapter_id, page, device, at)
+             VALUES (?, ?, ?, ?, 4, 'test', '2026-01-02T00:00:00Z')",
+        )
+        .bind("00000000-0000-0000-0000-0000000000e1")
+        .bind(&shared)
+        .bind("00000000-0000-0000-0000-00000000000b")
+        .bind("00000000-0000-0000-0000-0000000000b1")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO read_chapters (user_id, chapter_id, at)
+             VALUES (?, '00000000-0000-0000-0000-0000000000a1', '2026-01-02T00:00:00Z')",
+        )
+        .bind(&shared)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 0011 runs inside one transaction under the real migrator; replicate
+        // that here so defer_foreign_keys spans the publications rebuild.
+        let migration = include_str!("../../migrations/0011_publications.sql");
+        sqlx::raw_sql(&format!("BEGIN; {migration} COMMIT;"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (kind, source_id, file_path): (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT kind, source_id, file_path FROM publications WHERE id = ?")
+                .bind("00000000-0000-0000-0000-00000000000a")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (kind.as_str(), source_id.as_deref(), file_path),
+            ("comics", Some("fixture"), None)
+        );
+
+        let (source_id, file_path): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT source_id, file_path FROM publications WHERE id = ?")
+                .bind("00000000-0000-0000-0000-00000000000b")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (source_id, file_path.as_deref()),
+            (None, Some("Solo Farming"))
+        );
+
+        // Progress, read marks and genres survived under the renamed columns.
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM progress_events
+             WHERE publication_id = '00000000-0000-0000-0000-00000000000b'
+               AND unit_id = '00000000-0000-0000-0000-0000000000b1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events, 1);
+        let marks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM read_units")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(marks, 1);
+        let genres: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM publication_genres WHERE publication_id = '00000000-0000-0000-0000-00000000000a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(genres, 1);
     }
 }

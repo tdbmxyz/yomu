@@ -56,8 +56,10 @@ pub fn More() -> impl IntoView {
                     Ok(backup) => match serde_json::to_string(&backup) {
                         Ok(json) => {
                             if download_json("yomu-backup.json", &json).is_ok() {
-                                backup_status
-                                    .set(Some(format!("Exported {} manga.", backup.manga.len())));
+                                backup_status.set(Some(format!(
+                                    "Exported {} titles.",
+                                    backup.publications.len()
+                                )));
                             } else {
                                 backup_status.set(Some("Could not start the download.".into()));
                             }
@@ -102,10 +104,28 @@ pub fn More() -> impl IntoView {
                 };
                 match client.restore(&backup).await {
                     Ok(s) => backup_status.set(Some(format!(
-                        "Restored {} manga, {} chapters, {} read marks.",
-                        s.manga, s.chapters, s.read_marks
+                        "Restored {} titles, {} chapters, {} read marks.",
+                        s.publications, s.units, s.read_marks
                     ))),
                     Err(e) => backup_status.set(Some(format!("Restore failed: {e}"))),
+                }
+            });
+        }
+    };
+
+    let rescan_status = RwSignal::new(None::<String>);
+    let rescan = {
+        let client = client.clone();
+        move |_| {
+            let client = client.clone();
+            rescan_status.set(Some("Rescanning files…".into()));
+            spawn_local(async move {
+                match client.rescan().await {
+                    Ok(r) => rescan_status.set(Some(format!(
+                        "Scan done: {} added, {} updated, {} missing.",
+                        r.added, r.updated, r.missing
+                    ))),
+                    Err(e) => rescan_status.set(Some(format!("Rescan failed: {e}"))),
                 }
             });
         }
@@ -171,6 +191,20 @@ pub fn More() -> impl IntoView {
             </div>
             {move || {
                 backup_status
+                    .get()
+                    .map(|msg| view! { <p class="muted backup-status">{msg}</p> })
+            }}
+
+            <h3 class="shelf-title">"Files"</h3>
+            <p class="muted">
+                "Titles dropped into the server's books folder appear in the library "
+                "automatically; rescan to pick up changes right away."
+            </p>
+            <div class="backup-actions">
+                <button class="button" on:click=rescan>"Rescan files"</button>
+            </div>
+            {move || {
+                rescan_status
                     .get()
                     .map(|msg| view! { <p class="muted backup-status">{msg}</p> })
             }}

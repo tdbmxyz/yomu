@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use yomu_domain::{Category, MangaWithPosition, UpdateCategoryRequest};
+use yomu_domain::{Category, PublicationWithLocator, UpdateCategoryRequest};
 
 use crate::offline;
 use crate::use_client;
@@ -45,7 +45,7 @@ pub fn Library() -> impl IntoView {
         let sweep_client = client.clone();
         Effect::new(move |_| {
             if let Some(Ok(entries)) = library.get() {
-                let ids = entries.iter().map(|entry| entry.manga.id).collect();
+                let ids = entries.iter().map(|entry| entry.publication.id).collect();
                 crate::cover::sweep_device_covers(conn, &sweep_client, ids);
             }
         });
@@ -53,13 +53,29 @@ pub fn Library() -> impl IntoView {
 
     // None = "All".
     let selected = RwSignal::new(None::<String>);
+    let selected_kind = RwSignal::new(offline::library_kind());
+    // A cached kind that no longer has content falls back to Comics rather
+    // than showing a confusing empty library.
+    Effect::new(move |_| {
+        if let Some(Ok(entries)) = library.get() {
+            let kind = selected_kind.get_untracked();
+            if kind != yomu_domain::Kind::Comics
+                && !entries.iter().any(|e| e.publication.kind == kind)
+            {
+                selected_kind.set(yomu_domain::Kind::Comics);
+            }
+        }
+    });
     // In-library filters, applied client-side over the loaded list.
     let search = RwSignal::new(String::new());
     let active_genre = RwSignal::new(None::<String>);
 
     view! {
         <section>
-            <h2>"Library"</h2>
+            {move || {
+                let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
+                view! { <KindSwitcher entries selected_kind/> }
+            }}
             {move || {
                 categories
                     .get()
@@ -79,8 +95,9 @@ pub fn Library() -> impl IntoView {
                 Some(Ok(list)) if list.is_empty() => {
                     view! {
                         <p class="muted">
-                            "Nothing tracked yet — use " <a href="/search">"Search"</a>
-                            " or browse the " <a href="/sources">"Sources"</a> " catalogs."
+                            "Nothing here yet — use " <a href="/search">"Search"</a>
+                            ", browse the " <a href="/sources">"Sources"</a>
+                            " catalogs, or drop files into the server's books folder."
                         </p>
                     }
                         .into_any()
@@ -90,25 +107,26 @@ pub fn Library() -> impl IntoView {
                     let genre = active_genre.get();
                     let filtered: Vec<_> = list
                         .into_iter()
+                        .filter(|entry| entry.publication.kind == selected_kind.get())
                         .filter(|entry| {
                             selected
                                 .get()
                                 .as_ref()
-                                .is_none_or(|c| entry.manga.category == *c)
+                                .is_none_or(|c| entry.publication.category == *c)
                         })
                         .filter(|entry| {
                             needle.is_empty()
-                                || entry.manga.title.to_lowercase().contains(&needle)
+                                || entry.publication.title.to_lowercase().contains(&needle)
                         })
                         .filter(|entry| {
                             genre
                                 .as_ref()
-                                .is_none_or(|g| entry.manga.genres.contains(g))
+                                .is_none_or(|g| entry.publication.genres.contains(g))
                         })
                         .collect();
                     if filtered.is_empty() {
                         return view! {
-                            <p class="muted">"No manga match these filters."</p>
+                            <p class="muted">"Nothing matches these filters."</p>
                         }
                             .into_any();
                     }
@@ -128,7 +146,7 @@ pub fn Library() -> impl IntoView {
                                 .into_iter()
                                 .map(|entry| {
                                     let device = device_counts
-                                        .get(&entry.manga.id)
+                                        .get(&entry.publication.id)
                                         .copied()
                                         .unwrap_or(0);
                                     let meta = if entry.unread_count > 0 {
@@ -136,8 +154,8 @@ pub fn Library() -> impl IntoView {
                                     } else {
                                         format!(
                                             "{} chapter{}",
-                                            entry.chapter_count,
-                                            if entry.chapter_count == 1 { "" } else { "s" },
+                                            entry.unit_count,
+                                            if entry.unit_count == 1 { "" } else { "s" },
                                         )
                                     };
                                     let badge = (entry.unread_count > 0)
@@ -145,23 +163,24 @@ pub fn Library() -> impl IntoView {
                                     view! {
                                         <a
                                             class="manga-card"
-                                            href=format!("/manga/{}", entry.manga.id)
+                                            class:missing=entry.publication.missing_since.is_some()
+                                            href=format!("/manga/{}", entry.publication.id)
                                         >
                                             <span class="cover-wrap">
-                                                <crate::cover::Cover manga_id=entry.manga.id/>
+                                                <crate::cover::Cover manga_id=entry.publication.id/>
                                                 {badge
                                                     .map(|b| {
                                                         view! { <span class="unread-badge">{b}</span> }
                                                     })}
-                                                {(entry.chapter_count > 0
+                                                {(entry.unit_count > 0
                                                     || entry.downloaded_count > 0
                                                     || device > 0)
                                                     .then(|| {
                                                         view! {
                                                             <span class="count-strip">
-                                                                {(entry.chapter_count > 0)
+                                                                {(entry.unit_count > 0)
                                                                     .then(|| {
-                                                                        view! { <span>{entry.chapter_count}</span> }
+                                                                        view! { <span>{entry.unit_count}</span> }
                                                                     })}
                                                                 {(entry.downloaded_count > 0)
                                                                     .then(|| {
@@ -181,7 +200,7 @@ pub fn Library() -> impl IntoView {
                                                         }
                                                     })}
                                             </span>
-                                            <span class="manga-title">{entry.manga.title.clone()}</span>
+                                            <span class="manga-title">{entry.publication.title.clone()}</span>
                                             <span class="muted manga-meta">{meta}</span>
                                         </a>
                                     }
@@ -204,13 +223,13 @@ pub fn Library() -> impl IntoView {
 /// library (client-side, so filtering stays instant and offline-friendly).
 #[component]
 fn LibraryFilters(
-    entries: Vec<MangaWithPosition>,
+    entries: Vec<PublicationWithLocator>,
     search: RwSignal<String>,
     active_genre: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let mut genres: Vec<String> = entries
         .iter()
-        .flat_map(|e| e.manga.genres.iter().cloned())
+        .flat_map(|e| e.publication.genres.iter().cloned())
         .collect();
     genres.sort_by_key(|g| g.to_lowercase());
     genres.dedup();
@@ -267,16 +286,89 @@ fn LibraryFilters(
     }
 }
 
+fn kind_label(kind: yomu_domain::Kind) -> &'static str {
+    match kind {
+        yomu_domain::Kind::Comics => "Comics",
+        yomu_domain::Kind::Novels => "Novels",
+        yomu_domain::Kind::Pdf => "PDF",
+    }
+}
+
+/// The page title is the kind switcher: "Comics ▾". Kinds with nothing in
+/// them are hidden (Comics always shows); with one kind the title is inert.
+#[component]
+fn KindSwitcher(
+    entries: Vec<PublicationWithLocator>,
+    selected_kind: RwSignal<yomu_domain::Kind>,
+) -> impl IntoView {
+    use yomu_domain::Kind;
+    let open = RwSignal::new(false);
+    let mut kinds = vec![Kind::Comics];
+    for kind in [Kind::Novels, Kind::Pdf] {
+        if entries.iter().any(|e| e.publication.kind == kind) {
+            kinds.push(kind);
+        }
+    }
+    let multiple = kinds.len() > 1;
+    view! {
+        <div class="kind-switcher">
+            <button
+                class="kind-title"
+                on:click=move |_| {
+                    if multiple {
+                        open.update(|o| *o = !*o);
+                    }
+                }
+            >
+                <h2>{move || kind_label(selected_kind.get())}</h2>
+                {multiple.then(|| view! { <span class="kind-chevron">"▾"</span> })}
+            </button>
+            {move || {
+                open.get()
+                    .then(|| {
+                        view! {
+                            <div class="kind-menu">
+                                {kinds
+                                    .clone()
+                                    .into_iter()
+                                    .map(|kind| {
+                                        view! {
+                                            <button
+                                                class:active=move || selected_kind.get() == kind
+                                                on:click=move |_| {
+                                                    selected_kind.set(kind);
+                                                    offline::set_library_kind(kind);
+                                                    open.set(false);
+                                                }
+                                            >
+                                                {kind_label(kind)}
+                                            </button>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </div>
+                        }
+                    })
+            }}
+        </div>
+    }
+}
+
 /// "All | Reading (3) | Paused (1) | Finished (2)" filter row; the active
 /// category also exposes its updater toggle ("new-chapter checks: on/off").
 #[component]
 fn CategoryTabs(
     list: Vec<Category>,
-    entries: Vec<MangaWithPosition>,
+    entries: Vec<PublicationWithLocator>,
     selected: RwSignal<Option<String>>,
     refresh: RwSignal<u32>,
 ) -> impl IntoView {
-    let count_of = move |id: &str| entries.iter().filter(|e| e.manga.category == id).count();
+    let count_of = move |id: &str| {
+        entries
+            .iter()
+            .filter(|e| e.publication.category == id)
+            .count()
+    };
 
     // Reactive: appears when a category tab is active, reflects its flag.
     let toggle_update = {

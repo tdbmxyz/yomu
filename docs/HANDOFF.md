@@ -18,10 +18,15 @@ amended: sync paging is by server `seq`, not event id).
 
 - **Library**: search a source, track (± auto-download), covers
   proxied+cached, continue/start states.
-- **Local source** (new): `local/<Series>/<Chapter>/{*.png|*.cbz}` on the
-  server is a built-in searchable source (`[local]` config; cover.jpg /
-  details.json optional; keys are dir-relative paths, `local:` URL scheme,
-  traversal-checked). Empty search lists every local series.
+- **Streamer** (replaces the 1.x built-in "local" source):
+  `books/<Series>/<Unit>/{*.png|*.cbz}` (plus root-level `.cbz` / loose
+  image dirs as single-unit publications) is scanned straight into the
+  library — upsert with `missing_since` flags (never destructive), rename
+  self-heal, updates feed, `POST /api/v1/library/rescan` (`[books]`
+  config, legacy `[local]` accepted; cover.jpg / details.json optional;
+  keys are dir-relative paths, `local:` URL scheme, traversal-checked).
+  Migration 0011: manga → publications, chapters → reading_units, old
+  local-source rows converted in place.
 - **Downloads (server)**: queue worker fetches chapters to
   `data_dir/<manga>/<chapter>/`, atomic publish, crash recovery, `.partial`
   removed on failure, orphan files discarded when the manga was deleted
@@ -71,8 +76,10 @@ amended: sync paging is by server `seq`, not event id).
 ## Layout notes
 
 - `yomu-source`: `Source` trait + `SelectorSource` (pure parse fns tested on
-  `tests/fixtures/*.html`) + `LocalSource` (`local.rs`, tested on temp dirs)
-  + `Registry` (fails loudly on broken TOML, duplicate ids, non-slug ids).
+  `tests/fixtures/*.html`) + `Registry` (fails loudly on broken TOML,
+  duplicate ids, non-slug ids). Local files moved to the server's
+  streamer (`yomu-server/src/streamer/{files,mod}.rs`, tested on temp
+  dirs).
 - `yomu-ui/src/offline.rs`: outbox, device marks, reader prefs, uuid_v7_js
   (Math.random fallback), `service_worker_active()`.
 - Migrations: `0002_progress_seq.sql` rebuilt progress_events with a `seq`

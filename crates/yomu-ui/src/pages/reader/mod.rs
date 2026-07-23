@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::use_query_map;
-use yomu_domain::{ProgressEvent, SetPositionRequest};
+use yomu_domain::{ProgressEvent, SetLocatorRequest};
 
 use super::{NotFound, param_uuid};
 use crate::offline::{self, ReaderDirection, ReaderFit, ReaderMode};
@@ -103,12 +103,12 @@ fn ReaderInner() -> impl IntoView {
                 // a bad link, seconds).
                 if let Some(page_count) = offline::device_chapter_pages(chapter_id) {
                     return Ok(yomu_domain::PagesResponse {
-                        chapter_id,
+                        unit_id: chapter_id,
                         page_count,
                         downloaded: false,
                     });
                 }
-                client.chapter_pages(chapter_id).await
+                client.unit_pages(chapter_id).await
             }
         }
     });
@@ -120,7 +120,7 @@ fn ReaderInner() -> impl IntoView {
                 // offline: chapter title + prev/next come from the
                 // last-known-good copy the manga page stored
                 offline::cached(conn, &format!("manga:{manga_id}"), || {
-                    client.manga(manga_id)
+                    client.publication(manga_id)
                 })
                 .await
                 .map(|(value, _)| value)
@@ -132,19 +132,19 @@ fn ReaderInner() -> impl IntoView {
     // merge reconciles once we're back.
     let report = {
         let client = client.clone();
-        move |chapter: uuid::Uuid, p: u32| {
+        move |unit: uuid::Uuid, p: u32| {
             let client = client.clone();
             spawn_local(async move {
-                let req = SetPositionRequest {
-                    chapter_id: chapter,
+                let req = SetLocatorRequest {
+                    unit_id: unit,
                     page: p,
                     device: "web".into(),
                 };
-                if client.set_position(manga_id, &req).await.is_err() {
+                if client.set_locator(manga_id, &req).await.is_err() {
                     offline::outbox_push(ProgressEvent {
                         id: offline::uuid_v7_js(),
-                        manga_id,
-                        chapter_id: chapter,
+                        publication_id: manga_id,
+                        unit_id: unit,
                         page: p,
                         device: "web-offline".into(),
                         at: Utc::now(),
@@ -186,23 +186,17 @@ fn ReaderInner() -> impl IntoView {
     });
 
     let neighbours = move || {
-        let chapters = detail.get().and_then(|r| r.ok()).map(|d| d.chapters)?;
-        let index = chapters
-            .iter()
-            .position(|c| c.id == current_chapter.get())?;
-        let previous = index.checked_sub(1).map(|i| chapters[i].id);
-        let next = chapters.get(index + 1).map(|c| c.id);
+        let units = detail.get().and_then(|r| r.ok()).map(|d| d.units)?;
+        let index = units.iter().position(|c| c.id == current_chapter.get())?;
+        let previous = index.checked_sub(1).map(|i| units[i].id);
+        let next = units.get(index + 1).map(|c| c.id);
         Some((previous, next))
     };
     let chapter_title = move || {
         detail
             .get()
             .and_then(|r| r.ok())
-            .and_then(|d| {
-                d.chapters
-                    .into_iter()
-                    .find(|c| c.id == current_chapter.get())
-            })
+            .and_then(|d| d.units.into_iter().find(|c| c.id == current_chapter.get()))
             .map(|c| c.title)
             .unwrap_or_default()
     };

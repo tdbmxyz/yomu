@@ -4,12 +4,12 @@
 use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
-    AddMangaRequest, ApiErrorBody, Backup, BrowseSort, BulkChaptersResponse, Category, Chapter,
-    DownloadChaptersRequest, DownloadsResponse, EventsResponse, HealthResponse, Manga,
-    MangaDetailResponse, MangaSummary, MangaWithPosition, MarkChaptersRequest, MeResponse,
-    PagesResponse, Position, PushEventsRequest, PushEventsResponse, RefreshResponse,
-    RestoreSummary, SetPositionRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
-    UpdateMangaRequest, UpdatesResponse,
+    AddPublicationRequest, ApiErrorBody, Backup, BrowseSort, BulkUnitsResponse, Category,
+    DownloadUnitsRequest, DownloadsResponse, EventsResponse, HealthResponse, Locator, MangaSummary,
+    MarkUnitsRequest, MeResponse, PagesResponse, Publication, PublicationDetailResponse,
+    PublicationWithLocator, PushEventsRequest, PushEventsResponse, ReadingUnit, RefreshResponse,
+    RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo, SourceSearchResults,
+    UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -126,20 +126,24 @@ impl YomuClient {
 
     // ---- library ----
 
-    pub async fn add_manga(&self, req: &AddMangaRequest) -> Result<Manga> {
+    pub async fn add_publication(&self, req: &AddPublicationRequest) -> Result<Publication> {
         let req = self.http.post(self.url("api/v1/library")?).json(req);
         self.send(req).await
     }
 
-    pub async fn library(&self) -> Result<Vec<MangaWithPosition>> {
+    pub async fn library(&self) -> Result<Vec<PublicationWithLocator>> {
         self.get("api/v1/library").await
     }
 
-    pub async fn manga(&self, id: Uuid) -> Result<MangaDetailResponse> {
+    pub async fn publication(&self, id: Uuid) -> Result<PublicationDetailResponse> {
         self.get(&format!("api/v1/manga/{id}")).await
     }
 
-    pub async fn update_manga(&self, id: Uuid, req: &UpdateMangaRequest) -> Result<Manga> {
+    pub async fn update_publication(
+        &self,
+        id: Uuid,
+        req: &UpdatePublicationRequest,
+    ) -> Result<Publication> {
         let req = self
             .http
             .put(self.url(&format!("api/v1/manga/{id}"))?)
@@ -147,12 +151,12 @@ impl YomuClient {
         self.send(req).await
     }
 
-    pub async fn delete_manga(&self, id: Uuid) -> Result<()> {
+    pub async fn delete_publication(&self, id: Uuid) -> Result<()> {
         let req = self.http.delete(self.url(&format!("api/v1/manga/{id}"))?);
         self.send_no_content(req).await
     }
 
-    pub async fn refresh_manga(&self, id: Uuid) -> Result<RefreshResponse> {
+    pub async fn refresh_publication(&self, id: Uuid) -> Result<RefreshResponse> {
         let req = self
             .http
             .post(self.url(&format!("api/v1/manga/{id}/refresh"))?);
@@ -180,22 +184,22 @@ impl YomuClient {
         self.get("api/v1/downloads").await
     }
 
-    pub async fn retry_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
-        let req =
-            self.http
-                .post(self.url("api/v1/downloads/retry")?)
-                .json(&DownloadChaptersRequest {
-                    chapter_ids: ids.to_vec(),
-                });
+    pub async fn retry_downloads(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
+        let req = self
+            .http
+            .post(self.url("api/v1/downloads/retry")?)
+            .json(&DownloadUnitsRequest {
+                unit_ids: ids.to_vec(),
+            });
         self.send(req).await
     }
 
-    pub async fn dismiss_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+    pub async fn dismiss_downloads(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req =
             self.http
                 .post(self.url("api/v1/downloads/dismiss")?)
-                .json(&DownloadChaptersRequest {
-                    chapter_ids: ids.to_vec(),
+                .json(&DownloadUnitsRequest {
+                    unit_ids: ids.to_vec(),
                 });
         self.send(req).await
     }
@@ -208,6 +212,12 @@ impl YomuClient {
 
     pub async fn restore(&self, backup: &Backup) -> Result<RestoreSummary> {
         let req = self.http.post(self.url("api/v1/restore")?).json(backup);
+        self.send(req).await
+    }
+
+    /// Trigger a streamer rescan of the server's books folder.
+    pub async fn rescan(&self) -> Result<RescanResponse> {
+        let req = self.http.post(self.url("api/v1/library/rescan")?);
         self.send(req).await
     }
 
@@ -225,81 +235,85 @@ impl YomuClient {
         self.send(req).await
     }
 
-    // ---- chapters & pages ----
+    // ---- units & pages ----
 
-    pub async fn download_chapter(&self, id: Uuid) -> Result<Chapter> {
+    pub async fn download_unit(&self, id: Uuid) -> Result<ReadingUnit> {
         let req = self
             .http
             .post(self.url(&format!("api/v1/chapters/{id}/download"))?);
         self.send(req).await
     }
 
-    /// Queue several chapters; the server's single download worker drains
+    /// Queue several units; the server's single download worker drains
     /// them with the source's politeness delay.
-    pub async fn download_chapters(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+    pub async fn download_units(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req =
             self.http
                 .post(self.url("api/v1/chapters/download")?)
-                .json(&DownloadChaptersRequest {
-                    chapter_ids: ids.to_vec(),
+                .json(&DownloadUnitsRequest {
+                    unit_ids: ids.to_vec(),
                 });
         self.send(req).await
     }
 
-    /// Remove the server copies of these chapters.
-    pub async fn remove_downloads(&self, ids: &[Uuid]) -> Result<BulkChaptersResponse> {
+    /// Remove the server copies of these units.
+    pub async fn remove_downloads(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req = self
             .http
             .post(self.url("api/v1/chapters/remove-downloads")?)
-            .json(&DownloadChaptersRequest {
-                chapter_ids: ids.to_vec(),
+            .json(&DownloadUnitsRequest {
+                unit_ids: ids.to_vec(),
             });
         self.send(req).await
     }
 
-    pub async fn mark_chapters(&self, ids: &[Uuid], read: bool) -> Result<BulkChaptersResponse> {
+    pub async fn mark_units(&self, ids: &[Uuid], read: bool) -> Result<BulkUnitsResponse> {
         let req = self
             .http
             .post(self.url("api/v1/chapters/mark")?)
-            .json(&MarkChaptersRequest {
-                chapter_ids: ids.to_vec(),
+            .json(&MarkUnitsRequest {
+                unit_ids: ids.to_vec(),
                 read,
             });
         self.send(req).await
     }
 
-    pub async fn chapter_pages(&self, id: Uuid) -> Result<PagesResponse> {
+    pub async fn unit_pages(&self, id: Uuid) -> Result<PagesResponse> {
         self.get(&format!("api/v1/chapters/{id}/pages")).await
     }
 
     /// Image URL of one page (for `<img src>`); served from disk or proxied
     /// live by the server.
-    pub fn page_url(&self, chapter_id: Uuid, page: u32) -> Option<Url> {
+    pub fn page_url(&self, unit_id: Uuid, page: u32) -> Option<Url> {
         self.base
-            .join(&format!("api/v1/chapters/{chapter_id}/pages/{page}"))
+            .join(&format!("api/v1/chapters/{unit_id}/pages/{page}"))
             .ok()
     }
 
     /// Fetch a page image and discard the body — used to warm caches
     /// (browser service worker) for offline reading.
-    pub async fn fetch_page(&self, chapter_id: Uuid, page: u32) -> Result<()> {
+    pub async fn fetch_page(&self, unit_id: Uuid, page: u32) -> Result<()> {
         let url = self
-            .page_url(chapter_id, page)
+            .page_url(unit_id, page)
             .ok_or_else(|| ClientError::Transport("invalid page url".into()))?;
         self.check_status(self.http.get(url)).await.map(|_| ())
     }
 
     // ---- progress ----
 
-    pub async fn set_position(&self, manga_id: Uuid, req: &SetPositionRequest) -> Result<Position> {
+    pub async fn set_locator(
+        &self,
+        publication_id: Uuid,
+        req: &SetLocatorRequest,
+    ) -> Result<Locator> {
         let req = self
             .http
-            .put(self.url(&format!("api/v1/manga/{manga_id}/position"))?)
+            .put(self.url(&format!("api/v1/manga/{publication_id}/position"))?)
             .json(req);
         self.send(req).await
     }
 
-    /// Journal sync for offline clients. Events for manga the server no
+    /// Journal sync for offline clients. Events for publications the server no
     /// longer knows are consumed (`skipped`), not errors — see
     /// [`PushEventsResponse`].
     pub async fn push_events(&self, req: &PushEventsRequest) -> Result<PushEventsResponse> {

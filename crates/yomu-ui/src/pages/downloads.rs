@@ -109,8 +109,8 @@ fn DownloadsView(
         }
     };
 
-    let pending_ids: Vec<_> = pending.iter().map(|e| e.chapter_id).collect();
-    let failed_ids: Vec<_> = failed.iter().map(|e| e.chapter_id).collect();
+    let pending_ids: Vec<_> = pending.iter().map(|e| e.unit_id).collect();
+    let failed_ids: Vec<_> = failed.iter().map(|e| e.unit_id).collect();
     let empty = downloading.is_empty() && pending.is_empty() && failed.is_empty();
 
     let cancel_pending = {
@@ -278,9 +278,9 @@ fn QueueRow(entry: DownloadQueueEntry) -> impl IntoView {
     };
     view! {
         <li class="download-row">
-            <a class="download-title" href=format!("/manga/{}", entry.manga_id)>
-                <strong>{entry.manga_title}</strong>
-                " · " {entry.chapter_title}
+            <a class="download-title" href=format!("/manga/{}", entry.publication_id)>
+                <strong>{entry.publication_title}</strong>
+                " · " {entry.unit_title}
             </a>
             {progress
                 .map(|p| {

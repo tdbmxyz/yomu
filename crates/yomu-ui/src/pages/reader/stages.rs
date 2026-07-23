@@ -34,7 +34,7 @@ pub(super) struct ReaderCtx {
     pub(super) segments: RwSignal<Vec<(uuid::Uuid, u32)>>,
     pub(super) page_counts: StoredValue<std::collections::HashMap<uuid::Uuid, u32>>,
     pub(super) detail:
-        LocalResource<Result<yomu_domain::MangaDetailResponse, yomu_client::ClientError>>,
+        LocalResource<Result<yomu_domain::PublicationDetailResponse, yomu_client::ClientError>>,
 }
 
 /// Paged stage: the three-panel sliding track with swipe / pinch / pan.
@@ -267,7 +267,7 @@ pub(super) fn paged_stage(
         detail
             .get()
             .and_then(|r| r.ok())
-            .and_then(|d| d.chapters.into_iter().find(|c| c.id == id))
+            .and_then(|d| d.units.into_iter().find(|c| c.id == id))
             .map(|c| c.title)
             .unwrap_or_default()
     };
@@ -528,20 +528,16 @@ pub(super) fn vertical_strip(
         if loading_next.get_value() {
             return;
         }
-        let Some(chapters) = detail
-            .get_untracked()
-            .and_then(|r| r.ok())
-            .map(|d| d.chapters)
-        else {
+        let Some(units) = detail.get_untracked().and_then(|r| r.ok()).map(|d| d.units) else {
             return;
         };
         let Some(last) = segments.with_untracked(|s| s.last().map(|(id, _)| *id)) else {
             return;
         };
-        let Some(index) = chapters.iter().position(|c| c.id == last) else {
+        let Some(index) = units.iter().position(|c| c.id == last) else {
             return;
         };
-        let Some(next) = chapters.get(index + 1).map(|c| c.id) else {
+        let Some(next) = units.get(index + 1).map(|c| c.id) else {
             return; // already at the last chapter
         };
         // device-saved neighbours append without a network round-trip
@@ -559,7 +555,7 @@ pub(super) fn vertical_strip(
         loading_next.set_value(true);
         let client = client_next.clone();
         spawn_local(async move {
-            let count = match client.chapter_pages(next).await {
+            let count = match client.unit_pages(next).await {
                 Ok(meta) => Some(meta.page_count),
                 Err(_) => offline::device_chapter_pages(next),
             };
@@ -584,20 +580,16 @@ pub(super) fn vertical_strip(
         if loading_prev.get_value() {
             return;
         }
-        let Some(chapters) = detail
-            .get_untracked()
-            .and_then(|r| r.ok())
-            .map(|d| d.chapters)
-        else {
+        let Some(units) = detail.get_untracked().and_then(|r| r.ok()).map(|d| d.units) else {
             return;
         };
         let Some(first) = segments.with_untracked(|s| s.first().map(|(id, _)| *id)) else {
             return;
         };
-        let Some(index) = chapters.iter().position(|c| c.id == first) else {
+        let Some(index) = units.iter().position(|c| c.id == first) else {
             return;
         };
-        let Some(prev) = index.checked_sub(1).map(|i| chapters[i].id) else {
+        let Some(prev) = index.checked_sub(1).map(|i| units[i].id) else {
             return; // already at the first chapter
         };
         let prepend = move |count: u32| {
@@ -638,7 +630,7 @@ pub(super) fn vertical_strip(
         loading_prev.set_value(true);
         let client = client_prev.clone();
         spawn_local(async move {
-            let count = match client.chapter_pages(prev).await {
+            let count = match client.unit_pages(prev).await {
                 Ok(meta) => Some(meta.page_count),
                 Err(_) => offline::device_chapter_pages(prev),
             };
@@ -896,7 +888,7 @@ pub(super) fn vertical_strip(
                             .get()
                             .and_then(|r| r.ok())
                             .and_then(|d| {
-                                d.chapters
+                                d.units
                                     .into_iter()
                                     .find(|c| c.id == chapter)
                             })

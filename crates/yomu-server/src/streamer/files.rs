@@ -1,20 +1,7 @@
-//! Local source, à la Suwayomi: series that already live on the server's
-//! disk, no site involved. Layout under the configured directory:
-//!
-//! ```text
-//! local/
-//!   Solo Farming in the Tower/
-//!     cover.jpg                (optional; else first page of first chapter)
-//!     details.json             (optional: {"title": ..., "description": ...})
-//!     Chapter 1/
-//!       001.png 002.png ...
-//!     Chapter 2.cbz            (zip archive of images)
-//! ```
-//!
-//! Keys are directory-relative paths (`"Series"`, `"Series/Chapter 1"`),
-//! opaque to the rest of yomu like any source key. Page/cover URLs use the
-//! `local:` scheme and are only ever resolved back by this source, which
-//! confines them to the local directory.
+//! File resolution for the streamer: CBZ archives and image directories
+//! under the books dir, addressed by dir-relative keys and `local:` URLs.
+//! Moved from the retired built-in local source; the `local:` URL scheme is
+//! kept verbatim so cover/page URLs stored by 1.x keep resolving.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -23,8 +10,9 @@ use regex::Regex;
 use serde::Deserialize;
 use url::Url;
 use yomu_domain::{ChapterRef, MangaDetails, MangaSummary};
+use yomu_source::{ImageData, SourceError};
 
-use crate::{ImageData, Result, Source, SourceError};
+pub type Result<T> = std::result::Result<T, SourceError>;
 
 const IMAGE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "avif"];
 const COVER_STEMS: [&str; 2] = ["cover", "folder"];
@@ -40,25 +28,22 @@ struct Details {
     genres: Vec<String>,
 }
 
-pub struct LocalSource {
-    id: String,
-    name: String,
-    dir: PathBuf,
+/// Serves and inspects the books dir. Shared behind `Arc` in `AppState`.
+pub struct Streamer {
+    pub books_dir: PathBuf,
     base: Url,
 }
 
-impl LocalSource {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, dir: PathBuf) -> Self {
+impl Streamer {
+    pub fn new(books_dir: PathBuf) -> Self {
         Self {
-            id: id.into(),
-            name: name.into(),
-            dir,
+            books_dir,
             base: Url::parse("local:///").expect("valid local base url"),
         }
     }
 
     /// Resolve a directory-relative key, refusing anything that could
-    /// escape the local directory. The path must already exist.
+    /// escape the books dir. The path must already exist.
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         if key.is_empty()
             || Path::new(key).components().any(|c| {
@@ -68,15 +53,15 @@ impl LocalSource {
         {
             return Err(SourceError::Parse(format!("invalid local key {key:?}")));
         }
-        let path = self.dir.join(key);
+        let path = self.books_dir.join(key);
         if !path.exists() {
             return Err(SourceError::Parse(format!("local key {key:?} not found")));
         }
         // Lexical checks stop `..`, but a symlink under the dir can still point
         // outside it. Canonicalize and confirm the real path stays within the
-        // (canonical) local dir before handing it back.
+        // (canonical) books dir before handing it back.
         let canon_dir = self
-            .dir
+            .books_dir
             .canonicalize()
             .map_err(|e| SourceError::Parse(format!("local dir not resolvable: {e}")))?;
         let canon = path
@@ -106,31 +91,7 @@ impl LocalSource {
         url
     }
 
-    /// Series directories matching `query` (empty query lists everything).
-    async fn list_series(&self, query: &str) -> Result<Vec<String>> {
-        let needle = query.to_lowercase();
-        let mut names = Vec::new();
-        let mut reader = match tokio::fs::read_dir(&self.dir).await {
-            Ok(reader) => reader,
-            // Missing dir = no local series yet, not an error.
-            Err(_) => return Ok(names),
-        };
-        while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
-                && name.to_lowercase().contains(&needle)
-            {
-                names.push(name);
-            }
-        }
-        names.sort();
-        Ok(names)
-    }
-
-    async fn series_details(&self, series: &str) -> Result<MangaDetails> {
+    pub(super) async fn series_details(&self, series: &str) -> Result<MangaDetails> {
         let series_dir = self.resolve(series)?;
 
         let details: Details =
@@ -166,7 +127,7 @@ impl LocalSource {
         }
         if chapters.is_empty() {
             return Err(SourceError::Parse(format!(
-                "no chapters (subdirectories or .cbz) in {series:?}"
+                "no units (subdirectories or .cbz) in {series:?}"
             )));
         }
         chapters.sort_by(|a, b| match (a.number, b.number) {
@@ -218,16 +179,12 @@ impl LocalSource {
             }
         }
         let first = chapters.first()?;
-        self.chapter_pages(&first.key)
-            .await
-            .ok()?
-            .into_iter()
-            .next()
+        self.pages(&first.key).await.ok()?.into_iter().next()
     }
 
     /// Page image URLs of one chapter (directory of images or .cbz).
-    async fn chapter_pages(&self, chapter_key: &str) -> Result<Vec<Url>> {
-        let path = self.resolve(chapter_key)?;
+    pub async fn pages(&self, unit_key: &str) -> Result<Vec<Url>> {
+        let path = self.resolve(unit_key)?;
 
         if path.is_dir() {
             let mut names = Vec::new();
@@ -241,12 +198,12 @@ impl LocalSource {
             sort_pages(&mut names);
             if names.is_empty() {
                 return Err(SourceError::Parse(format!(
-                    "no page images in {chapter_key:?}"
+                    "no page images in {unit_key:?}"
                 )));
             }
             return Ok(names
                 .iter()
-                .map(|name| self.local_url(&format!("{chapter_key}/{name}"), None))
+                .map(|name| self.local_url(&format!("{unit_key}/{name}"), None))
                 .collect());
         }
 
@@ -272,17 +229,17 @@ impl LocalSource {
         sort_pages(&mut names);
         if names.is_empty() {
             return Err(SourceError::Parse(format!(
-                "no page images in {chapter_key:?}"
+                "no page images in {unit_key:?}"
             )));
         }
         Ok(names
             .iter()
-            .map(|entry| self.local_url(chapter_key, Some(entry)))
+            .map(|entry| self.local_url(unit_key, Some(entry)))
             .collect())
     }
 
-    /// Resolve a `local:` URL produced by this source back to file bytes.
-    async fn read_local(&self, url: &Url) -> Result<ImageData> {
+    /// Resolve a `local:` URL produced by this streamer back to file bytes.
+    pub async fn image(&self, url: &Url) -> Result<ImageData> {
         if url.scheme() != "local" {
             return Err(SourceError::Parse(format!("not a local url: {url}")));
         }
@@ -338,58 +295,133 @@ impl LocalSource {
     }
 }
 
-#[async_trait::async_trait]
-impl Source for LocalSource {
-    fn id(&self) -> &str {
-        &self.id
-    }
+/// One publication found on disk, ready to upsert.
+pub(super) struct Discovered {
+    /// Books-dir-relative path — the publication's identity.
+    pub path: String,
+    pub details: MangaDetails,
+}
 
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn base_url(&self) -> &Url {
-        &self.base
-    }
-
-    fn browse_sorts(&self) -> Vec<yomu_domain::BrowseSort> {
-        vec![yomu_domain::BrowseSort::Latest]
-    }
-
-    /// "Browsing" the local disk is the unfiltered series list; it fits on
-    /// one page.
-    async fn browse(&self, _sort: yomu_domain::BrowseSort, page: u32) -> Result<Vec<MangaSummary>> {
-        if page > 1 {
-            return Ok(Vec::new());
-        }
-        self.search("").await
-    }
-
-    async fn search(&self, query: &str) -> Result<Vec<MangaSummary>> {
+impl Streamer {
+    /// Walk the books dir top level. Series directories (holding unit
+    /// dirs / .cbz) become multi-unit publications; root-level .cbz files
+    /// and loose image directories become single-unit ones. Anything else
+    /// is skipped with one info line — the folder will legitimately hold
+    /// future-format files (.epub, .pdf, .cbr).
+    pub(super) async fn discover(&self) -> Vec<Discovered> {
         let mut out = Vec::new();
-        for series in self.list_series(query).await? {
-            // Cheap summary: title = dir name, cover resolved lazily via
-            // the full details (avoids reading every series on search).
-            out.push(MangaSummary {
-                key: series.clone(),
-                title: series,
-                cover_url: None,
-                in_library: None,
-            });
+        let mut reader = match tokio::fs::read_dir(&self.books_dir).await {
+            Ok(reader) => reader,
+            // Missing dir = empty library, not an error.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return out,
+            Err(err) => {
+                tracing::warn!(%err, "streamer: cannot read books dir");
+                return out;
+            }
+        };
+        loop {
+            let entry = match reader.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(%err, "streamer: directory walk aborted early");
+                    break;
+                }
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "details.json" {
+                continue;
+            }
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            match self.discover_entry(&name, is_dir).await {
+                Ok(Some(found)) => out.push(found),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(entry = %name, %err, "streamer: skipping unreadable entry");
+                }
+            }
         }
-        Ok(out)
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
     }
 
-    async fn manga(&self, key: &str) -> Result<MangaDetails> {
-        self.series_details(key).await
-    }
+    async fn discover_entry(&self, name: &str, is_dir: bool) -> Result<Option<Discovered>> {
+        if !is_dir {
+            if !name.to_lowercase().ends_with(".cbz") {
+                tracing::info!(file = %name, "streamer: unsupported file type, skipping");
+                return Ok(None);
+            }
+            // Root-level archive: single-unit publication. Probing the page
+            // list up front surfaces corrupt archives at scan time; the
+            // first page doubles as the cover.
+            let pages = self.pages(name).await?;
+            let title = name
+                .trim_end_matches(".cbz")
+                .trim_end_matches(".CBZ")
+                .to_string();
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: single_unit_details(name, &title, pages.first().cloned()),
+            }));
+        }
 
-    async fn pages(&self, chapter_key: &str) -> Result<Vec<Url>> {
-        self.chapter_pages(chapter_key).await
+        // A directory is a series when it holds unit dirs or archives;
+        // a directory of loose images is a single-unit publication.
+        let dir = self.books_dir.join(name);
+        let mut has_units = false;
+        let mut has_images = false;
+        let mut reader = tokio::fs::read_dir(&dir).await.map_err(io_err)?;
+        while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
+            let child = entry.file_name().to_string_lossy().into_owned();
+            if child.starts_with('.') {
+                continue;
+            }
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
+                || child.to_lowercase().ends_with(".cbz")
+            {
+                has_units = true;
+            } else if is_image_name(&child) {
+                has_images = true;
+            }
+        }
+        if has_units {
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: self.series_details(name).await?,
+            }));
+        }
+        if has_images {
+            let pages = self.pages(name).await?;
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: single_unit_details(name, name, pages.first().cloned()),
+            }));
+        }
+        tracing::info!(dir = %name, "streamer: no readable content, skipping");
+        Ok(None)
     }
+}
 
-    async fn image(&self, url: &Url) -> Result<ImageData> {
-        self.read_local(url).await
+/// A one-shot: the publication and its only unit share the path as key.
+/// The cover is the first page, mirroring `find_cover`'s fallback.
+fn single_unit_details(path: &str, title: &str, cover: Option<Url>) -> MangaDetails {
+    MangaDetails {
+        summary: MangaSummary {
+            key: path.to_string(),
+            title: title.to_string(),
+            cover_url: cover.map(|u| u.to_string()),
+            in_library: None,
+        },
+        description: None,
+        genres: Vec::new(),
+        chapters: vec![ChapterRef {
+            key: path.to_string(),
+            title: title.to_string(),
+            number: chapter_number(title),
+            source_order: 0,
+            scanlator: None,
+            published_at: None,
+        }],
     }
 }
 
@@ -463,27 +495,32 @@ mod tests {
 
     #[tokio::test]
     async fn keys_cannot_escape_the_local_dir() {
-        let source = LocalSource::new("local", "Local", std::env::temp_dir());
+        let streamer = Streamer::new(std::env::temp_dir());
         for key in ["../etc", "/etc/passwd", "a/../../b", ".hidden", ""] {
-            assert!(source.resolve(key).is_err(), "key {key:?} must be rejected");
+            assert!(
+                streamer.resolve(key).is_err(),
+                "key {key:?} must be rejected"
+            );
         }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn symlinked_keys_cannot_escape_the_local_dir() {
-        let root = std::env::temp_dir().join(format!("yomu-symlink-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("yomu-streamer-symlink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let outside = std::env::temp_dir().join(format!("yomu-outside-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("yomu-streamer-outside-{}", std::process::id()));
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret"), b"x").unwrap();
-        // A symlink inside the local dir aimed at content outside it: the
+        // A symlink inside the books dir aimed at content outside it: the
         // lexical check passes (no `..`), so only canonicalization stops it.
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
 
-        let source = LocalSource::new("local", "Local", root.clone());
-        assert!(source.resolve("escape/secret").is_err());
+        let streamer = Streamer::new(root.clone());
+        assert!(streamer.resolve("escape/secret").is_err());
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
@@ -491,7 +528,7 @@ mod tests {
 
     #[tokio::test]
     async fn series_chapters_and_pages_from_disk() {
-        let root = std::env::temp_dir().join(format!("yomu-local-test-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("yomu-streamer-test-{}", std::process::id()));
         let series = root.join("Solo Farming");
         std::fs::create_dir_all(series.join("Chapter 2")).unwrap();
         std::fs::create_dir_all(series.join("Chapter 1")).unwrap();
@@ -501,14 +538,9 @@ mod tests {
         std::fs::write(series.join("Chapter 2").join("001.jpg"), b"jpg").unwrap();
         std::fs::write(series.join("cover.png"), b"png").unwrap();
 
-        let source = LocalSource::new("local", "Local", root.clone());
+        let streamer = Streamer::new(root.clone());
 
-        let hits = source.search("solo").await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].key, "Solo Farming");
-        assert!(source.search("nope").await.unwrap().is_empty());
-
-        let details = source.manga("Solo Farming").await.unwrap();
+        let details = streamer.series_details("Solo Farming").await.unwrap();
         assert_eq!(details.summary.title, "Solo Farming");
         assert_eq!(details.chapters.len(), 2);
         // Reading order with recency-rank source_order.
@@ -518,13 +550,13 @@ mod tests {
         let cover: Url = details.summary.cover_url.clone().unwrap().parse().unwrap();
         assert_eq!(cover.scheme(), "local");
 
-        let pages = source.pages("Solo Farming/Chapter 1").await.unwrap();
+        let pages = streamer.pages("Solo Farming/Chapter 1").await.unwrap();
         assert_eq!(pages.len(), 3);
-        let image = source.image(&pages[0]).await.unwrap();
+        let image = streamer.image(&pages[0]).await.unwrap();
         assert_eq!(image.content_type, "image/png");
         assert_eq!(&image.bytes[..], b"png");
 
-        let cover_image = source.image(&cover).await.unwrap();
+        let cover_image = streamer.image(&cover).await.unwrap();
         assert_eq!(cover_image.content_type, "image/png");
 
         std::fs::remove_dir_all(&root).unwrap();
