@@ -50,7 +50,7 @@ impl Streamer {
     }
 
     /// Resolve a directory-relative key, refusing anything that could
-    /// escape the local directory. The path must already exist.
+    /// escape the books dir. The path must already exist.
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         if key.is_empty()
             || Path::new(key).components().any(|c| {
@@ -66,7 +66,7 @@ impl Streamer {
         }
         // Lexical checks stop `..`, but a symlink under the dir can still point
         // outside it. Canonicalize and confirm the real path stays within the
-        // (canonical) local dir before handing it back.
+        // (canonical) books dir before handing it back.
         let canon_dir = self
             .books_dir
             .canonicalize()
@@ -98,13 +98,6 @@ impl Streamer {
         url
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub(super) async fn series_details(&self, series: &str) -> Result<MangaDetails> {
         let series_dir = self.resolve(series)?;
 
@@ -141,7 +134,7 @@ impl Streamer {
         }
         if chapters.is_empty() {
             return Err(SourceError::Parse(format!(
-                "no chapters (subdirectories or .cbz) in {series:?}"
+                "no units (subdirectories or .cbz) in {series:?}"
             )));
         }
         chapters.sort_by(|a, b| match (a.number, b.number) {
@@ -313,6 +306,121 @@ impl Streamer {
                 })
             }
         }
+    }
+}
+
+/// One publication found on disk, ready to upsert.
+pub(super) struct Discovered {
+    /// Books-dir-relative path — the publication's identity.
+    pub path: String,
+    pub details: MangaDetails,
+}
+
+impl Streamer {
+    /// Walk the books dir top level. Series directories (holding chapter
+    /// dirs / .cbz) become multi-unit publications; root-level .cbz files
+    /// and loose image directories become single-unit ones. Anything else
+    /// is skipped with one info line — the folder will legitimately hold
+    /// future-format files (.epub, .pdf, .cbr).
+    pub(super) async fn discover(&self) -> Vec<Discovered> {
+        let mut out = Vec::new();
+        let mut reader = match tokio::fs::read_dir(&self.books_dir).await {
+            Ok(reader) => reader,
+            Err(_) => return out, // missing dir = empty library, not an error
+        };
+        while let Some(entry) = reader.next_entry().await.ok().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "details.json" {
+                continue;
+            }
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            match self.discover_entry(&name, is_dir).await {
+                Ok(Some(found)) => out.push(found),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(entry = %name, %err, "streamer: skipping unreadable entry");
+                }
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
+    }
+
+    async fn discover_entry(&self, name: &str, is_dir: bool) -> Result<Option<Discovered>> {
+        if !is_dir {
+            if !name.to_lowercase().ends_with(".cbz") {
+                tracing::info!(file = %name, "streamer: unsupported file type, skipping");
+                return Ok(None);
+            }
+            // Root-level archive: single-unit publication. Probing the page
+            // list up front surfaces corrupt archives at scan time.
+            self.pages(name).await?;
+            let title = name
+                .trim_end_matches(".cbz")
+                .trim_end_matches(".CBZ")
+                .to_string();
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: single_unit_details(name, &title),
+            }));
+        }
+
+        // A directory is a series when it holds chapter dirs or archives;
+        // a directory of loose images is a single-unit publication.
+        let dir = self.books_dir.join(name);
+        let mut has_chapters = false;
+        let mut has_images = false;
+        let mut reader = tokio::fs::read_dir(&dir).await.map_err(io_err)?;
+        while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
+            let child = entry.file_name().to_string_lossy().into_owned();
+            if child.starts_with('.') {
+                continue;
+            }
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
+                || child.to_lowercase().ends_with(".cbz")
+            {
+                has_chapters = true;
+            } else if is_image_name(&child) {
+                has_images = true;
+            }
+        }
+        if has_chapters {
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: self.series_details(name).await?,
+            }));
+        }
+        if has_images {
+            self.pages(name).await?;
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: single_unit_details(name, name),
+            }));
+        }
+        tracing::info!(dir = %name, "streamer: no readable content, skipping");
+        Ok(None)
+    }
+}
+
+/// A one-shot: the publication and its only unit share the path as key.
+fn single_unit_details(path: &str, title: &str) -> MangaDetails {
+    MangaDetails {
+        summary: MangaSummary {
+            key: path.to_string(),
+            title: title.to_string(),
+            cover_url: None,
+            in_library: None,
+        },
+        description: None,
+        genres: Vec::new(),
+        chapters: vec![ChapterRef {
+            key: path.to_string(),
+            title: title.to_string(),
+            number: chapter_number(title),
+            source_order: 0,
+            scanlator: None,
+            published_at: None,
+        }],
     }
 }
 

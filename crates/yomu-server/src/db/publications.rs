@@ -71,13 +71,6 @@ impl Db {
     }
 
     /// LocalFile publications, keyed for the streamer's upsert.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub async fn list_local_publications(&self) -> Result<Vec<Publication>> {
         let rows = sqlx::query_as::<_, PublicationRow>(
             "SELECT * FROM publications WHERE file_path IS NOT NULL ORDER BY title COLLATE NOCASE",
@@ -88,13 +81,6 @@ impl Db {
     }
 
     /// Insert a streamer-discovered publication with its units.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub async fn insert_local_publication(
         &self,
         path: &str,
@@ -129,13 +115,6 @@ impl Db {
     }
 
     /// Re-point a missing LocalFile publication at a renamed path (self-heal).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub async fn repoint_local_publication(&self, id: Uuid, path: &str) -> Result<()> {
         sqlx::query("UPDATE publications SET file_path = ?, missing_since = NULL WHERE id = ?")
             .bind(path)
@@ -146,13 +125,6 @@ impl Db {
     }
 
     /// Flag (Some) or clear (None) a vanished LocalFile publication.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub async fn set_missing_since(&self, id: Uuid, at: Option<DateTime<Utc>>) -> Result<()> {
         sqlx::query("UPDATE publications SET missing_since = ? WHERE id = ?")
             .bind(at)
@@ -164,13 +136,6 @@ impl Db {
 
     /// Refresh scan-derived metadata (cover/description) without touching title
     /// (both columns are overwritten — pass the current value to keep it).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "streamer (2.x) entry points; test-only until then"
-        )
-    )]
     pub async fn update_local_metadata(
         &self,
         id: Uuid,
