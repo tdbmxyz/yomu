@@ -8,8 +8,8 @@ use yomu_domain::{
     DownloadUnitsRequest, DownloadsResponse, EventsResponse, HealthResponse, Locator, MangaSummary,
     MarkUnitsRequest, MeResponse, PagesResponse, Publication, PublicationDetailResponse,
     PublicationWithLocator, PushEventsRequest, PushEventsResponse, ReadingUnit, RefreshResponse,
-    RestoreSummary, SetLocatorRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
-    UpdatePublicationRequest, UpdatesResponse,
+    RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo, SourceSearchResults,
+    UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -212,6 +212,12 @@ impl YomuClient {
 
     pub async fn restore(&self, backup: &Backup) -> Result<RestoreSummary> {
         let req = self.http.post(self.url("api/v1/restore")?).json(backup);
+        self.send(req).await
+    }
+
+    /// Trigger a streamer rescan of the server's books folder.
+    pub async fn rescan(&self) -> Result<RescanResponse> {
+        let req = self.http.post(self.url("api/v1/library/rescan")?);
         self.send(req).await
     }
 

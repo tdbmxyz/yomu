@@ -1526,3 +1526,10 @@ body:has(.reader-overlay.flow) main {
   background: none; color: inherit; font: inherit; cursor: pointer;
 }
 .kind-menu button.active { background: var(--accent); color: var(--accent-contrast); }
+
+/* LocalFile publications whose backing file vanished from the books folder. */
+.manga-card.missing .cover-wrap { opacity: 0.45; }
+.missing-badge {
+  display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+  font-size: 0.75rem; background: rgba(200, 80, 80, 0.18); color: #d08080;
+}

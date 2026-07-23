@@ -204,6 +204,10 @@ fn MangaDetail(
     let client = use_client();
     let publication = detail.publication.clone();
     let id = publication.id;
+    // LocalFile publications: their content *is* the server copy, so no
+    // server-download affordances make sense for them.
+    let is_local = matches!(publication.origin, yomu_domain::Origin::LocalFile { .. });
+    let missing = publication.missing_since.is_some();
     // "Continue" goes to the last known position — server's answer merged
     // with any unsynced offline events — or the first chapter.
     let locator = offline::effective_position(id, detail.locator.clone(), &offline::outbox());
@@ -294,6 +298,14 @@ fn MangaDetail(
                 <crate::cover::Cover manga_id=id large=true/>
                 <div class="manga-head-body">
                     <h2>{publication.title.clone()}</h2>
+                    {missing.then(|| view! {
+                        <span
+                            class="missing-badge"
+                            title="The file behind this entry is no longer in the books folder"
+                        >
+                            "file missing"
+                        </span>
+                    })}
                     {publication
                         .description
                         .clone()
@@ -319,13 +331,18 @@ fn MangaDetail(
                                 }
                             })}
                         <button on:click=do_refresh>"Check for new chapters"</button>
-                        <button on:click=toggle_auto>
-                            {if auto_download {
-                                "Auto-download: on"
-                            } else {
-                                "Auto-download: off"
-                            }}
-                        </button>
+                        {(!is_local)
+                            .then(|| {
+                                view! {
+                                    <button on:click=toggle_auto>
+                                        {if auto_download {
+                                            "Auto-download: on"
+                                        } else {
+                                            "Auto-download: off"
+                                        }}
+                                    </button>
+                                }
+                            })}
                         {move || {
                             let current = current_category.clone();
                             let on_change = set_category.clone();
@@ -361,16 +378,17 @@ fn MangaDetail(
                 </div>
             </div>
             <ChapterList
-                manga_id=id
+                publication_id=id
                 units=detail.units
                 offline
-                position_chapter=locator.map(|p| p.unit_id)
+                is_local
+                locator_unit=locator.map(|p| p.unit_id)
                 refresh
                 status
                 selected
                 anchor
                 server_progress
-                manga_title=publication.title.clone()
+                publication_title=publication.title.clone()
             />
         </section>
     }
@@ -477,16 +495,19 @@ pub(crate) async fn save_locally(
 
 #[component]
 fn ChapterList(
-    manga_id: Uuid,
+    publication_id: Uuid,
     units: Vec<ReadingUnit>,
     offline: bool,
-    position_chapter: Option<Uuid>,
+    /// LocalFile publication: units are inherently on the server, and no
+    /// server download/remove actions apply.
+    is_local: bool,
+    locator_unit: Option<Uuid>,
     refresh: RwSignal<u32>,
     status: RwSignal<Option<String>>,
     selected: RwSignal<HashSet<Uuid>>,
     anchor: RwSignal<Option<usize>>,
     server_progress: ServerProgress,
-    manga_title: String,
+    publication_title: String,
 ) -> impl IntoView {
     // Display newest chapter first. Only the on-page list is reversed —
     // `list_chapters` stays in reading order (Chapter 1 → N), which the
@@ -512,7 +533,7 @@ fn ChapterList(
             .map(|c| (c.id, c.title.clone()))
             .collect::<std::collections::HashMap<Uuid, String>>(),
     );
-    let manga_title = StoredValue::new(manga_title);
+    let publication_title = StoredValue::new(publication_title);
     let local_downloads = crate::use_local_downloads();
     let device_marks = crate::use_device_marks();
     let pull_queue = crate::use_pull_queue();
@@ -522,7 +543,7 @@ fn ChapterList(
         units
             .iter()
             .map(|c| crate::chapter_actions::ChapterState {
-                on_server: matches!(c.download, DownloadState::Downloaded { .. }),
+                on_server: is_local || matches!(c.download, DownloadState::Downloaded { .. }),
                 on_device: device.contains_key(&c.id),
             })
             .collect::<Vec<_>>()
@@ -613,6 +634,7 @@ fn ChapterList(
         online: !offline,
         local_tier: offline::shell_available() || offline::service_worker_active(),
         local_remove: offline::shell_available(),
+        server_downloads: !is_local,
     };
     let menu_open = RwSignal::new(false);
     let run_action = move |action: crate::chapter_actions::Action| {
@@ -631,14 +653,14 @@ fn ChapterList(
                     // ones are pulled on its next tick.
                     let mut both = ids_where(|s| !s.on_device);
                     both.reverse();
-                    let mtitle = manga_title.get_value();
+                    let mtitle = publication_title.get_value();
                     let ctitles = titles.get_value();
                     pull_queue.update(|q| {
                         for id in both {
                             if !q.iter().any(|e| e.chapter_id == id) {
                                 q.push(crate::PullItem {
                                     chapter_id: id,
-                                    manga_id,
+                                    manga_id: publication_id,
                                     manga_title: mtitle.clone(),
                                     chapter_title: ctitles.get(&id).cloned().unwrap_or_default(),
                                 });
@@ -664,14 +686,14 @@ fn ChapterList(
                 let mut pull = ids_where(|s| s.on_server && !s.on_device);
                 pull.reverse(); // oldest chapter first
                 let client = use_client();
-                let mtitle = manga_title.get_value();
+                let mtitle = publication_title.get_value();
                 let ctitles = titles.get_value();
                 spawn_local(async move {
                     for id in pull {
                         let ct = ctitles.get(&id).cloned().unwrap_or_default();
                         if let Err(err) = save_locally(
                             &client,
-                            manga_id,
+                            publication_id,
                             mtitle.clone(),
                             id,
                             ct,
@@ -791,10 +813,10 @@ fn ChapterList(
                 .into_iter()
                 .enumerate()
                 .map(|(index, unit)| {
-                    let current = position_chapter == Some(unit.id);
+                    let current = locator_unit == Some(unit.id);
                     view! {
                         <ChapterItem
-                            manga_id
+                            publication_id
                             unit
                             offline
                             current
@@ -823,7 +845,7 @@ fn ChapterList(
 
 #[component]
 fn ChapterItem(
-    manga_id: Uuid,
+    publication_id: Uuid,
     unit: ReadingUnit,
     offline: bool,
     current: bool,
@@ -997,7 +1019,7 @@ fn ChapterItem(
                     {move || if is_selected.get() { "☑" } else { "☐" }}
                 </span>
             </Show>
-            <a class="chapter-title" href=format!("/read/{manga_id}/{id}")>
+            <a class="chapter-title" href=format!("/read/{publication_id}/{id}")>
                 {unit.title.clone()}
             </a>
             {unit

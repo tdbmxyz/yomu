@@ -95,8 +95,9 @@ pub fn Library() -> impl IntoView {
                 Some(Ok(list)) if list.is_empty() => {
                     view! {
                         <p class="muted">
-                            "Nothing tracked yet — use " <a href="/search">"Search"</a>
-                            " or browse the " <a href="/sources">"Sources"</a> " catalogs."
+                            "Nothing here yet — use " <a href="/search">"Search"</a>
+                            ", browse the " <a href="/sources">"Sources"</a>
+                            " catalogs, or drop files into the server's books folder."
                         </p>
                     }
                         .into_any()
@@ -125,7 +126,7 @@ pub fn Library() -> impl IntoView {
                         .collect();
                     if filtered.is_empty() {
                         return view! {
-                            <p class="muted">"No manga match these filters."</p>
+                            <p class="muted">"Nothing matches these filters."</p>
                         }
                             .into_any();
                     }
@@ -162,6 +163,7 @@ pub fn Library() -> impl IntoView {
                                     view! {
                                         <a
                                             class="manga-card"
+                                            class:missing=entry.publication.missing_since.is_some()
                                             href=format!("/manga/{}", entry.publication.id)
                                         >
                                             <span class="cover-wrap">
