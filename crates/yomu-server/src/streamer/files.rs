@@ -352,15 +352,16 @@ impl Streamer {
                 return Ok(None);
             }
             // Root-level archive: single-unit publication. Probing the page
-            // list up front surfaces corrupt archives at scan time.
-            self.pages(name).await?;
+            // list up front surfaces corrupt archives at scan time; the
+            // first page doubles as the cover.
+            let pages = self.pages(name).await?;
             let title = name
                 .trim_end_matches(".cbz")
                 .trim_end_matches(".CBZ")
                 .to_string();
             return Ok(Some(Discovered {
                 path: name.to_string(),
-                details: single_unit_details(name, &title),
+                details: single_unit_details(name, &title, pages.first().cloned()),
             }));
         }
 
@@ -390,10 +391,10 @@ impl Streamer {
             }));
         }
         if has_images {
-            self.pages(name).await?;
+            let pages = self.pages(name).await?;
             return Ok(Some(Discovered {
                 path: name.to_string(),
-                details: single_unit_details(name, name),
+                details: single_unit_details(name, name, pages.first().cloned()),
             }));
         }
         tracing::info!(dir = %name, "streamer: no readable content, skipping");
@@ -402,12 +403,13 @@ impl Streamer {
 }
 
 /// A one-shot: the publication and its only unit share the path as key.
-fn single_unit_details(path: &str, title: &str) -> MangaDetails {
+/// The cover is the first page, mirroring `find_cover`'s fallback.
+fn single_unit_details(path: &str, title: &str, cover: Option<Url>) -> MangaDetails {
     MangaDetails {
         summary: MangaSummary {
             key: path.to_string(),
             title: title.to_string(),
-            cover_url: None,
+            cover_url: cover.map(|u| u.to_string()),
             in_library: None,
         },
         description: None,

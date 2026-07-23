@@ -256,6 +256,16 @@ mod tests {
         assert_eq!(db.list_units(solo.id).await.unwrap().len(), 2);
         let one_shot = pubs.iter().find(|p| p.title == "One Shot").unwrap();
         assert_eq!(db.list_units(one_shot.id).await.unwrap().len(), 1);
+        // No cover file exists, so the first page of the only unit stands in.
+        assert_eq!(
+            one_shot.cover_url.as_ref().map(|u| u.as_str()),
+            Some("local:///One%20Shot.cbz?entry=p1.png")
+        );
+        let loose = pubs.iter().find(|p| p.title == "Loose Pages").unwrap();
+        assert_eq!(
+            loose.cover_url.as_ref().map(|u| u.as_str()),
+            Some("local:///Loose%20Pages/001.png")
+        );
 
         // Idempotent: nothing new the second time.
         let again = scan(&streamer, &db, None).await.unwrap();
