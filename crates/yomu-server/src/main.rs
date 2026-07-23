@@ -7,6 +7,7 @@ mod downloader;
 mod notifier;
 mod oidc;
 mod state;
+mod streamer;
 mod sync;
 mod updater;
 

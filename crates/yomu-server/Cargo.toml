@@ -28,6 +28,8 @@ hex.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 percent-encoding.workspace = true
+regex.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true }
