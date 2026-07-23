@@ -947,6 +947,9 @@ fn ChapterItem(
     // per-tier buttons; actions live in the selection menu.
     let device_marks = crate::use_device_marks();
     let on_device = move || device_marks.with(|m| m.contains_key(&id));
+    // Deliberately narrower than the selection menu's ChapterState: locals are
+    // always servable, but the outline only marks downloaded rows so local
+    // lists stay calm instead of showing an all-blue outline on every row.
     let on_server = matches!(unit.download, DownloadState::Downloaded { .. });
     let dl_busy = matches!(
         unit.download,
