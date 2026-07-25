@@ -527,9 +527,19 @@ button.danger:hover {
   margin-top: 1rem;
 }
 
-.downloads-waiting-head {
-  margin: 0.4rem 0 0.2rem;
-  font-size: 0.85rem;
+/* Where a row of the "In progress" block is being written: this device or
+   the server. The queues below are single-source and say so in their
+   heading, so the tag only appears in that mixed block. */
+.download-where {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 0.05rem 0.35rem;
 }
 
 .download-progress {

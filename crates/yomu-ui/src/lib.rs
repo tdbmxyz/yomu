@@ -47,7 +47,7 @@ pub fn use_connectivity() -> RwSignal<Connectivity> {
 /// One in-flight local (device) save, shown on the manga page ring and
 /// in the Downloads tab's device section. Keyed by chapter id in the
 /// `LocalDownloads` map.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct LocalDownload {
     pub manga_id: uuid::Uuid,
     pub manga_title: String,
