@@ -101,10 +101,23 @@ pub fn router(state: AppState) -> Router {
         let index = ServeFile::new(index)
             .precompressed_br()
             .precompressed_gzip();
+        // The SPA shell answers every URL that names no file, including a
+        // hashed asset URL from a previous deploy — and it changes in place,
+        // so pinning it under such a URL is a cache poisoning the user cannot
+        // clear. That guarantee is attached to the *service*, not inferred
+        // afterwards from a header: a 304 carries no content-type, so no
+        // amount of inspecting the response can recognise the shell, and a
+        // 304's headers overwrite the stored ones (RFC 9111 §4.3.4). Every
+        // response this service produces — 200, 304, 206, compressed or not —
+        // leaves here already marked revalidate-always, and the outer
+        // `cache_headers` fills in `Cache-Control` only where it is absent.
+        let shell = Router::new()
+            .fallback_service(index)
+            .layer(axum::middleware::from_fn(static_cache::shell_cache_headers));
         let files = ServeDir::new(dir)
             .precompressed_br()
             .precompressed_gzip()
-            .fallback(index);
+            .fallback(shell);
         // The cache layer goes on a router holding nothing but the static
         // service, which is then merged in: on the app itself it would stamp
         // cache headers on API responses too.
@@ -569,12 +582,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The second reachable path to the same bug: a source id may be 16 hex
-    /// characters (`registry.rs` allows alphanumeric plus `-`/`_`), so an SPA
-    /// route is indistinguishable from an asset by URL alone. `/manga/:id` and
-    /// `/read/:m/:c` escape only because uuid groups are 8/4/4/4/12 — a
-    /// convention living nowhere near the classifier. Asserted on served
-    /// responses, not on classifier strings.
+    /// The same poisoning one round trip later, which the content-type check
+    /// could never see. `must-revalidate` is *itself* the instruction that
+    /// makes the browser re-ask conditionally, so the shell-under-an-asset-URL
+    /// response always comes back as a `304` on its second use — and a 304
+    /// carries no `content-type`, so "is the body HTML?" cannot be asked of
+    /// it. RFC 9111 §4.3.4 has the client fold a 304's headers into its stored
+    /// response, so an `immutable` here rewrites the stored HTML to immutable
+    /// for a year: identical unclearable failure, arrived at through the fix's
+    /// own header. Both requests are made, because the second only exists
+    /// because of the first.
+    #[tokio::test]
+    async fn a_revalidated_shell_under_an_asset_url_is_still_not_immutable() {
+        let dir = fixture_dir("shell-304-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        let asset = "/yomu-web-0123456789abcdef_bg.wasm";
+        let req = Request::builder().uri(asset).body(Body::empty()).unwrap();
+        let first = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some(super::static_cache::REVALIDATE)
+        );
+        let last_modified = first
+            .headers()
+            .get("last-modified")
+            .expect("the shell must carry a validator, or no 304 is possible")
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        // Exactly what a browser sends next, having been told to revalidate.
+        let req = Request::builder()
+            .uri(asset)
+            .header("if-modified-since", &last_modified)
+            .body(Body::empty())
+            .unwrap();
+        let second = router.oneshot(req).await.unwrap();
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            second
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some(super::static_cache::REVALIDATE),
+            "a 304 rewrites the stored response's headers: `immutable` here \
+             pins the shell under an asset URL just as surely as on the 200"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other side of the same coin, so the fix is not an over-correction:
+    /// a hashed asset that really exists must stay `immutable` on its own 304.
+    /// Losing that makes every reload pay a round trip for a file that can
+    /// never change.
+    #[tokio::test]
+    async fn a_real_assets_own_304_stays_immutable() {
+        let dir = fixture_dir("asset-304-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+        std::fs::write(dir.join("styles-dcb9e8dca193296c.css"), b"body{}").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        let asset = "/styles-dcb9e8dca193296c.css";
+        let req = Request::builder().uri(asset).body(Body::empty()).unwrap();
+        let first = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let last_modified = first
+            .headers()
+            .get("last-modified")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let req = Request::builder()
+            .uri(asset)
+            .header("if-modified-since", &last_modified)
+            .body(Body::empty())
+            .unwrap();
+        let second = router.oneshot(req).await.unwrap();
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            second
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some(super::static_cache::IMMUTABLE)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Trunk drops leading zeros from the hex fingerprint, so its length
+    /// varies — this exact filename came off a real build of this repo and is
+    /// 14 characters. A classifier demanding 16 rejected it and shipped the
+    /// 1.45 MB wasm with `must-revalidate`, so the whole feature was a no-op
+    /// for that build and no test noticed, every fixture being 16 characters.
+    #[tokio::test]
+    async fn a_short_fingerprint_is_still_pinned() {
+        let dir = fixture_dir("short-fingerprint-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+        std::fs::write(dir.join("yomu-web-ae4beb7cab1d74_bg.wasm"), b"w").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let req = Request::builder()
+            .uri("/yomu-web-ae4beb7cab1d74_bg.wasm")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some(super::static_cache::IMMUTABLE),
+            "a short trunk hash is a hash; rejecting it silently disables \
+             caching for the single largest asset we ship"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The second reachable path to the same bug: a source id may be hex
+    /// (`registry.rs` allows alphanumeric plus `-`/`_`) and a uuid's groups
+    /// are hex too, so an SPA route is indistinguishable from an asset by URL
+    /// alone — the classifier reads both as fingerprinted and is meant to.
+    /// What keeps them out of `immutable` is that they are served by the shell
+    /// service, which marks its own responses. Asserted on served responses,
+    /// not on classifier strings, because the classifier is not where the
+    /// guarantee lives.
     #[tokio::test]
     async fn spa_routes_revalidate_even_when_they_look_fingerprinted() {
         let dir = fixture_dir("spa-cache-control-test");
@@ -602,7 +764,14 @@ mod tests {
             }
         };
 
-        for route in ["/sources/deadbeefdeadbeef", "/library"] {
+        for route in [
+            "/sources/deadbeefdeadbeef",
+            // A uuid's groups are 8/4/4/4/12 hex and the classifier now
+            // accepts runs from 8 up, so this reads as an asset. Harmless:
+            // it is not a file, so the shell answers it.
+            "/manga/019f4921-3946-7c20-9a67-d84d46072fe6",
+            "/library",
+        ] {
             assert_eq!(
                 cache_control_of(route).await.as_deref(),
                 Some(super::static_cache::REVALIDATE),
@@ -620,6 +789,135 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rest of what a browser and a CDN actually send, on one dist, so a
+    /// later change to the cache layer cannot quietly break one of them: a
+    /// HEAD (what a cache issues to freshen metadata), a Range request (what a
+    /// resumed download and some wasm loaders send), a gzip-only client, and a
+    /// deep link into a dist with no `index.html` at all — the last must 404
+    /// rather than pin anything.
+    #[tokio::test]
+    async fn the_cache_layer_holds_across_head_range_and_gzip() {
+        let dir = fixture_dir("cache-attack-surface-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+        std::fs::write(dir.join("styles-dcb9e8dca193296c.css"), b"body{color:red}").unwrap();
+        std::fs::write(dir.join("styles-dcb9e8dca193296c.css.gz"), b"gzipped").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        let asset = "/styles-dcb9e8dca193296c.css";
+        let cache_control = |resp: &axum::response::Response| {
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+
+        let req = Request::builder()
+            .method("HEAD")
+            .uri(asset)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            cache_control(&resp).as_deref(),
+            Some(super::static_cache::IMMUTABLE)
+        );
+
+        let req = Request::builder()
+            .uri(asset)
+            .header("range", "bytes=0-3")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            cache_control(&resp).as_deref(),
+            Some(super::static_cache::IMMUTABLE),
+            "a 206 is a slice of an immutable body, not a different body"
+        );
+
+        let req = Request::builder()
+            .uri(asset)
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip")
+        );
+        assert_eq!(
+            cache_control(&resp).as_deref(),
+            Some(super::static_cache::IMMUTABLE)
+        );
+
+        // The errors `ServeDir` answers itself, without consulting the
+        // fallback — so the shell service never sees them and the status
+        // guard is the only thing standing between them and a year-long pin
+        // on a failure. An unsatisfiable range is what a resumed download
+        // sends against a file that shrank; a method it does not implement is
+        // what a probe or a misrouted client sends.
+        let req = Request::builder()
+            .uri(asset)
+            .header("range", "bytes=9999-")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            cache_control(&resp).as_deref(),
+            Some(super::static_cache::REVALIDATE),
+            "pinning an error answer makes it permanent for that client"
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(asset)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            cache_control(&resp).as_deref(),
+            Some(super::static_cache::REVALIDATE)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A dist with no index.html: the fallback has nothing to serve, and a
+        // 404 must never be pinned — the URL may well exist in the next
+        // deploy.
+        let empty = fixture_dir("cache-no-index-test");
+        let config = Config {
+            static_dir: Some(empty.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let req = Request::builder()
+            .uri("/yomu-web-0123456789abcdef_bg.wasm")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            cache_control(&resp).as_deref(),
+            Some(super::static_cache::REVALIDATE)
+        );
+
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     /// `Vary` has two independent contributors: the cache layer adds

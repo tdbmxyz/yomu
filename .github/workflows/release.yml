@@ -77,7 +77,8 @@ jobs:
             ## Web frontend
 
             `yomu-web-*.tar.gz` is the static trunk dist with brotli and
-            gzip siblings alongside each asset; point the server's
+            gzip siblings alongside each compressible asset (the PNG icons
+            get none — they are already compressed); point the server's
             `static_dir` at the unpacked directory and it serves the
             precompressed copy to clients that accept it. This is the
             flake's `yomu-web-compressed` output, which the NixOS module

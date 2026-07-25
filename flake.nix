@@ -175,8 +175,9 @@
     # What the server serves: the trunk dist plus brotli/gzip siblings built
     # once here, so ServeDir never compresses per request. Kept separate from
     # yomu-web because yomu-desktop bakes that one into the binary, where the
-    # siblings would be ~1.08 MB (1 080 828 B measured) of files the asset
-    # protocol never serves.
+    # siblings would be ~1.08 MB of files the asset protocol never serves.
+    # (Approximate on purpose: `src = self` and the baked build commit change
+    # the wasm, so an exact byte figure does not reproduce across checkouts.)
     yomu-web-compressed =
       pkgs.runCommand "yomu-web-compressed-${version}" {
         nativeBuildInputs = [pkgs.brotli pkgs.gzip];
@@ -186,8 +187,12 @@
         chmod -R u+w $out
         # The file list is collected before anything is written: the loop
         # creates .br/.gz entries in the very directory find is reading, and
-        # whether a new entry shows up in an in-progress readdir is
-        # unspecified — so a large enough dist could compress its own output.
+        # POSIX leaves it unspecified whether an in-progress readdir sees an
+        # entry added during the walk. The hazard is not a doubly-compressed
+        # file — no new name matches these patterns — it is a *skipped* one:
+        # the directory rehashing mid-walk can drop an entry find had not
+        # reached yet, and a wasm that quietly ships without its sibling looks
+        # exactly like a working build.
         find $out -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' \
           -o -name '*.html' -o -name '*.json' -o -name '*.svg' \
           -o -name '*.webmanifest' \) -print0 > "$TMPDIR/targets"
