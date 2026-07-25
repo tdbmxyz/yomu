@@ -73,6 +73,10 @@ from the flake:
 $ nix run github:tdbmxyz/yomu#yomu-desktop
 ```
 
+That needs nix with flakes enabled (`nix-command` and `flakes` experimental
+features); on a non-NixOS host a WebKitGTK app run from the store may also
+need a GL wrapper such as `nixGL`.
+
 It asks for the server address on first launch (or read it from
 `YOMU_SERVER` / `~/.config/yomu/server`). Android is an APK, signed
 locally and attached to a release by hand.
@@ -90,7 +94,7 @@ Git flow, enforced by CI on the long-lived branches:
   `vX.Y.Z`. The release workflow checks the tag against the manifests,
   then builds and attaches the web bundle. The Android APK is signed
   locally and attached by hand. The desktop shell is not published as an
-  artifact — it is run from the flake (see below).
+  artifact — it is run from the flake (see Clients above).
 
 ## License
 

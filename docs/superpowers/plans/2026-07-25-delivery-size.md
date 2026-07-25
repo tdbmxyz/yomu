@@ -767,6 +767,16 @@ apk:
 
 Delete the `"version": "2.0.0",` line from `crates/yomu-shell/tauri.conf.json`.
 
+- [ ] **Step 2b: Drop `appimage` from the bundle targets**
+
+Same file, `bundle.targets` is `["deb", "appimage"]`. Nothing publishes
+either any more (task 3 removed the workflow's `nix bundle` step, which is
+what actually produced the released AppImage — the Tauri bundler never did),
+but leaving `appimage` there means a plain local `cargo tauri build` still
+spends minutes producing a ~1 GB file nobody wants. Set it to `["deb"]`.
+Added after task 3's review pointed out that nothing else would sweep this
+up.
+
 - [ ] **Step 3: Drop the now-broken workflow check**
 
 `.github/workflows/release.yml` reads `jq -r .version crates/yomu-shell/tauri.conf.json` and asserts it equals the tag. With the field gone that check fails every release. Remove the `shell_version` lines, keep the `Cargo.toml` one.
