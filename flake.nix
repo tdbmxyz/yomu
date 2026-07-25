@@ -172,6 +172,26 @@
       meta.description = "yomu web frontend (static trunk dist)";
     };
 
+    # What the server serves: the trunk dist plus brotli/gzip siblings built
+    # once here, so ServeDir never compresses per request. Kept separate from
+    # yomu-web because yomu-desktop bakes that one into the binary, where the
+    # siblings would be ~700 KB of files the asset protocol never serves.
+    yomu-web-compressed =
+      pkgs.runCommand "yomu-web-compressed-${version}" {
+        nativeBuildInputs = [pkgs.brotli pkgs.gzip];
+        meta.description = "yomu web frontend with precompressed siblings";
+      } ''
+        cp -r ${yomu-web} $out
+        chmod -R u+w $out
+        find $out -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' \
+          -o -name '*.html' -o -name '*.json' -o -name '*.svg' \
+          -o -name '*.webmanifest' \) -print0 |
+          while IFS= read -r -d "" f; do
+            brotli -q 11 -f -o "$f.br" "$f"
+            gzip -9 -c "$f" > "$f.gz"
+          done
+      '';
+
     # Desktop shell (same scheme as chaos-desktop): generate_context! bakes
     # the web dist into the binary at compile time, so the yomu-web output
     # is copied in place before cargo runs. wrapGAppsHook3 wires GSettings
@@ -226,7 +246,7 @@
     };
   in {
     packages.${system} = {
-      inherit yomu-server yomu-web yomu-desktop;
+      inherit yomu-server yomu-web yomu-web-compressed yomu-desktop;
       default = yomu-server;
     };
 

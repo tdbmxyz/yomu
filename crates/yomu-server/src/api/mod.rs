@@ -93,7 +93,18 @@ pub fn router(state: AppState) -> Router {
 
     if let Some(dir) = &state.config.static_dir {
         let index = dir.join("index.html");
-        app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
+        // Siblings are generated once at build time (see yomu-web-compressed
+        // in flake.nix); ServeDir picks one by Accept-Encoding and falls back
+        // to the identity file when none exists, so a plain local dist works
+        // unchanged.
+        let index = ServeFile::new(index)
+            .precompressed_br()
+            .precompressed_gzip();
+        let files = ServeDir::new(dir)
+            .precompressed_br()
+            .precompressed_gzip()
+            .fallback(index);
+        app = app.fallback_service(files);
     }
 
     app.layer(cors_layer(&state.config.auth.allowed_origins))
@@ -278,5 +289,86 @@ mod tests {
             .get("access-control-allow-origin")
             .and_then(|v| v.to_str().ok());
         assert_eq!(acao, Some("*"), "default CORS must allow any origin");
+    }
+
+    /// A dist with a precompressed sibling: the server must hand the sibling
+    /// to a client that accepts brotli, and the plain file to one that does
+    /// not. Without this the wasm ships uncompressed to every visitor.
+    #[tokio::test]
+    async fn static_files_prefer_a_precompressed_sibling() {
+        let dir = std::env::temp_dir().join("yomu-precompressed-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.wasm"), b"plain-wasm-bytes").unwrap();
+        std::fs::write(dir.join("app.wasm.br"), b"brotli-wasm-bytes").unwrap();
+        std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        let req = Request::builder()
+            .uri("/app.wasm")
+            .header("accept-encoding", "br")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+            Some("br")
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"brotli-wasm-bytes");
+
+        let req = Request::builder()
+            .uri("/app.wasm")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.headers().get("content-encoding").is_none());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"plain-wasm-bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A local `trunk build` dist has no siblings at all; it must still serve.
+    /// This is what keeps `just web` and a hand-built dist working.
+    #[tokio::test]
+    async fn static_files_fall_back_to_identity_without_a_sibling() {
+        let dir = std::env::temp_dir().join("yomu-no-sibling-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.js"), b"console.log(1)").unwrap();
+        std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let req = Request::builder()
+            .uri("/app.js")
+            .header("accept-encoding", "br, gzip")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("content-encoding").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
