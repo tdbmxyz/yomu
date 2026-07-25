@@ -709,11 +709,14 @@ stat -c%s <the built apk>
 
 - [ ] **Step 2: Add the strip flag to the Android build only**
 
-In the `apk` recipe, prefix the tauri invocation:
+In the `apk` recipe, scope the flag to the Android target:
 
 ```bash
-    RUSTFLAGS="-C strip=symbols" cargo tauri android build --apk --target aarch64 …
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C strip=symbols" \
+      cargo tauri android build --apk --target aarch64 …
 ```
+
+**Not a bare `RUSTFLAGS`** — corrected after implementation proved it breaks the build. Tauri runs `beforeBuildCommand` (`trunk build --release`) inside the same invocation, so an exported `RUSTFLAGS` also reaches the wasm build; stripping removes the wasm's `target_features` section and wasm-opt — which task 5 turned on — then aborts with `[wasm-validator error] memory.copy operations require bulk memory operations`. The per-target variable applies to the Android target only.
 
 Android only, deliberately: `[profile.release]` would also strip the server binary and cost readable backtraces in logs.
 
