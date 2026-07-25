@@ -35,13 +35,19 @@ shell server="http://127.0.0.1:4700":
 # tauri.conf.json can't drift from the workspace; tauri.properties is
 # gitignored and keeps whatever version last resolved, so it is removed first.
 # Signing reads crates/yomu-shell/gen/android/keystore.properties.
+# The strip flag is set here rather than in [profile.release] on purpose:
+# the same profile builds yomu-server, whose backtraces need symbols. It is
+# scoped to the android target rather than passed as plain RUSTFLAGS because
+# tauri's beforeBuildCommand runs `trunk build` inside this invocation, and
+# stripping the wasm drops its target_features section, after which wasm-opt
+# rejects the bulk-memory ops rustc emits.
 apk:
     #!/usr/bin/env bash
     set -euo pipefail
     version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
     rm -f crates/yomu-shell/gen/android/app/tauri.properties
     nix develop .#android --command bash -c \
-      "cd crates/yomu-shell && cargo tauri android build --apk --target aarch64 --config '{\"version\":\"$version\"}'"
+      "cd crates/yomu-shell && CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS='-C strip=symbols' cargo tauri android build --apk --target aarch64 --config '{\"version\":\"$version\"}'"
 
 fmt:
     cargo fmt --all
