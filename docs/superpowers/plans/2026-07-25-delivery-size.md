@@ -727,7 +727,22 @@ just apk
 stat -c%s target/aarch64-linux-android/release/libyomu_shell_lib.so
 ```
 
-Expected: ~7.9 MB, and an APK smaller by roughly 1 MB (the `.so` is deflated inside the zip, so the APK saving is well under the raw 2.3 MB).
+Expected: ~7.9 MB, and an APK smaller by the *full* raw saving.
+
+**Corrected by measurement.** This step first predicted "well under the raw
+2.3 MB, because the `.so` is deflated inside the zip". It is not: `unzip -v` on
+the built APK shows `lib/arm64-v8a/libyomu_shell_lib.so` as `Stored`, 0%
+compression — Android keeps native libraries uncompressed so they can be mapped
+straight out of the APK. Every byte stripped is a byte of download, and the
+measured APK drop was 2 622 704 B, the whole thing.
+
+Attribution of that 2 622 704 B, computed afterwards because the commit message
+declined to split it — and note its stated reason was wrong: Tauri embeds the
+frontend **brotli-compressed**, not uncompressed (`wbindgen` appears 3× in the
+dist wasm and 0× in the shipped `.so`, and brotli(dist) is 547 489 B against a
+`.rodata` of 1 495 640 B). Allocated sections went ~7 864 008 → ~7 581 992 B, so
+task 5's smaller wasm accounts for ~282 000 B and **the strip for ~2 341 000 B,
+about 89%** of the drop.
 
 - [ ] **Step 4: Commit**
 

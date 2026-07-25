@@ -376,11 +376,17 @@ apk:
     #!/usr/bin/env bash
     set -euo pipefail
     version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "no version" >&2; exit 1; }
     rm -f crates/<app>-desktop/gen/android/app/tauri.properties
     (cd crates/<app>-web && trunk build --release)
     nix develop .#android --command bash -c \
       "cd crates/<app>-desktop && cargo tauri android build --apk --target aarch64 --config '{\"version\":\"$version\"}'"
 ```
+
+The assertion matters as much as the injection: a `sed` that matches nothing
+yields an empty string, the command substitution still *succeeds*, `set -e` does
+not fire, and the build proceeds with `--config '{"version":""}'` — which is
+exactly the failure the recipe exists to prevent.
 
 The `rm -f` matters: `tauri.properties` is gitignored and keeps whatever version
 last resolved, so a stale one silently mislabels a build. Always verify the
@@ -388,10 +394,50 @@ artifact rather than the config — `aapt2 dump badging <apk>` prints
 `package: name=… versionCode=… versionName=…`, and `apksigner verify
 --print-certs` should show your release key, not `CN=Android Debug`.
 
-**yomu now:** `tauri.conf.json` pins `"version": "2.0.0"` and the workspace is
-also at `2.0.0`, so nothing is wrong *today* — but the drift is unguarded, and
-yomu's `justfile` has no `apk` recipe to inject from, so whatever builds its
-APK needs the same treatment before the next release.
+### The trap next door: don't strip the Android library with a bare `RUSTFLAGS`
+
+Anyone applying §2 and §8 together hits this, and it cost us a build. The APK's
+`libapp_lib.so` ships its symbol table — on yomu, 10 195 528 B on disk against
+7 864 008 B of allocated sections — and Android **stores native libraries
+uncompressed** in the zip (`unzip -v` says `Stored`, 0%), so every one of those
+bytes is a byte of download. `-C strip=symbols` on the Android build alone is a
+~2.3 MB win; do not put it in `[profile.release]`, which also builds the server
+and would cost readable backtraces.
+
+But do not export it as a plain `RUSTFLAGS` in the recipe either. Tauri runs
+`beforeBuildCommand` (`trunk build --release`) *inside* the same invocation, so
+the variable also reaches the wasm build; stripping removes the wasm's
+`target_features` section and wasm-opt — which §2 just turned on — aborts with:
+
+```
+[wasm-validator error] memory.copy operations require bulk memory operations
+```
+
+Scope it to the Android target instead:
+
+```bash
+CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C strip=symbols" \
+  cargo tauri android build --apk --target aarch64 …
+```
+
+**And then verify the artifact, because that scoping is fragile.** That variable
+is the env form of `target.<triple>.rustflags`, and cargo takes rustflags from
+the *first applicable source* rather than merging them — so a `RUSTFLAGS` in the
+caller's environment outranks it entirely, silently, with no error and a
+2.3 MB-larger APK. (Same mechanism as the nixpkgs `cargoSetupHook` hazard: a
+bare `RUSTFLAGS` there silently drops `-Cforce-frame-pointers=yes`.) Assert on
+the shipped library rather than on the environment:
+
+```bash
+unzip -p "$apk" lib/arm64-v8a/libapp_lib.so > "$so"
+readelf -S "$so" | grep -qE '\.symtab($|[^A-Za-z0-9_])' && exit 1
+```
+
+**yomu now:** done. `tauri.conf.json` carries no `"version"`; `just apk` reads
+it from `Cargo.toml`, aborts unless it parses as semver, removes the stale
+`tauri.properties`, builds inside `nix develop .#android` with the per-target
+strip flag, and then fails the build if `.symtab` survived into the APK. The
+measured APK saving was 2 622 704 B, of which the strip is ~89%.
 
 ---
 

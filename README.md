@@ -92,11 +92,11 @@ Git flow, enforced by CI on the long-lived branches:
   target it through pull requests.
 - Releases: bump the workspace version in `Cargo.toml` (the only place it
   lives — `tauri.conf.json` carries no version; `just apk` injects it),
-  merge `develop` into `main`, tag
-  `vX.Y.Z`. The release workflow checks the tag against `Cargo.toml`,
-  then builds and attaches the web bundle. The Android APK is signed
-  locally and attached by hand. The desktop shell is not published as an
-  artifact — it is run from the flake (see Clients above).
+  merge `develop` into `main`, tag `vX.Y.Z`. The release workflow checks
+  the tag against `Cargo.toml`, then builds and attaches the web bundle.
+  The Android APK is signed locally and attached by hand. The desktop
+  shell is not published as an artifact — it is run from the flake (see
+  Clients above).
 
 ## License
 
