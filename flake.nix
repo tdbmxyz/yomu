@@ -179,6 +179,12 @@
       '';
 
       postInstall = ''
+        # yomu-shell is a staticlib/cdylib/rlib because the Android build
+        # needs the first two; buildRustPackage installs whatever it finds,
+        # and the .a alone is five sixths of this output. Only bin/yomu-shell
+        # ever runs on the desktop.
+        rm -f $out/lib/libyomu_shell_lib.a
+
         install -Dm644 crates/yomu-shell/icons/128x128.png \
           $out/share/icons/hicolor/128x128/apps/yomu.png
         install -Dm644 crates/yomu-shell/icons/32x32.png \
