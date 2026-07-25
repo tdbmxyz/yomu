@@ -1,11 +1,11 @@
 # Release build: runs when a semver tag (v*) is pushed on main, builds
-# the web bundle and the portable desktop AppImage with Nix, and
-# attaches them to a GitHub Release.
+# the web bundle with Nix, and attaches it to a GitHub Release.
 #
-# The server is consumed through the Nix flake on the host
-# (`nix build .#yomu-server` or the NixOS module) instead of a prebuilt
-# binary. The Android APK is signed with a keystore that never leaves
-# the developer machine, so it is built and attached manually.
+# The server and the desktop shell are consumed through the Nix flake
+# (`nix build .#yomu-server` or the NixOS module, `nix run
+# .#yomu-desktop`) instead of prebuilt binaries. The Android APK is
+# signed with a keystore that never leaves the developer machine, so it
+# is built and attached manually.
 name: release
 
 on:
@@ -56,17 +56,6 @@ jobs:
           sha256sum "$artifact" > "$artifact.sha256"
           echo "WEB_ARTIFACT=$artifact" >> "$GITHUB_ENV"
 
-      - name: Build desktop AppImage
-        run: |
-          nix bundle --bundler github:ralismark/nix-appimage \
-            .#yomu-desktop -o desktop-bundle
-          version="${GITHUB_REF_NAME#v}"
-          artifact="yomu-desktop-${version}-x86_64.AppImage"
-          cp -L desktop-bundle "$artifact"
-          chmod +x "$artifact"
-          sha256sum "$artifact" > "$artifact.sha256"
-          echo "DESKTOP_ARTIFACT=$artifact" >> "$GITHUB_ENV"
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -74,8 +63,6 @@ jobs:
           files: |
             ${{ env.WEB_ARTIFACT }}
             ${{ env.WEB_ARTIFACT }}.sha256
-            ${{ env.DESKTOP_ARTIFACT }}
-            ${{ env.DESKTOP_ARTIFACT }}.sha256
           body: |
             ## Server
 
@@ -94,18 +81,14 @@ jobs:
 
             ## Desktop
 
-            `yomu-desktop-*.AppImage` is a self-contained x86_64 Linux
-            build of the Tauri shell (WebKitGTK bundled). Make it
-            executable and run it; it asks for your server address on
-            first launch:
+            The desktop shell is distributed through the flake only —
+            there is no binary download. With nix installed:
 
             ```bash
-            chmod +x yomu-desktop-*.AppImage
-            ./yomu-desktop-*.AppImage
+            nix run github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop
             ```
 
-            On NixOS, prefer the flake output instead:
-            `nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop`.
+            It asks for your server address on first launch.
 
             ## Android
 

@@ -63,6 +63,20 @@ site), restart the server.
 First checkout: enter the shell, `cargo generate-lockfile`,
 `git add Cargo.lock`, re-enter (wasm-bindgen-cli pinning, as in chaos).
 
+## Clients
+
+The browser is the primary client: point it at the server. There is no
+prebuilt desktop download — the desktop shell requires nix, and is run
+from the flake:
+
+```console
+$ nix run github:tdbmxyz/yomu#yomu-desktop
+```
+
+It asks for the server address on first launch (or read it from
+`YOMU_SERVER` / `~/.config/yomu/server`). Android is an APK, signed
+locally and attached to a release by hand.
+
 ## Branching & releases
 
 Git flow, enforced by CI on the long-lived branches:
@@ -74,8 +88,9 @@ Git flow, enforced by CI on the long-lived branches:
 - Releases: bump the workspace version (`Cargo.toml` +
   `crates/yomu-shell/tauri.conf.json`), merge `develop` into `main`, tag
   `vX.Y.Z`. The release workflow checks the tag against the manifests,
-  then builds and attaches the web bundle and the desktop AppImage. The
-  Android APK is signed locally and attached by hand.
+  then builds and attaches the web bundle. The Android APK is signed
+  locally and attached by hand. The desktop shell is not published as an
+  artifact — it is run from the flake (see below).
 
 ## License
 

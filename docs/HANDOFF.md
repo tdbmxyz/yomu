@@ -113,7 +113,11 @@ amended: sync paging is by server `seq`, not event id).
    `git+file:///projects/rust/yomu` input in /etc/nixos (commit here, then
    `nix flake update yomu` there). Remaining: chaos dashboard tile.
 6. **Shells (Tauri v2, crates/yomu-shell)**: desktop works (`just shell`,
-   `nix develop .#tauri`; NVIDIA DMABUF workaround is in code). Android
+   `nix develop .#tauri`; NVIDIA DMABUF workaround is in code). Users get
+   the desktop shell from the flake — `nix run
+   github:tdbmxyz/yomu#yomu-desktop`, so it needs nix; releases publish no
+   desktop binary (the AppImage was 1.07 GB, nearly all of it webkitgtk).
+   Android
    works (`nix develop .#android`, then in crates/yomu-shell
    `cargo tauri android build --apk --target aarch64`); gradle project in
    gen/android is committed, release keystore + keystore.properties live
