@@ -187,9 +187,21 @@ yields a page that refuses to boot.
 `opt-level` is decided by measurement, not assumption: build `"z"` and `"s"`,
 record raw and brotli for each, and pick from the numbers. `"z"` is what the
 profile already says and what won on chaos; `"s"` is the fallback if the
-reader feels worse. `panic = "abort"` rides along via `inherits = "release"` —
-a real behavior change, so the app is booted once and the console checked;
-`console_error_panic_hook` still reports panics.
+reader feels worse.
+
+**Measured, 2026-07-25:** baseline 3 698 968 / 685 893 brotli; `"z"` +
+wasm-opt **1 452 288 / 450 159**; `"s"` + wasm-opt 1 818 965 / 507 605. `"z"`
+kept — `"s"` costs +25% raw, +12.7% brotli. wasm-opt alone would have given
+2 774 889 / 613 145, so the profile contributes more than wasm-opt, as the
+playbook predicted.
+
+`panic = "abort"` is set explicitly in the profile, but it is a **no-op on
+`wasm32-unknown-unknown`** — that target's spec already hardcodes
+`"panic-strategy": "abort"`. No unwinding behaviour changes, and a sweep of
+the wasm-compiled crates found nothing depending on unwinding (no
+`catch_unwind`, no `resume_unwind`, no `#[should_panic]`; the only panic
+plumbing is `console_error_panic_hook::set_once()`, and hooks still run under
+abort).
 
 **Verify:** raw and brotli sizes for both levels, in the commit message; the
 app boots and a chapter scrolls in the reader.

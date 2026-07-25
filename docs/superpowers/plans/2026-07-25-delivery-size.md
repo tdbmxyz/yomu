@@ -825,13 +825,27 @@ stat -c%s <the apk>
 
 Mark the table "measured" and keep the original prediction column beside it, so the estimate can be judged against reality rather than quietly replaced.
 
-- [ ] **Step 3: Full verification**
+- [ ] **Step 3: Exercise the reader under the new profile**
+
+The one gap task 5 left: `opt-level = "z"` was chosen on size alone, and the
+reader's per-frame work (pager, continuous strip) was never run under it. The
+geckodriver harness from task 5 already boots the app, so this is ~10 lines
+on top: open a chapter, drive a few hundred `window.scrollBy` steps, and
+record `performance.now()` deltas around the scroll handler (or count long
+tasks). Report a number, not an impression.
+
+Low risk by inspection — the strip's per-frame Rust is a few DOM reads plus
+signal updates, with the expensive work (layout, image decode) on the browser
+side where `opt-level` has no reach — so a bad result here means reconsidering
+`"s"`, not reverting the task.
+
+- [ ] **Step 4: Full verification**
 
 ```bash
 just check && cargo test --workspace --exclude yomu-shell
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-07-25-delivery-size-design.md

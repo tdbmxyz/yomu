@@ -143,13 +143,34 @@ Measured on chaos, 4 771 483 B baseline:
 | both, i.e. `+ [profile.wasm-release]` | **1 878 053** |
 | the above, brotli `-q 11` | **562 892** |
 
+Re-measured on yomu (2026-07-25), and the ordering holds — the profile
+contributes more than wasm-opt does, on a different codebase:
+
+| step | raw | brotli -q 11 |
+| --- | --- | --- |
+| baseline (`opt-level = 3`) | 3 698 968 | 685 893 |
+| `wasm-opt -Oz --strip-debug --strip-producers` alone | 2 774 889 | 613 145 |
+| both | **1 452 288** | **450 159** |
+| `opt-level = "s"` instead of `"z"`, both | 1 818 965 | 507 605 |
+
+wasm-opt bought 924 KB, the profile another 1 323 KB. `"s"` cost +25% raw and
++12.7% brotli over `"z"` — far outside the band where the extra inlining would
+be worth it, so yomu ships `"z"`.
+
 `opt-level = "z"` did more than twice what wasm-opt did. It is also the change
 most likely to cost runtime speed — `"s"` is the middle setting if the UI feels
 sluggish — but on chaos nothing was perceptibly slower.
 
-`panic = "abort"` rides along via `inherits = "release"`. It is a real
-behavior change (no unwinding), so boot the app once and confirm the console is
-clean; `console_error_panic_hook` still reports panics.
+`panic = "abort"` is **not** a behavior change on `wasm32-unknown-unknown`:
+that target's spec already hardcodes `"panic-strategy": "abort"`, so setting it
+in the profile changes nothing. (Measured on yomu 2026-07-25 via `rustc --print
+target-spec-json`.) The line is harmless and worth keeping for a future
+non-wasm target, but do not spend a verification pass on unwinding — and if a
+profile sets it explicitly, say so rather than claiming it "rides along via
+`inherits`".
+
+What *is* worth checking once: that `console_error_panic_hook` still installs.
+A panic hook is invoked under abort, so panic reporting survives.
 
 **yomu now:** no `rel="rust"` link, so the profile is unused and the wasm is
 unstripped. Extrapolating from chaos's ratios, 3 604 377 B should land near
