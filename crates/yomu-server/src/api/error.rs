@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Response};
 use yomu_domain::ApiErrorBody;
 
 use crate::db::DbError;
+use crate::streamer::ScanError;
 use crate::sync::SyncError;
 use yomu_source::SourceError;
 
@@ -28,6 +29,24 @@ impl From<DbError> for ApiError {
                 ApiError::Internal("internal error".into())
             }
         }
+    }
+}
+
+impl From<ScanError> for ApiError {
+    fn from(err: ScanError) -> Self {
+        match err {
+            ScanError::Db(e) => e.into(),
+        }
+    }
+}
+
+/// Map a *streamer* (local-file) failure. Local files have no upstream:
+/// a missing or unreadable path surfaces as `Parse` and means "not here"
+/// — a 404, not the 502 the blanket [`SourceError`] conversion would give.
+pub(crate) fn local_file_err(err: SourceError) -> ApiError {
+    match err {
+        SourceError::Parse(_) => ApiError::NotFound,
+        other => other.into(),
     }
 }
 

@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use yomu_domain::{AddMangaRequest, MangaSummary};
+use yomu_domain::{AddPublicationRequest, MangaSummary};
 
 use crate::use_client;
 
@@ -180,14 +180,17 @@ fn SummaryCard(
 
     let add = move |auto_download: bool| {
         let client = client.clone();
-        let req = AddMangaRequest {
+        let req = AddPublicationRequest {
             source_id: source.clone(),
             source_key: hit.key.clone(),
             auto_download,
         };
         spawn_local(async move {
-            match client.add_manga(&req).await {
-                Ok(manga) => status.set(Some(format!("Added \"{}\" to the library", manga.title))),
+            match client.add_publication(&req).await {
+                Ok(publication) => status.set(Some(format!(
+                    "Added \"{}\" to the library",
+                    publication.title
+                ))),
                 Err(err) => status.set(Some(format!("Add failed: {err}"))),
             }
         });

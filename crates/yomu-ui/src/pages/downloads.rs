@@ -1,6 +1,11 @@
-//! Downloads: the server-side download queue (pending / downloading /
-//! failed) with live per-page progress and retry/dismiss actions, plus a
-//! server-vs-device storage overview. Polls while open.
+//! Downloads: what is moving right now (device saves and the server's
+//! current fetch) on top, then the queues behind it — chapters waiting to
+//! be pulled to this device, then the server's pending / failed work, with
+//! retry and dismiss actions. Polls while open.
+//!
+//! Ordering is "what happens next, first": the server list arrives in the
+//! downloader's own order (see `Db::download_queue`) and the pull queue is
+//! already oldest-first, so neither is re-sorted here.
 
 use std::time::Duration;
 
@@ -109,9 +114,11 @@ fn DownloadsView(
         }
     };
 
-    let pending_ids: Vec<_> = pending.iter().map(|e| e.chapter_id).collect();
-    let failed_ids: Vec<_> = failed.iter().map(|e| e.chapter_id).collect();
-    let empty = downloading.is_empty() && pending.is_empty() && failed.is_empty();
+    let pending_ids: Vec<_> = pending.iter().map(|e| e.unit_id).collect();
+    let failed_ids: Vec<_> = failed.iter().map(|e| e.unit_id).collect();
+    // The server's in-flight fetch joins the device saves in the top block,
+    // so it is rendered from a stored copy rather than in place.
+    let server_active = StoredValue::new(downloading);
 
     let cancel_pending = {
         let action = action.clone();
@@ -143,31 +150,61 @@ fn DownloadsView(
             </div>
         </div>
 
-        <h3 class="shelf-title downloads-section">"Server"</h3>
-        {empty
-            .then(|| {
-                view! { <p class="muted">"Nothing in the server download queue."</p> }
-            })}
-
-        {(!downloading.is_empty())
-            .then(|| {
-                view! {
-                    <h3 class="shelf-title">"Downloading"</h3>
-                    <ul class="download-list">
-                        {downloading
-                            .into_iter()
-                            .map(|entry| view! { <QueueRow entry/> })
-                            .collect_view()}
-                    </ul>
+        // What is actually moving: this device's save first (it is the one
+        // the user is waiting on), then the server's current fetch.
+        {move || {
+            let device = local.with(device_rows);
+            let server = server_active.get_value();
+            if device.is_empty() && server.is_empty() {
+                return view! {
+                    <h3 class="shelf-title downloads-section">"In progress"</h3>
+                    <p class="muted">"Nothing downloading right now."</p>
                 }
-            })}
+                    .into_any();
+            }
+            view! {
+                <h3 class="shelf-title downloads-section">"In progress"</h3>
+                <ul class="download-list">
+                    {device
+                        .into_iter()
+                        .map(|(id, d)| view! { <LocalRow id d local/> })
+                        .collect_view()}
+                    {server
+                        .into_iter()
+                        .map(|entry| view! { <QueueRow entry where_server=true/> })
+                        .collect_view()}
+                </ul>
+            }
+                .into_any()
+        }}
+
+        // Queued for this device: waiting on the server to finish its copy.
+        {move || {
+            let queued = pull.get();
+            (!queued.is_empty())
+                .then(|| {
+                    view! {
+                        <h3 class="shelf-title downloads-section">
+                            {format!("Waiting for server download ({})", queued.len())}
+                        </h3>
+                        <ul class="download-list">
+                            {queued
+                                .into_iter()
+                                .map(|it| view! { <WaitingRow it pull/> })
+                                .collect_view()}
+                        </ul>
+                    }
+                })
+        }}
 
         {(!pending.is_empty())
             .then(|| {
                 let cancel_pending = cancel_pending.clone();
                 view! {
                     <div class="download-group-head">
-                        <h3 class="shelf-title">{format!("Pending ({})", pending.len())}</h3>
+                        <h3 class="shelf-title downloads-section">
+                            {format!("Server · Pending ({})", pending.len())}
+                        </h3>
                         <button class="button" on:click=cancel_pending>"Cancel pending"</button>
                     </div>
                     <ul class="download-list">
@@ -185,7 +222,9 @@ fn DownloadsView(
                 let clear_failed = clear_failed.clone();
                 view! {
                     <div class="download-group-head">
-                        <h3 class="shelf-title">{format!("Failed ({})", failed.len())}</h3>
+                        <h3 class="shelf-title downloads-section">
+                            {format!("Server · Failed ({})", failed.len())}
+                        </h3>
                         <button class="button" on:click=retry_all>"Retry all"</button>
                         <button class="button" on:click=clear_failed>"Clear failed"</button>
                     </div>
@@ -198,52 +237,80 @@ fn DownloadsView(
                 }
             })}
 
-        <h3 class="shelf-title downloads-section">"On this device"</h3>
-        {move || {
-            let queued = pull.get();
-            (!queued.is_empty())
-                .then(|| {
-                    view! {
-                        <p class="muted downloads-waiting-head">
-                            "Waiting for server download"
-                        </p>
-                        <ul class="download-list">
-                            {queued
-                                .into_iter()
-                                .map(|it| view! { <WaitingRow it pull/> })
-                                .collect_view()}
-                        </ul>
-                    }
-                })
-        }}
-        {move || {
-            let items: Vec<_> = local.with(|m| {
-                let mut v: Vec<_> = m.iter().map(|(id, d)| (*id, d.clone())).collect();
-                v.sort_by(|a, b| a.1.manga_title.cmp(&b.1.manga_title));
-                v
-            });
-            if items.is_empty() {
-                (pull.get().is_empty())
-                    .then(|| {
-                        view! {
-                            <p class="muted">
-                                {format!("{device_count} chapters on this device")}
-                            </p>
-                        }
-                    })
-                    .into_any()
-            } else {
-                view! {
-                    <ul class="download-list">
-                        {items
-                            .into_iter()
-                            .map(|(id, d)| view! { <LocalRow id d local/> })
-                            .collect_view()}
-                    </ul>
-                }
-                    .into_any()
-            }
-        }}
+    }
+}
+
+/// In-flight device saves, ordered for display: a save that just failed
+/// stays at the bottom (it lingers ~1.5s before the row disappears) so it
+/// never pushes live progress out of view; the rest go by title, then
+/// chapter, so a multi-chapter pull reads as one stable list.
+fn device_rows(
+    map: &std::collections::HashMap<uuid::Uuid, crate::LocalDownload>,
+) -> Vec<(uuid::Uuid, crate::LocalDownload)> {
+    let mut v: Vec<_> = map.iter().map(|(id, d)| (*id, d.clone())).collect();
+    v.sort_by(|a, b| {
+        a.1.failed
+            .cmp(&b.1.failed)
+            .then_with(|| a.1.manga_title.cmp(&b.1.manga_title))
+            .then_with(|| a.1.chapter_title.cmp(&b.1.chapter_title))
+    });
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_rows;
+    use crate::LocalDownload;
+    use uuid::Uuid;
+
+    fn save(title: &str, chapter: &str, failed: bool) -> LocalDownload {
+        LocalDownload {
+            manga_id: Uuid::nil(),
+            manga_title: title.into(),
+            chapter_title: chapter.into(),
+            done: 0,
+            total: 10,
+            failed,
+            cancel_requested: false,
+        }
+    }
+
+    #[test]
+    fn device_rows_keep_live_saves_above_a_failed_one() {
+        let map = std::collections::HashMap::from([
+            (Uuid::from_u128(1), save("Zeta", "Chapter 2", false)),
+            (Uuid::from_u128(2), save("Alpha", "Chapter 9", true)),
+            (Uuid::from_u128(3), save("Alpha", "Chapter 1", false)),
+            (Uuid::from_u128(4), save("Alpha", "Chapter 2", false)),
+        ]);
+        let rows: Vec<_> = device_rows(&map)
+            .into_iter()
+            .map(|(_, d)| (d.manga_title, d.chapter_title))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Alpha".to_string(), "Chapter 1".to_string()),
+                ("Alpha".to_string(), "Chapter 2".to_string()),
+                ("Zeta".to_string(), "Chapter 2".to_string()),
+                // The failed save sinks to the bottom of the block.
+                ("Alpha".to_string(), "Chapter 9".to_string()),
+            ]
+        );
+    }
+
+    /// A HashMap iterates in an arbitrary order; the display order must not
+    /// depend on it, or rows would shuffle under the user between polls.
+    #[test]
+    fn device_rows_are_stable_regardless_of_map_order() {
+        let entries = [
+            (Uuid::from_u128(10), save("B", "Chapter 1", false)),
+            (Uuid::from_u128(11), save("A", "Chapter 1", false)),
+            (Uuid::from_u128(12), save("C", "Chapter 1", false)),
+        ];
+        let forward: std::collections::HashMap<_, _> = entries.iter().cloned().collect();
+        let backward: std::collections::HashMap<_, _> = entries.iter().rev().cloned().collect();
+        assert_eq!(device_rows(&forward), device_rows(&backward));
     }
 }
 
@@ -270,7 +337,14 @@ fn WaitingRow(it: crate::PullItem, pull: crate::PullQueue) -> impl IntoView {
 /// One queue row: manga · chapter, plus a progress bar (downloading) or the
 /// error text (failed).
 #[component]
-fn QueueRow(entry: DownloadQueueEntry) -> impl IntoView {
+fn QueueRow(
+    entry: DownloadQueueEntry,
+    /// Tag the row as the server's work. Only set in the mixed "In
+    /// progress" block, where device and server rows sit side by side; the
+    /// server-only queues below say so in their heading.
+    #[prop(default = false)]
+    where_server: bool,
+) -> impl IntoView {
     let progress = entry.progress.clone();
     let error = match &entry.state {
         DownloadState::Failed { reason, .. } => Some(reason.clone()),
@@ -278,10 +352,13 @@ fn QueueRow(entry: DownloadQueueEntry) -> impl IntoView {
     };
     view! {
         <li class="download-row">
-            <a class="download-title" href=format!("/manga/{}", entry.manga_id)>
-                <strong>{entry.manga_title}</strong>
-                " · " {entry.chapter_title}
-            </a>
+            <div class="download-row-head">
+                <a class="download-title" href=format!("/manga/{}", entry.publication_id)>
+                    <strong>{entry.publication_title}</strong>
+                    " · " {entry.unit_title}
+                </a>
+                {where_server.then(|| view! { <span class="download-where">"server"</span> })}
+            </div>
             {progress
                 .map(|p| {
                     let pct = if p.total > 0 {
@@ -331,6 +408,7 @@ fn LocalRow(
                     <strong>{d.manga_title}</strong>
                     " · " {d.chapter_title}
                 </a>
+                <span class="download-where">"device"</span>
                 <button class="button" on:click=cancel disabled=cancelling>
                     "Cancel"
                 </button>

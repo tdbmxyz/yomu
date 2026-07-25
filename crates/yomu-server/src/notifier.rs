@@ -1,7 +1,7 @@
 //! Push notifications for new chapters, POSTed to an ntfy topic
 //! (fire-and-forget: an unreachable ntfy must never fail a sync).
 
-use yomu_domain::Chapter;
+use yomu_domain::ReadingUnit;
 
 use crate::config::NotifyConfig;
 
@@ -18,27 +18,27 @@ impl Notifier {
         }
     }
 
-    /// One push per manga per sync round. Failures are logged, never
+    /// One push per publication per sync round. Failures are logged, never
     /// returned — a broken notifier must not stop the update sweep.
-    pub async fn notify_new_chapters(&self, manga_title: &str, chapters: &[Chapter]) {
+    pub async fn notify_new_units(&self, title: &str, units: &[ReadingUnit]) {
         let Some(config) = &self.config else {
             return;
         };
-        if chapters.is_empty() {
+        if units.is_empty() {
             return;
         }
         let mut request = self
             .http
             .post(config.url.as_str())
             .header("X-Tags", "books");
-        // HTTP header values are latin-1; a manga title beyond that moves
+        // HTTP header values are latin-1; a title beyond that moves
         // into the body instead of the X-Title header.
-        match reqwest::header::HeaderValue::from_str(manga_title) {
-            Ok(title) => {
-                request = request.header("X-Title", title).body(message(chapters));
+        match reqwest::header::HeaderValue::from_str(title) {
+            Ok(header) => {
+                request = request.header("X-Title", header).body(message(units));
             }
             Err(_) => {
-                request = request.body(format!("{manga_title}\n{}", message(chapters)));
+                request = request.body(format!("{title}\n{}", message(units)));
             }
         }
         if let Some(token) = &config.token {
@@ -56,8 +56,8 @@ impl Notifier {
 
 /// Body: single chapter title, or "N new chapters — first … last" in the
 /// order the listing produced them.
-fn message(chapters: &[Chapter]) -> String {
-    match chapters {
+fn message(units: &[ReadingUnit]) -> String {
+    match units {
         [one] => one.title.clone(),
         many => format!(
             "{} new chapters — {} … {}",
@@ -75,10 +75,10 @@ mod tests {
     use uuid::Uuid;
     use yomu_domain::DownloadState;
 
-    fn chapter(title: &str) -> Chapter {
-        Chapter {
+    fn chapter(title: &str) -> ReadingUnit {
+        ReadingUnit {
             id: Uuid::now_v7(),
-            manga_id: Uuid::now_v7(),
+            publication_id: Uuid::now_v7(),
             source_key: format!("k-{title}"),
             title: title.into(),
             number: None,
@@ -145,11 +145,11 @@ mod tests {
             token: Some("tk_test".into()),
         }));
         notifier
-            .notify_new_chapters("Some Manga", &[chapter("Chapter 5")])
+            .notify_new_units("Some Publication", &[chapter("Chapter 5")])
             .await;
 
         let (title, tags, auth, body) = seen.lock().unwrap().clone().expect("request received");
-        assert_eq!(title, "Some Manga");
+        assert_eq!(title, "Some Publication");
         assert_eq!(tags, "books");
         assert_eq!(auth, "Bearer tk_test");
         assert_eq!(body, "Chapter 5");
@@ -159,7 +159,7 @@ mod tests {
     async fn unconfigured_notifier_is_a_noop() {
         // Must return without any network activity or panic.
         Notifier::new(None)
-            .notify_new_chapters("Some Manga", &[chapter("Chapter 5")])
+            .notify_new_units("Some Publication", &[chapter("Chapter 5")])
             .await;
     }
 }

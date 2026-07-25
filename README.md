@@ -33,8 +33,8 @@ rationale (ADRs there apply; yomu-specific decisions in `docs/adr/`).
 | Crate | Role |
 | --- | --- |
 | `yomu-domain` | Types + API contract + progress journal merge rule |
-| `yomu-source` | `Source` trait + selector scan-site impl + local source |
-| `yomu-server` | Axum backend: library, downloader, updater, page serving |
+| `yomu-source` | `Source` trait + selector scan-site impl |
+| `yomu-server` | Axum backend: library, downloader, updater, page serving, streamer (local books dir) |
 | `yomu-client` | Typed API client (native & wasm) |
 | `yomu-ui` | Leptos pages: library, search, manga, reader |
 | `yomu-web` | Trunk entrypoint |

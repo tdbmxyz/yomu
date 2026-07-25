@@ -17,6 +17,8 @@ pub struct Caps {
     pub local_tier: bool,
     /// Shell only (web can't reliably evict its cache).
     pub local_remove: bool,
+    /// False for LocalFile publications: their content *is* the server copy.
+    pub server_downloads: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +59,7 @@ pub fn menu_actions(states: &[ChapterState], caps: Caps) -> Vec<Action> {
     let any_server = states.iter().any(|s| s.on_server);
     let any_server_not_local = states.iter().any(|s| s.on_server && !s.on_device);
     let any_local = states.iter().any(|s| s.on_device);
-    if caps.online && any_missing_server {
+    if caps.online && caps.server_downloads && any_missing_server {
         out.push(Action::DownloadServer);
         if caps.local_tier {
             out.push(Action::DownloadBoth);
@@ -66,7 +68,7 @@ pub fn menu_actions(states: &[ChapterState], caps: Caps) -> Vec<Action> {
     if caps.online && caps.local_tier && any_server_not_local {
         out.push(Action::DownloadLocal);
     }
-    if caps.online && any_server {
+    if caps.online && caps.server_downloads && any_server {
         out.push(Action::RemoveServer);
     }
     if caps.local_remove && any_local {
@@ -103,20 +105,41 @@ mod tests {
         online: true,
         local_tier: true,
         local_remove: true,
+        server_downloads: true,
     };
     const WEB_ONLINE: Caps = Caps {
         online: true,
         local_tier: true,
         local_remove: false,
+        server_downloads: true,
     };
     const APP_OFFLINE: Caps = Caps {
         online: false,
         local_tier: true,
         local_remove: true,
+        server_downloads: true,
     };
 
     fn has(actions: &[Action], a: Action) -> bool {
         actions.contains(&a)
+    }
+
+    #[test]
+    fn local_file_publications_offer_no_server_actions() {
+        // LocalFile units present as on_server (content is inherently there).
+        let caps = Caps {
+            online: true,
+            local_tier: true,
+            local_remove: true,
+            server_downloads: false,
+        };
+        let a = menu_actions(&[S10], caps);
+        assert!(
+            has(&a, Action::DownloadLocal),
+            "device save must stay available"
+        );
+        assert!(!has(&a, Action::RemoveServer));
+        assert!(!has(&a, Action::DownloadServer) && !has(&a, Action::DownloadBoth));
     }
 
     #[test]

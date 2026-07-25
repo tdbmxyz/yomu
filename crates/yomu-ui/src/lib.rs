@@ -44,10 +44,87 @@ pub fn use_connectivity() -> RwSignal<Connectivity> {
     use_context().expect("Connectivity provided by App")
 }
 
+/// How long to wait for a health probe to land before assuming its task
+/// will never resume. The client's own deadline is 3s (`HEALTH_TIMEOUT`),
+/// enforced with an AbortController — but a suspended Android WebView can
+/// freeze the task *and* its abort timer, so this is the outer bound.
+const PROBE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Serializes the health probe behind a single in-flight slot, so the
+/// badge, the resume check and the `online` event can all ask for one
+/// without stampeding the server.
+///
+/// A probe that never lands used to wedge the app: `Checking` is sticky,
+/// the badge refused to retry from it, and only killing the app cleared it.
+/// The watchdog closes that hole — the slot is released and the verdict
+/// falls back to `Offline`, so the next tap (or simply switching back to
+/// the app) tries again. A late answer from a superseded probe is dropped
+/// on the generation counter.
+#[derive(Clone, Copy)]
+pub(crate) struct Probe {
+    conn: RwSignal<Connectivity>,
+    in_flight: RwSignal<bool>,
+    generation: RwSignal<u32>,
+}
+
+impl Probe {
+    fn new(conn: RwSignal<Connectivity>) -> Self {
+        Self {
+            conn,
+            in_flight: RwSignal::new(false),
+            generation: RwSignal::new(0),
+        }
+    }
+
+    /// Run one probe unless another is genuinely in flight.
+    fn spawn(self, client: YomuClient) {
+        if self.in_flight.get_untracked() {
+            return;
+        }
+        let generation = self.generation.get_untracked().wrapping_add(1);
+        self.generation.set(generation);
+        self.in_flight.set(true);
+        self.conn.set(Connectivity::Checking);
+
+        set_timeout(
+            move || {
+                if self.generation.get_untracked() == generation && self.in_flight.get_untracked() {
+                    self.settle(generation, false);
+                }
+            },
+            PROBE_WATCHDOG,
+        );
+
+        spawn_local(async move {
+            let reachable = client.health().await.is_ok();
+            if reachable {
+                offline::mark_server_seen(client.base().as_str());
+            }
+            self.settle(generation, reachable);
+        });
+    }
+
+    fn settle(self, generation: u32, reachable: bool) {
+        if self.generation.get_untracked() != generation {
+            return; // superseded by a newer probe; its verdict is the one that counts
+        }
+        self.in_flight.set(false);
+        self.conn.set(if reachable {
+            Connectivity::Online
+        } else {
+            Connectivity::Offline
+        });
+    }
+}
+
+pub(crate) fn use_probe() -> Probe {
+    use_context().expect("Probe provided by App")
+}
+
 /// One in-flight local (device) save, shown on the manga page ring and
 /// in the Downloads tab's device section. Keyed by chapter id in the
 /// `LocalDownloads` map.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct LocalDownload {
     pub manga_id: uuid::Uuid,
     pub manga_title: String,
@@ -94,6 +171,8 @@ pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
     let conn = RwSignal::new(Connectivity::Checking);
     provide_context(conn);
+    let probe = Probe::new(conn);
+    provide_context(probe);
     let local_downloads: LocalDownloads = RwSignal::new(std::collections::HashMap::new());
     provide_context(local_downloads);
     let device_marks: DeviceMarks = RwSignal::new(offline::device_chapters());
@@ -120,22 +199,42 @@ pub fn App(config: AppConfig) -> impl IntoView {
             offline::flush_marks(&client).await;
         });
     });
-    // The OS says a network came back: one free probe. This is the only
-    // automatic recovery path — everything else is the manual badge.
+    // The OS says a network came back: one free probe.
     let probe_client = YomuClient::new(config.api_base.clone());
     let online_handle = window_event_listener(leptos::ev::online, move |_| {
-        if conn.get_untracked() == Connectivity::Online {
-            return;
+        if conn.get_untracked() != Connectivity::Online {
+            probe.spawn(probe_client.clone());
         }
-        let client = probe_client.clone();
-        spawn_local(async move {
-            if client.health().await.is_ok() {
-                offline::mark_server_seen(client.base().as_str());
-                conn.set(Connectivity::Online);
-            }
-        });
     });
     on_cleanup(move || online_handle.remove());
+
+    // Coming back to the app: probe unless we already know we're online.
+    //
+    // This is the recovery path that matters on a phone. `online` never
+    // fires for a VPN that dozed with the app (the OS network never
+    // changed), so before this the only way back was tapping the badge —
+    // and a probe frozen mid-suspend could leave a `Checking` no tap could
+    // clear. Returning to the app now always re-decides.
+    //
+    // Bound on the document, where `visibilitychange` is dispatched, rather
+    // than relying on it bubbling to the window.
+    let resume_client = YomuClient::new(config.api_base.clone());
+    if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+        let on_visible = leptos::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
+            if offline::document_hidden() {
+                return;
+            }
+            if offline::should_probe_on_resume(conn.get_untracked()) {
+                probe.spawn(resume_client.clone());
+            }
+        });
+        use leptos::wasm_bindgen::JsCast;
+        let _ = document.add_event_listener_with_callback(
+            "visibilitychange",
+            on_visible.as_ref().unchecked_ref(),
+        );
+        on_visible.forget(); // lives for the whole app, like the pull driver's tick
+    }
 
     // Shell update notifications: poll the server's updates feed while
     // the app is alive (see notify.rs; Android also polls app-off via
@@ -228,6 +327,26 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
     let conn = use_connectivity();
     let client = use_client();
     let base = client.base().to_string();
+    // Same watchdog as `Probe`, for the same reason: a boot probe that never
+    // lands must not leave the app on "Connecting…" with no way out but a
+    // force-restart. A server we have reached before opens the gate onto
+    // the cached library; one we never have gets the connect form.
+    {
+        let base = base.clone();
+        set_timeout(
+            move || {
+                if gate.get_untracked() == GateState::Checking {
+                    conn.set(Connectivity::Offline);
+                    gate.set(if offline::server_seen(&base) {
+                        GateState::Ready
+                    } else {
+                        GateState::Unreachable
+                    });
+                }
+            },
+            PROBE_WATCHDOG,
+        );
+    }
     spawn_local(async move {
         match client.health().await {
             Ok(_) => {
@@ -281,29 +400,28 @@ fn OfflineBadge() -> impl IntoView {
     // One "still offline" flash after a failed retry, cleared on a timer.
     let flash = RwSignal::new(false);
     let client = use_client();
+    let probe = use_probe();
+    // Tappable from `Checking` too: that state is not proof a probe is
+    // still alive (see `Probe`), and a tap that does nothing reads as a
+    // broken app.
+    // Armed by a tap only: the flash answers the user's retry, so a probe
+    // they didn't ask for (boot, resume) must not produce one.
+    let armed = RwSignal::new(false);
     let retry = move |_| {
-        if conn.get_untracked() != Connectivity::Offline {
-            return; // probe already in flight
-        }
-        conn.set(Connectivity::Checking);
-        let client = client.clone();
-        spawn_local(async move {
-            match client.health().await {
-                Ok(_) => {
-                    offline::mark_server_seen(client.base().as_str());
-                    conn.set(Connectivity::Online);
-                }
-                Err(_) => {
-                    conn.set(Connectivity::Offline);
-                    flash.set(true);
-                    set_timeout(
-                        move || flash.set(false),
-                        std::time::Duration::from_millis(1800),
-                    );
-                }
-            }
-        });
+        armed.set(true);
+        flash.set(false);
+        probe.spawn(client.clone());
     };
+    Effect::new(move |_| {
+        if conn.get() == Connectivity::Offline && armed.get_untracked() {
+            armed.set(false);
+            flash.set(true);
+            set_timeout(
+                move || flash.set(false),
+                std::time::Duration::from_millis(1800),
+            );
+        }
+    });
 
     view! {
         {move || {

@@ -9,9 +9,11 @@ is specific to yomu.
 ```
 Source (trait): search / manga / pages / image
    └── SelectorSource — driven by a TOML spec (CSS selectors)
-   └── LocalSource — series on the server's own disk (built-in "local")
    └── (future) native impls for API-based sites
 ```
+
+Files on the server's own disk are not a source: the server's streamer
+scans them straight into the library (next section).
 
 - A scan site = one TOML file in `sources_dir` (`selector mini-syntax:
   `css selector[@attr]`, `{base}`/`{query}` templates, per-source rate limit
@@ -25,24 +27,37 @@ Source (trait): search / manga / pages / image
 - Parsing is pure (`parse_search`/`parse_manga`/`parse_pages`), unit-tested
   against fixture HTML; fetching adds throttling on top.
 
-### Local source (Suwayomi-style)
+### Streamer (local books dir)
 
-Series already on the server's disk, enabled by default under
-`local.dir` (config `[local]`):
+Files already on the server's disk are library entries, not a source
+(they were one in 1.x — the built-in "local" source; migration 0011
+renames manga → publications / chapters → reading_units, splits the
+origin into source columns vs `file_path`, and converts the old local
+rows in place, ids untouched). The streamer watches the dir configured
+under `books.dir` (`[books]`; the legacy `[local]` section name still
+works) and scans it on startup, on an interval, and on demand via
+`POST /api/v1/library/rescan`:
 
 ```
-local/
-  Solo Farming in the Tower/
-    cover.jpg               (optional; else first page of first chapter)
-    details.json            (optional {"title", "description"})
-    Chapter 1/  001.png …   (directory of images)
-    Chapter 2.cbz           (zip archive of images)
+books/
+  Solo Farming in the Tower/    (series → one Publication, units inside)
+    cover.jpg                   (optional; else first page of first unit)
+    details.json                (optional {"title", "description"})
+    Chapter 1/  001.png …       (directory of images)
+    Chapter 2.cbz               (zip archive of images)
+  One Shot.cbz                  (root-level archive or loose image dir
+  Loose Pages/  001.png …        → single-unit publication; cover is the
+                                 first page)
 ```
 
-Keys are directory-relative paths, validated against escaping the local
-dir; page URLs use a `local:` scheme only this source resolves. Chapter
-numbers are parsed from directory names; "download to server" for local
-chapters is pointless but harmless (it copies the files).
+A scan upserts publications and their reading units, feeds the updates
+feed (and ntfy) for new units in known publications, flags vanished
+files with `missing_since` instead of deleting anything, and self-heals
+unambiguous renames (a new path whose title matches exactly one missing
+publication re-points that row, so ids and progress survive). Keys are
+dir-relative paths, validated against escaping the books dir; page and
+cover URLs use the 1.x-compatible `local:` scheme only the streamer
+resolves.
 
 ## Reading paths
 

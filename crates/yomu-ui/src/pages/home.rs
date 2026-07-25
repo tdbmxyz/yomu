@@ -3,7 +3,7 @@
 //! lives on the Library tab.
 
 use leptos::prelude::*;
-use yomu_domain::MangaWithPosition;
+use yomu_domain::PublicationWithLocator;
 
 use crate::offline;
 use crate::use_client;
@@ -32,7 +32,7 @@ pub fn Home() -> impl IntoView {
         let sweep_client = client.clone();
         Effect::new(move |_| {
             if let Some(Ok(entries)) = library.get() {
-                let ids = entries.iter().map(|entry| entry.manga.id).collect();
+                let ids = entries.iter().map(|entry| entry.publication.id).collect();
                 crate::cover::sweep_device_covers(conn, &sweep_client, ids);
             }
         });
@@ -58,29 +58,29 @@ pub fn Home() -> impl IntoView {
                 Some(Ok(list)) => {
                     // Finished titles (nothing unread) drop off — there is
                     // nothing to continue; they return when a new chapter lands.
-                    let mut resume: Vec<MangaWithPosition> = list
+                    let mut resume: Vec<PublicationWithLocator> = list
                         .iter()
-                        .filter(|e| e.position.is_some() && e.unread_count > 0)
+                        .filter(|e| e.locator.is_some() && e.unread_count > 0)
                         .cloned()
                         .collect();
                     resume.sort_by(|a, b| {
-                        let at = |e: &MangaWithPosition| e.position.as_ref().map(|p| p.at);
+                        let at = |e: &PublicationWithLocator| e.locator.as_ref().map(|p| p.at);
                         at(b).cmp(&at(a))
                     });
                     resume.truncate(12);
                     let resume_cards: Vec<AnyView> = resume
                         .into_iter()
                         .map(|entry| {
-                            let position = entry.position.clone().expect("filtered");
+                            let locator = entry.locator.clone().expect("filtered");
                             let subtitle = entry
-                                .position_chapter_title
+                                .locator_unit_title
                                 .clone()
-                                .map(|t| format!("{t} · p. {}", position.page + 1))
-                                .unwrap_or_else(|| format!("p. {}", position.page + 1));
+                                .map(|t| format!("{t} · p. {}", locator.page() + 1))
+                                .unwrap_or_else(|| format!("p. {}", locator.page() + 1));
                             view! {
                                 <ShelfCard
                                     entry=entry
-                                    href_chapter=Some((position.chapter_id, position.page))
+                                    href_chapter=Some((locator.unit_id, locator.page()))
                                     subtitle=subtitle
                                     badge=None
                                 />
@@ -89,9 +89,9 @@ pub fn Home() -> impl IntoView {
                         })
                         .collect();
 
-                    let mut fresh: Vec<MangaWithPosition> =
+                    let mut fresh: Vec<PublicationWithLocator> =
                         list.iter().filter(|e| e.unread_count > 0).cloned().collect();
-                    fresh.sort_by_key(|e| std::cmp::Reverse(e.latest_chapter_at));
+                    fresh.sort_by_key(|e| std::cmp::Reverse(e.latest_unit_at));
                     fresh.truncate(12);
                     let fresh_cards: Vec<AnyView> = fresh
                         .into_iter()
@@ -99,8 +99,8 @@ pub fn Home() -> impl IntoView {
                             let badge = format!("+{}", entry.unread_count);
                             let subtitle = format!(
                                 "{} chapter{}",
-                                entry.chapter_count,
-                                if entry.chapter_count == 1 { "" } else { "s" },
+                                entry.unit_count,
+                                if entry.unit_count == 1 { "" } else { "s" },
                             );
                             view! {
                                 <ShelfCard
@@ -117,7 +117,7 @@ pub fn Home() -> impl IntoView {
                     let marks = offline::device_manga();
                     let device_cards: Vec<AnyView> = list
                         .iter()
-                        .filter_map(|e| marks.get(&e.manga.id).map(|n| (e.clone(), *n)))
+                        .filter_map(|e| marks.get(&e.publication.id).map(|n| (e.clone(), *n)))
                         .map(|(entry, saved)| {
                             let subtitle = format!(
                                 "{saved} chapter{} saved",
@@ -172,12 +172,12 @@ fn shelf(title: &'static str, empty: &'static str, cards: Vec<AnyView>) -> impl 
 /// (resume); otherwise the card opens the manga page.
 #[component]
 fn ShelfCard(
-    entry: MangaWithPosition,
+    entry: PublicationWithLocator,
     href_chapter: Option<(uuid::Uuid, u32)>,
     subtitle: String,
     badge: Option<String>,
 ) -> impl IntoView {
-    let id = entry.manga.id;
+    let id = entry.publication.id;
     let href = match href_chapter {
         Some((chapter, page)) => format!("/read/{id}/{chapter}?page={page}"),
         None => format!("/manga/{id}"),
@@ -188,7 +188,7 @@ fn ShelfCard(
                 <crate::cover::Cover manga_id=id/>
                 {badge.map(|b| view! { <span class="unread-badge">{b}</span> })}
             </span>
-            <span class="manga-title">{entry.manga.title.clone()}</span>
+            <span class="manga-title">{entry.publication.title.clone()}</span>
             <span class="muted manga-meta">{subtitle}</span>
         </a>
     }

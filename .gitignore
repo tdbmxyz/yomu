@@ -6,3 +6,6 @@
 *.db-*
 /data
 /crates/yomu-shell/gen/schemas
+
+# superpowers brainstorming companion
+.superpowers/

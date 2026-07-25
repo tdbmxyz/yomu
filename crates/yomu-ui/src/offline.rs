@@ -14,7 +14,7 @@
 //! - **reader prefs**: paged/vertical mode per manga.
 
 use uuid::Uuid;
-use yomu_domain::{Position, ProgressEvent, PushEventsRequest, merge_position};
+use yomu_domain::{Locations, Locator, ProgressEvent, PushEventsRequest, merge_position};
 
 const OUTBOX_KEY: &str = "yomu-outbox";
 const DEVICE_KEY: &str = "yomu-device-chapters";
@@ -126,20 +126,24 @@ pub async fn flush_outbox(client: &yomu_client::YomuClient) {
 /// Best local knowledge of a manga's position: the (possibly stale) server
 /// answer merged with any unsynced local events — same rule as everywhere.
 pub fn effective_position(
-    manga_id: Uuid,
-    server: Option<Position>,
+    publication_id: Uuid,
+    server: Option<Locator>,
     now_events: &[ProgressEvent],
-) -> Option<Position> {
-    let local = merge_position(now_events.iter().filter(|e| e.manga_id == manga_id));
+) -> Option<Locator> {
+    let local = merge_position(
+        now_events
+            .iter()
+            .filter(|e| e.publication_id == publication_id),
+    );
     match (server, local) {
-        (Some(server), Some(local)) if local.at > server.at => Some(Position {
-            chapter_id: local.chapter_id,
-            page: local.page,
+        (Some(server), Some(local)) if local.at > server.at => Some(Locator {
+            unit_id: local.unit_id,
+            locations: Locations::Page { page: local.page },
             at: local.at,
         }),
-        (None, Some(local)) => Some(Position {
-            chapter_id: local.chapter_id,
-            page: local.page,
+        (None, Some(local)) => Some(Locator {
+            unit_id: local.unit_id,
+            locations: Locations::Page { page: local.page },
             at: local.at,
         }),
         (server, _) => server,
@@ -196,7 +200,7 @@ pub async fn save_chapter_with_progress(
         return Ok(SaveOutcome::Cancelled);
     }
     let meta = client
-        .chapter_pages(chapter_id)
+        .unit_pages(chapter_id)
         .await
         .map_err(|e| e.to_string())?;
     let total = meta.page_count;
@@ -478,10 +482,10 @@ pub async fn flush_marks(client: &yomu_client::YomuClient) {
     let read: Vec<Uuid> = read.into_iter().map(|(id, _)| *id).collect();
     let unread: Vec<Uuid> = unread.into_iter().map(|(id, _)| *id).collect();
     let mut flushed: Vec<Uuid> = Vec::new();
-    if !read.is_empty() && client.mark_chapters(&read, true).await.is_ok() {
+    if !read.is_empty() && client.mark_units(&read, true).await.is_ok() {
         flushed.extend(read);
     }
-    if !unread.is_empty() && client.mark_chapters(&unread, false).await.is_ok() {
+    if !unread.is_empty() && client.mark_units(&unread, false).await.is_ok() {
         flushed.extend(unread);
     }
     if !flushed.is_empty() {
@@ -577,14 +581,42 @@ where
             Ok((value, false))
         }
         Err(err) => {
-            // Only a downgrade, and only from Online: while a probe is
-            // Checking, the probe's own verdict is about to land.
-            if conn.get_untracked() == Connectivity::Online {
+            if should_downgrade(conn.get_untracked(), document_hidden()) {
                 conn.set(Connectivity::Offline);
             }
             cache_get(key).map(|value| (value, true)).ok_or(err)
         }
     }
+}
+
+/// Whether a failed request should flip the whole app to `Offline`.
+///
+/// Only a downgrade, and only from `Online`: while a probe is `Checking`,
+/// the probe's own verdict is about to land. And never while the page is
+/// hidden — a backgrounded app (screen off, app switcher, a phone that
+/// dozed) routinely loses in-flight requests, and on Android the WebView
+/// can freeze a fetch mid-flight. A failure nobody was watching says
+/// nothing about the server, but the resulting `Offline` outlives the
+/// background: it stops the pull driver (see `pull::start`) and puts every
+/// read in cache-first mode until something probes again.
+pub(crate) fn should_downgrade(conn: crate::Connectivity, hidden: bool) -> bool {
+    conn == crate::Connectivity::Online && !hidden
+}
+
+/// Whether returning to the app should re-probe the server: anything but a
+/// live `Online` deserves a fresh look, including a `Checking` left behind
+/// by a probe that was frozen before it could land.
+pub(crate) fn should_probe_on_resume(conn: crate::Connectivity) -> bool {
+    conn != crate::Connectivity::Online
+}
+
+/// `document.hidden`: false when the document object isn't reachable, so a
+/// non-browser context degrades to the old always-downgrade behaviour.
+pub(crate) fn document_hidden() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .map(|d| d.hidden())
+        .unwrap_or(false)
 }
 
 // ---- theme ----
@@ -686,6 +718,32 @@ pub fn set_theme(theme: Theme) {
         let _ = storage.set_item(THEME_KEY, theme.key());
     }
     apply_theme(theme);
+}
+
+const LIBRARY_KIND_KEY: &str = "yomu-library-kind";
+
+/// The library kind this device last viewed; restored on relaunch so a
+/// phone reopens straight into Comics.
+pub fn library_kind() -> yomu_domain::Kind {
+    match storage()
+        .and_then(|s| s.get_item(LIBRARY_KIND_KEY).ok().flatten())
+        .as_deref()
+    {
+        Some("novels") => yomu_domain::Kind::Novels,
+        Some("pdf") => yomu_domain::Kind::Pdf,
+        _ => yomu_domain::Kind::Comics,
+    }
+}
+
+pub fn set_library_kind(kind: yomu_domain::Kind) {
+    let key = match kind {
+        yomu_domain::Kind::Comics => "comics",
+        yomu_domain::Kind::Novels => "novels",
+        yomu_domain::Kind::Pdf => "pdf",
+    };
+    if let Some(storage) = storage() {
+        let _ = storage.set_item(LIBRARY_KIND_KEY, key);
+    }
 }
 
 /// Reflect the theme onto `<html data-theme>`, where the CSS reads it.
@@ -818,5 +876,42 @@ pub fn set_reader_direction(manga_id: Uuid, direction: ReaderDirection) {
             ReaderDirection::Rtl => "rtl",
         };
         let _ = storage.set_item(&format!("{DIR_KEY_PREFIX}{manga_id}"), value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_downgrade, should_probe_on_resume};
+    use crate::Connectivity;
+
+    #[test]
+    fn a_failure_while_visible_takes_the_app_offline() {
+        assert!(should_downgrade(Connectivity::Online, false));
+    }
+
+    /// The reported bug: local saves running, app backgrounded, one poll
+    /// fails against a VPN that is perfectly fine — and the app came back
+    /// "offline", stalling the pull queue.
+    #[test]
+    fn a_failure_while_hidden_does_not() {
+        assert!(!should_downgrade(Connectivity::Online, true));
+    }
+
+    #[test]
+    fn only_online_can_be_downgraded() {
+        for hidden in [false, true] {
+            assert!(!should_downgrade(Connectivity::Offline, hidden));
+            // A probe is mid-flight; its verdict wins, not a racing read's.
+            assert!(!should_downgrade(Connectivity::Checking, hidden));
+        }
+    }
+
+    #[test]
+    fn coming_back_probes_unless_already_online() {
+        assert!(should_probe_on_resume(Connectivity::Offline));
+        // A `Checking` that outlived its probe (frozen webview) must not
+        // wedge the app: resuming retries it.
+        assert!(should_probe_on_resume(Connectivity::Checking));
+        assert!(!should_probe_on_resume(Connectivity::Online));
     }
 }
