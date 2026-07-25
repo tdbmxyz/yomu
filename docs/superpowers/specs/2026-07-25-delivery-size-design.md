@@ -273,16 +273,64 @@ dropped — the recipe is what guarantees it now.
 
 ---
 
-## Expected outcome
+## Outcome — measured 2026-07-25, all nine items landed
 
-| | before | after |
-| --- | --- | --- |
-| web cold load | ~3.80 MB | ~0.45 MB |
-| first paint | after wasm boots | immediate skeleton |
-| `yomu-server` closure | 2.5 GiB | 58.8 MiB (measured) |
-| `yomu-desktop` output | 58 MB | ~13 MB |
-| APK | 12 875 747 | ~10.5 MB |
-| published per release | 1 082 MB | ~14 MB |
+The "predicted" column is what this document said before the work; it is kept
+so the estimate can be judged rather than quietly replaced. "Measured" is from
+`nix build` outputs and a release `trunk build` on the same machine as the
+baseline.
 
-Every number here is to be re-measured and recorded as the work lands; the
-"after" column is a prediction, not a claim.
+| | before (measured) | predicted | **after (measured)** | vs. prediction |
+| --- | --- | --- | --- | --- |
+| web cold load, **on the wire** | 3 796 131 (nothing compressed) | ~0.45 MB | **467 561 B** | as predicted |
+| web cold load, raw bytes | 3 796 131 | — | **1 546 024 B** | — |
+| web cold load, brotli ceiling | 701 240 | — | **467 561 B** | now actually reached |
+| wasm raw / brotli | 3 698 836 / 684 728 | — | **1 446 401 / 450 227** | −61% / −34% |
+| bindgen glue raw / brotli | 65 151 / 8 990 | — | **65 150 / 9 004** | unchanged, as expected |
+| css raw / brotli | 30 197 / 6 715 | — | **30 197 / 6 715** | unchanged |
+| `index.html` raw / brotli | 1 947 / 807 | — | **4 276 / 1 615** | +2.3 KB: the boot skeleton |
+| first paint | after wasm boots | immediate skeleton | **immediate skeleton** | as predicted |
+| `yomu-server` closure | 2.5 GiB | 58.8 MiB | **58.7 MiB** | as predicted |
+| `yomu-desktop` closure | 3.4 GiB | (not predicted) | **854.5 MiB** | webkitgtk, as expected |
+| `yomu-desktop` output | 58 MB | ~13 MB | **12 521 976 B** | as predicted |
+| APK | 12 875 747 | ~10.5 MB | **10 253 043 B** | slightly better |
+| published per release | 1 082 MB | ~14 MB | **~12.0 MB** | slightly better |
+
+Toolchain references in either runtime closure: **0**
+(`nix path-info -rSh .#yomu-server | grep -c 'rust-default\|rustc-\|rust-docs\|clippy\|rustfmt\|rust-analyzer'`).
+
+"Published per release" is now the web tarball (1 777 212 B, `nix build
+.#yomu-web-compressed` tarred) plus the APK; the AppImage is gone. The
+tarball is larger than 1.x's 1 156 760 B on purpose — it now carries the
+`.br`/`.gz` siblings the server hands out, so the *download* is bigger and
+every visitor's is smaller.
+
+Two numbers worth naming explicitly, because they are the ones a reader will
+check: the wasm on the wire went **684 728 → 450 227 B**, and the cold load
+**~3.80 MB raw and uncompressed → 467 561 B compressed**, a factor of 8.1.
+
+### Verification the plan left open, closed here
+
+**The reader under `opt-level = "z"`.** Item 5 picked `"z"` on size alone.
+Driven through geckodriver against a fixture publication (24 pages, vertical
+strip, `scrollHeight` 27 747 px, headless Firefox 152 at 900×1400): 399
+`window.scrollBy` steps, one per `requestAnimationFrame`, all 399 handled by
+the strip's `scroll` listener. Frame deltas: **mean 16.62 ms, p50 17.06,
+p95 17.08, p99 17.20, max 17.38; zero frames over 33 ms.** Every frame landed
+on the 60 Hz vsync boundary, i.e. the strip's per-frame Rust never became the
+limiting term. `"z"` stands; nothing here argues for reconsidering `"s"`.
+
+**The service worker against `Content-Encoding`.** Smoked against the
+precompressed dist (`yomu-web-compressed`), so every shell asset arrived
+`content-encoding: br`. After install, the `yomu-v5` cache holds four entries
+and each one stores the **decoded** body under **stale compressed headers** —
+e.g. the wasm at `stored_bytes` 1 446 401 with `content-encoding: br` and
+`content-length: 450227`. The stored bytes start `00 61 73 6d` and
+`WebAssembly.compile` accepts them, so the body really is decoded and the
+headers really are a lie. Then, with the server killed and `curl` failing:
+`/library` reloaded, the shell booted from cache (boot skeleton removed, nav
+present, offline banner shown), wasm `transferSize` 0. So the "not doing"
+entry above holds — no `sw.js` change, no `CACHE` bump — but for a narrower
+reason than it claimed: the *body* is decoded, not the response. Firefox
+ignores the header when the worker replays the response; this was not tested
+on Chromium.

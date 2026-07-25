@@ -313,6 +313,10 @@
             cargo-tauri
             jdk17
             androidComposition.androidsdk
+            # `just apk`'s strip guard unpacks the built APK to read the
+            # shipped .so; without this it borrows whatever unzip the caller's
+            # PATH happens to hold, and the recipe stops being hermetic.
+            unzip
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
 
