@@ -112,10 +112,20 @@ three builds stay consistent (and so the wasm stops embedding store paths in
 panic strings, which is a small size win of its own).
 
 **Verify:** `nix path-info -rSh .#yomu-server | grep -c rust-` is 0, and the
-closure is reported in the commit message. Expected: 2.5 GiB → ~120 MB.
+closure is reported in the commit message.
+
+**Measured, 2026-07-25** (prototype on `yomu-server`, since discarded): closure
+**2.5 GiB → 58.8 MiB**, references down to `glibc` and `gcc-lib` alone. The
+binary itself grew 138 KB (13 255 344 → 13 393 392). `cargoTestFlags` ran in
+the same build and passed, so remapped panic paths break nothing.
 
 **Risk:** a panic backtrace shows `/rust-toolchain/...` instead of a real
 path. That path was never resolvable on a user's machine anyway.
+
+**Watch for:** setting `env.RUSTFLAGS` *replaces* rather than appends. Confirm
+`buildRustPackage` isn't relying on a RUSTFLAGS value of its own for these
+packages before taking this as done — the 138 KB delta is unexplained and may
+be exactly that.
 
 ### 2. Stop installing the static library (F2)
 
@@ -257,7 +267,7 @@ dropped — the recipe is what guarantees it now.
 | --- | --- | --- |
 | web cold load | ~3.80 MB | ~0.45 MB |
 | first paint | after wasm boots | immediate skeleton |
-| `yomu-server` closure | 2.5 GiB | ~120 MB |
+| `yomu-server` closure | 2.5 GiB | 58.8 MiB (measured) |
 | `yomu-desktop` output | 58 MB | ~13 MB |
 | APK | 12 875 747 | ~10.5 MB |
 | published per release | 1 082 MB | ~14 MB |
