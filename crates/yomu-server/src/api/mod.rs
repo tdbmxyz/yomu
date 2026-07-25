@@ -71,7 +71,15 @@ pub fn router(state: AppState) -> Router {
             get(progress::events).post(progress::push_events),
         )
         .route("/backup", get(backup::export))
-        .route("/restore", axum::routing::post(backup::restore))
+        // Restore takes a whole library export, which outgrows axum's 2 MB
+        // default body limit at a few thousand chapters — the point where
+        // a backup is worth having. The cap stays finite (an unbounded
+        // body would be buffered into memory) but generous.
+        .route(
+            "/restore",
+            axum::routing::post(backup::restore)
+                .layer(axum::extract::DefaultBodyLimit::max(RESTORE_BODY_LIMIT)),
+        )
         .route("/updates", get(updates::list))
         .route("/downloads", get(downloads::list))
         .route("/downloads/retry", axum::routing::post(downloads::retry))
@@ -126,6 +134,10 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
         ])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
+
+/// Ceiling for an uploaded backup. Roughly 100× a 3k-chapter export, so it
+/// is a runaway guard rather than a limit any real library meets.
+const RESTORE_BODY_LIMIT: usize = 256 * 1024 * 1024;
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -212,6 +224,32 @@ mod tests {
             .unwrap();
         let resp = super::router(state).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// A real library exports well past axum's 2 MB default body limit (a
+    /// 3k-chapter library is ~2.3 MB), and restore is the *only* way that
+    /// file is ever used — so the limit made the feature useless exactly
+    /// where it matters. The body here is deliberately not valid JSON: what
+    /// matters is that it was read to the end (a JSON error) instead of
+    /// being cut off at 2 MB (413 Payload Too Large).
+    #[tokio::test]
+    async fn restore_accepts_a_backup_larger_than_the_default_body_limit() {
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(Config::default(), db, Registry::default(), None);
+        let oversized = "x".repeat(4 * 1024 * 1024);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/restore")
+            .header("content-type", "application/json")
+            .body(Body::from(oversized))
+            .unwrap();
+        let status = super::router(state).oneshot(req).await.unwrap().status();
+        assert_ne!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "a full-size backup must still reach the handler"
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -1531,6 +1531,45 @@ mod tests {
         assert_eq!(next.number, Some(1.0));
     }
 
+    /// The queue view must list pending work in the order the downloader
+    /// will actually take it (`next_pending_download`), or the Downloads
+    /// page reads as if it were counting down when it is counting up: one
+    /// sync stamps every chapter with the same `fetched_at`, and sources
+    /// list newest first, so insertion order is the reverse of the order
+    /// the worker picks.
+    #[tokio::test]
+    async fn download_queue_lists_pending_in_worker_order() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication(
+                "fixture",
+                &details(
+                    "m1",
+                    &[("c3", Some(3.0)), ("c1", Some(1.0)), ("c2", Some(2.0))],
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+        let ids: Vec<_> = db
+            .list_units(publication.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        db.mark_pending(&ids).await.unwrap();
+
+        let queue = db.download_queue().await.unwrap();
+        let numbers: Vec<_> = queue.iter().map(|u| u.number).collect();
+        assert_eq!(numbers, vec![Some(1.0), Some(2.0), Some(3.0)]);
+        // The head of the list is what the worker is about to fetch.
+        assert_eq!(
+            queue.first().map(|u| u.id),
+            db.next_pending_download().await.unwrap().map(|u| u.id)
+        );
+    }
+
     #[tokio::test]
     async fn local_publications_lifecycle() {
         use yomu_domain::Origin;
