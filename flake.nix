@@ -175,7 +175,8 @@
     # What the server serves: the trunk dist plus brotli/gzip siblings built
     # once here, so ServeDir never compresses per request. Kept separate from
     # yomu-web because yomu-desktop bakes that one into the binary, where the
-    # siblings would be ~700 KB of files the asset protocol never serves.
+    # siblings would be ~1.08 MB (1 080 828 B measured) of files the asset
+    # protocol never serves.
     yomu-web-compressed =
       pkgs.runCommand "yomu-web-compressed-${version}" {
         nativeBuildInputs = [pkgs.brotli pkgs.gzip];
@@ -183,13 +184,17 @@
       } ''
         cp -r ${yomu-web} $out
         chmod -R u+w $out
+        # The file list is collected before anything is written: the loop
+        # creates .br/.gz entries in the very directory find is reading, and
+        # whether a new entry shows up in an in-progress readdir is
+        # unspecified — so a large enough dist could compress its own output.
         find $out -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' \
           -o -name '*.html' -o -name '*.json' -o -name '*.svg' \
-          -o -name '*.webmanifest' \) -print0 |
-          while IFS= read -r -d "" f; do
-            brotli -q 11 -f -o "$f.br" "$f"
-            gzip -9 -c "$f" > "$f.gz"
-          done
+          -o -name '*.webmanifest' \) -print0 > "$TMPDIR/targets"
+        while IFS= read -r -d "" f; do
+          brotli -q 11 -f -o "$f.br" "$f"
+          gzip -9 -c "$f" > "$f.gz"
+        done < "$TMPDIR/targets"
       '';
 
     # Desktop shell (same scheme as chaos-desktop): generate_context! bakes

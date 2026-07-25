@@ -47,7 +47,10 @@ jobs:
 
       - name: Build web bundle
         run: |
-          nix build .#yomu-web
+          # yomu-web-compressed, not yomu-web: the tarball audience points
+          # static_dir at an unpacked directory, and without the brotli/gzip
+          # siblings they alone would serve everything uncompressed.
+          nix build .#yomu-web-compressed
           version="${GITHUB_REF_NAME#v}"
           artifact="yomu-web-${version}.tar.gz"
           tar -czf "$artifact" -C "$(readlink -f result)" .
@@ -73,9 +76,13 @@ jobs:
 
             ## Web frontend
 
-            `yomu-web-*.tar.gz` is the static trunk dist; point the
-            server's `static_dir` at the unpacked directory (the flake's
-            `yomu-web` output is the same thing, pre-wired).
+            `yomu-web-*.tar.gz` is the static trunk dist with brotli and
+            gzip siblings alongside each asset; point the server's
+            `static_dir` at the unpacked directory and it serves the
+            precompressed copy to clients that accept it. This is the
+            flake's `yomu-web-compressed` output, which the NixOS module
+            wires up by default; `yomu-web` is the same dist without the
+            siblings.
 
             ## Desktop
 
