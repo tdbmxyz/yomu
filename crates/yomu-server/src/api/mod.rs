@@ -9,6 +9,7 @@ mod error;
 mod library;
 mod progress;
 mod sources;
+mod static_cache;
 mod updates;
 
 use axum::http::{HeaderValue, Method, header};
@@ -104,7 +105,13 @@ pub fn router(state: AppState) -> Router {
             .precompressed_br()
             .precompressed_gzip()
             .fallback(index);
-        app = app.fallback_service(files);
+        // The cache layer goes on a router holding nothing but the static
+        // service, which is then merged in: on the app itself it would stamp
+        // cache headers on API responses too.
+        let files = Router::new()
+            .fallback_service(files)
+            .layer(axum::middleware::from_fn(static_cache::cache_headers));
+        app = app.merge(files);
     }
 
     app.layer(cors_layer(&state.config.auth.allowed_origins))
@@ -339,6 +346,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"plain-wasm-bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cache layer must sit on the static service and nowhere else: a
+    /// fingerprinted asset is pinned for a year, `index.html` (which changes
+    /// in place under the same URL) revalidates, and an API response carries
+    /// no `cache-control` at all — the guard against layering it app-wide,
+    /// which would let a stale library listing be served from a cache.
+    #[tokio::test]
+    async fn static_assets_carry_cache_control_and_api_responses_do_not() {
+        let dir = std::env::temp_dir().join("yomu-cache-control-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("yomu-web-9da5a24d4d3677cc_bg.wasm"), b"w").unwrap();
+        std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        let header_of = |resp: &axum::response::Response, name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let get = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+                router.oneshot(req).await.unwrap()
+            }
+        };
+
+        let resp = get("/yomu-web-9da5a24d4d3677cc_bg.wasm").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&resp, "cache-control").as_deref(),
+            Some(super::static_cache::IMMUTABLE)
+        );
+        // ServeDir picks a body by Accept-Encoding but sets no Vary, so a
+        // shared cache would otherwise reuse a brotli body for a client that
+        // never asked for one — for a year, given `immutable`. (The CORS
+        // layer contributes its own Vary values, hence the scan.)
+        assert!(
+            resp.headers()
+                .get_all("vary")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .any(|v| v.contains("accept-encoding")),
+            "static responses must vary on accept-encoding"
+        );
+
+        let resp = get("/index.html").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&resp, "cache-control").as_deref(),
+            Some(super::static_cache::REVALIDATE)
+        );
+
+        let resp = get("/api/v1/health").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&resp, "cache-control"),
+            None,
+            "the cache layer must not reach API responses"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
