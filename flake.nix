@@ -44,17 +44,35 @@
     # rust-analyzer, clippy, rustfmt and gcc — 2.4 GiB of build tooling in the
     # closure of a 13 MB binary. The remapped path was never resolvable on a
     # user's machine anyway.
+    remapPathPrefix = "--remap-path-prefix=${rustToolchain}=/rust-toolchain";
+
+    # The native builds must additionally re-state a flag that is not ours:
+    # cargoSetupHook writes -Cforce-frame-pointers=yes into .cargo/config.toml
+    # under [target.<host>], and cargo takes rustflags from the first source
+    # that applies rather than merging them, so a RUSTFLAGS environment
+    # variable silently drops it. Profilers and backtraces rely on it.
     #
-    # -Cforce-frame-pointers=yes is not ours: cargoSetupHook puts it in
-    # .cargo/config.toml under [target.<host>], and cargo takes rustflags from
-    # the first source that applies rather than merging them, so a RUSTFLAGS
-    # environment variable silently drops it. Repeat it here to keep the
-    # nixpkgs default (profilers and backtraces rely on it).
-    remapRustflags = "-Cforce-frame-pointers=yes --remap-path-prefix=${rustToolchain}=/rust-toolchain";
+    # This is a hand-transcribed copy of what that hook currently writes. If a
+    # nixpkgs bump adds another flag to that table, this copy silently drops
+    # it — re-read `cargoSetupHook`'s generated .cargo/config.toml whenever the
+    # nixpkgs input moves.
+    remapRustflags = "-Cforce-frame-pointers=yes ${remapPathPrefix}";
+
     rustPlatform = pkgs.makeRustPlatform {
       cargo = rustToolchain;
       rustc = rustToolchain;
     };
+
+    # Every native rust package goes through here rather than setting
+    # env.RUSTFLAGS by hand: an opt-in flag repeated per package is one a new
+    # package forgets, and forgetting it costs a 40× closure with no error.
+    # RUSTFLAGS is set last on purpose — it is a property of how we build, not
+    # something a call site gets to override.
+    buildYomuRustPackage = args:
+      rustPlatform.buildRustPackage (args
+        // {
+          env = (args.env or {}) // {RUSTFLAGS = remapRustflags;};
+        });
 
     # Same scheme as chaos: wasm-bindgen-cli pinned by Cargo.lock so the CLI
     # and crate versions cannot drift. Refresh both hashes when the locked
@@ -97,7 +115,7 @@
       dbus
     ];
 
-    yomu-server = rustPlatform.buildRustPackage {
+    yomu-server = buildYomuRustPackage {
       pname = "yomu-server";
       inherit version;
       src = self;
@@ -106,7 +124,6 @@
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
       env.YOMU_BUILD_COMMIT = buildCommit;
-      env.RUSTFLAGS = remapRustflags;
 
       meta = {
         description = "yomu backend: manga library, downloader, progress tracking";
@@ -122,11 +139,13 @@
       cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
       YOMU_BUILD_COMMIT = buildCommit;
 
-      # Same remap as the native packages, so panic strings in the wasm stop
-      # naming a store path. No frame-pointer flag here: trunk builds against
-      # wasm32, where RUSTFLAGS never reaches the host units cargoSetupHook's
-      # config is written for.
-      RUSTFLAGS = "--remap-path-prefix=${rustToolchain}=/rust-toolchain";
+      # The same remap as the native packages, so panic strings in the wasm
+      # stop naming a store path — but without their -Cforce-frame-pointers,
+      # which there is nothing here to preserve: cargoSetupHook writes it under
+      # [target."x86_64-unknown-linux-gnu"], a table that never applies to the
+      # wasm32 units trunk builds, and with --target set cargo passes no
+      # rustflags to host build-script units either.
+      RUSTFLAGS = remapPathPrefix;
 
       nativeBuildInputs = [
         rustToolchain
@@ -158,7 +177,7 @@
     # is copied in place before cargo runs. wrapGAppsHook3 wires GSettings
     # schemas + TLS (glib-networking), without which WebKitGTK apps crash or
     # fail https at runtime.
-    yomu-desktop = rustPlatform.buildRustPackage {
+    yomu-desktop = buildYomuRustPackage {
       pname = "yomu-desktop";
       inherit version;
       src = self;
@@ -168,7 +187,6 @@
       cargoBuildFlags = ["-p" "yomu-shell"];
       cargoTestFlags = ["-p" "yomu-shell"];
       env.YOMU_BUILD_COMMIT = buildCommit;
-      env.RUSTFLAGS = remapRustflags;
 
       nativeBuildInputs = with pkgs; [pkg-config wrapGAppsHook3];
       buildInputs = tauriLibs ++ [pkgs.glib-networking];
