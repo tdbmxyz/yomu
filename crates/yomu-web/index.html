@@ -12,6 +12,12 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
+    <!-- Release builds go through [profile.wasm-release] (opt-level, panic =
+         abort) and wasm-opt; trunk hashes the result for SRI, so this must
+         never be done as a post-build step. `trunk serve` keeps the fast dev
+         profile — data-cargo-profile-release applies to release only. -->
+    <link data-trunk rel="rust" data-cargo-profile-release="wasm-release"
+          data-wasm-opt="z" data-wasm-opt-params="--strip-debug --strip-producers" />
     <link data-trunk rel="css" href="styles.css" />
     <link data-trunk rel="copy-file" href="sw.js" />
     <link data-trunk rel="copy-file" href="manifest.webmanifest" />
