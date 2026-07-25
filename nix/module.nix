@@ -22,8 +22,8 @@ in {
 
     webPackage = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.yomu-web;
-      defaultText = lib.literalExpression "yomu.packages.\${system}.yomu-web";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.yomu-web-compressed;
+      defaultText = lib.literalExpression "yomu.packages.\${system}.yomu-web-compressed";
       description = "Built web frontend served by the server (null to disable).";
     };
 

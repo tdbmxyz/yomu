@@ -74,4 +74,13 @@ fn main() {
         api_base: api_base(),
     };
     mount_to_body(move || view! { <App config=config.clone()/> });
+
+    // mount_to_body appends: without this the boot skeleton stays on top of
+    // the app it was covering for (it is position: fixed, inset: 0).
+    if let Some(node) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("yomu-boot"))
+    {
+        node.remove();
+    }
 }

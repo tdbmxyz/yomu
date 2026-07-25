@@ -50,11 +50,12 @@ $ just check && just test
 ```
 
 Desktop shell: `nix develop .#tauri`, then `just shell http://<server>:4700`
-(or set `~/.config/yomu/server`). Android: `nix develop .#android`, then in
-`crates/yomu-shell` run `cargo tauri android build --apk --target aarch64`;
-on first launch the app shows a connect screen asking for the server URL.
-Release signing reads `gen/android/keystore.properties` (see the sample;
-the keystore lives outside the repo).
+(or set `~/.config/yomu/server`). Android: `just apk` — it enters
+`nix develop .#android` itself and injects the workspace version from
+`Cargo.toml`, so the APK can never be stamped with a stale one. On first
+launch the app shows a connect screen asking for the server URL. Release
+signing reads `crates/yomu-shell/gen/android/keystore.properties` (see the
+sample; the keystore lives outside the repo).
 
 Add a scan site: copy `crates/yomu-server/sources.d/example.toml.sample` to
 `<sources_dir>/<site>.toml`, adjust the selectors (browser devtools on the
@@ -62,6 +63,24 @@ site), restart the server.
 
 First checkout: enter the shell, `cargo generate-lockfile`,
 `git add Cargo.lock`, re-enter (wasm-bindgen-cli pinning, as in chaos).
+
+## Clients
+
+The browser is the primary client: point it at the server. There is no
+prebuilt desktop download — the desktop shell requires nix, and is run
+from the flake:
+
+```console
+$ nix run github:tdbmxyz/yomu#yomu-desktop
+```
+
+That needs nix with flakes enabled (`nix-command` and `flakes` experimental
+features); on a non-NixOS host a WebKitGTK app run from the store may also
+need a GL wrapper such as `nixGL`.
+
+It asks for the server address on first launch (or read it from
+`YOMU_SERVER` / `~/.config/yomu/server`). Android is an APK, signed
+locally and attached to a release by hand.
 
 ## Branching & releases
 
@@ -71,11 +90,13 @@ Git flow, enforced by CI on the long-lived branches:
   on it is releasable.
 - `develop` — integration branch; feature branches (`feat/…`, `fix/…`)
   target it through pull requests.
-- Releases: bump the workspace version (`Cargo.toml` +
-  `crates/yomu-shell/tauri.conf.json`), merge `develop` into `main`, tag
-  `vX.Y.Z`. The release workflow checks the tag against the manifests,
-  then builds and attaches the web bundle and the desktop AppImage. The
-  Android APK is signed locally and attached by hand.
+- Releases: bump the workspace version in `Cargo.toml` (the only place it
+  lives — `tauri.conf.json` carries no version; `just apk` injects it),
+  merge `develop` into `main`, tag `vX.Y.Z`. The release workflow checks
+  the tag against `Cargo.toml`, then builds and attaches the web bundle.
+  The Android APK is signed locally and attached by hand. The desktop
+  shell is not published as an artifact — it is run from the flake (see
+  Clients above).
 
 ## License
 

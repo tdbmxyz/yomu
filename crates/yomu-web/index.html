@@ -12,6 +12,12 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
+    <!-- Release builds go through [profile.wasm-release] (opt-level, panic =
+         abort) and wasm-opt; trunk hashes the result for SRI, so this must
+         never be done as a post-build step. `trunk serve` keeps the fast dev
+         profile — data-cargo-profile-release applies to release only. -->
+    <link data-trunk rel="rust" data-cargo-profile-release="wasm-release"
+          data-wasm-opt="z" data-wasm-opt-params="--strip-debug --strip-producers" />
     <link data-trunk rel="css" href="styles.css" />
     <link data-trunk rel="copy-file" href="sw.js" />
     <link data-trunk rel="copy-file" href="manifest.webmanifest" />
@@ -19,6 +25,60 @@
     <link data-trunk rel="copy-file" href="icon-192.png" />
     <link data-trunk rel="copy-file" href="icon-512.png" />
     <link data-trunk rel="copy-file" href="icon-maskable-512.png" />
+    <style>
+      /* Boot skeleton: shown from the first paint until the wasm mounts, at
+         which point main.rs removes it (mount_to_body appends, so it will not
+         be replaced on its own). The colours are hardcoded copies of
+         styles.css `:root` (charcoal, the default theme) because the hashed
+         stylesheet may not have arrived when this paints — keep them in sync
+         with `--bg` / `--accent` there. */
+      #yomu-boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #14171c;
+      }
+      /* Paper is the only light theme; on it a charcoal skeleton is a visible
+         dark flash before the app paints. The attribute is set by the script
+         below, ahead of both the stylesheet and offline::apply_theme. */
+      html[data-theme="paper"] #yomu-boot {
+        background: #f4efe6;
+      }
+      #yomu-boot span {
+        width: 2rem;
+        height: 2rem;
+        border: 3px solid #262b33;
+        border-top-color: #4fd1c5;
+        border-radius: 50%;
+        animation: yomu-spin 0.9s linear infinite;
+      }
+      html[data-theme="paper"] #yomu-boot span {
+        border-color: #ddd3c2;
+        border-top-color: #a33b2e;
+      }
+      @keyframes yomu-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #yomu-boot span {
+          animation: none;
+        }
+      }
+    </style>
+    <!-- Mirror the stored theme onto <html> before anything paints. The app
+         does this itself (offline::apply_theme) but only once the wasm has
+         booted, which is exactly the window the skeleton covers. Key and
+         values match offline::Theme::key. -->
+    <script>
+      try {
+        var t = localStorage.getItem("yomu-theme");
+        if (t) document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
     <!-- Register before the wasm bundle loads: the worker precaches the
          shell and its hashed assets at install, so offline works from the
          first session (registering from inside the app would be too late
@@ -29,5 +89,7 @@
       }
     </script>
   </head>
-  <body></body>
+  <body>
+    <div id="yomu-boot"><span></span></div>
+  </body>
 </html>

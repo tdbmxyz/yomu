@@ -1,11 +1,11 @@
 # Release build: runs when a semver tag (v*) is pushed on main, builds
-# the web bundle and the portable desktop AppImage with Nix, and
-# attaches them to a GitHub Release.
+# the web bundle with Nix, and attaches it to a GitHub Release.
 #
-# The server is consumed through the Nix flake on the host
-# (`nix build .#yomu-server` or the NixOS module) instead of a prebuilt
-# binary. The Android APK is signed with a keystore that never leaves
-# the developer machine, so it is built and attached manually.
+# The server and the desktop shell are consumed through the Nix flake
+# (`nix build .#yomu-server` or the NixOS module, `nix run
+# .#yomu-desktop`) instead of prebuilt binaries. The Android APK is
+# signed with a keystore that never leaves the developer machine, so it
+# is built and attached manually.
 name: release
 
 on:
@@ -42,30 +42,20 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          shell_version="$(jq -r .version crates/yomu-shell/tauri.conf.json)"
-          echo "tag=$tag cargo=$cargo_version shell=$shell_version"
+          echo "tag=$tag cargo=$cargo_version"
           test "$tag" = "$cargo_version"
-          test "$tag" = "$shell_version"
 
       - name: Build web bundle
         run: |
-          nix build .#yomu-web
+          # yomu-web-compressed, not yomu-web: the tarball audience points
+          # static_dir at an unpacked directory, and without the brotli/gzip
+          # siblings they alone would serve everything uncompressed.
+          nix build .#yomu-web-compressed
           version="${GITHUB_REF_NAME#v}"
           artifact="yomu-web-${version}.tar.gz"
           tar -czf "$artifact" -C "$(readlink -f result)" .
           sha256sum "$artifact" > "$artifact.sha256"
           echo "WEB_ARTIFACT=$artifact" >> "$GITHUB_ENV"
-
-      - name: Build desktop AppImage
-        run: |
-          nix bundle --bundler github:ralismark/nix-appimage \
-            .#yomu-desktop -o desktop-bundle
-          version="${GITHUB_REF_NAME#v}"
-          artifact="yomu-desktop-${version}-x86_64.AppImage"
-          cp -L desktop-bundle "$artifact"
-          chmod +x "$artifact"
-          sha256sum "$artifact" > "$artifact.sha256"
-          echo "DESKTOP_ARTIFACT=$artifact" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -74,8 +64,6 @@ jobs:
           files: |
             ${{ env.WEB_ARTIFACT }}
             ${{ env.WEB_ARTIFACT }}.sha256
-            ${{ env.DESKTOP_ARTIFACT }}
-            ${{ env.DESKTOP_ARTIFACT }}.sha256
           body: |
             ## Server
 
@@ -88,24 +76,25 @@ jobs:
 
             ## Web frontend
 
-            `yomu-web-*.tar.gz` is the static trunk dist; point the
-            server's `static_dir` at the unpacked directory (the flake's
-            `yomu-web` output is the same thing, pre-wired).
+            `yomu-web-*.tar.gz` is the static trunk dist with brotli and
+            gzip siblings alongside each compressible asset (the PNG icons
+            get none — they are already compressed); point the server's
+            `static_dir` at the unpacked directory and it serves the
+            precompressed copy to clients that accept it. This is the
+            flake's `yomu-web-compressed` output, which the NixOS module
+            wires up by default; `yomu-web` is the same dist without the
+            siblings.
 
             ## Desktop
 
-            `yomu-desktop-*.AppImage` is a self-contained x86_64 Linux
-            build of the Tauri shell (WebKitGTK bundled). Make it
-            executable and run it; it asks for your server address on
-            first launch:
+            The desktop shell is distributed through the flake only —
+            there is no binary download. With nix installed:
 
             ```bash
-            chmod +x yomu-desktop-*.AppImage
-            ./yomu-desktop-*.AppImage
+            nix run github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop
             ```
 
-            On NixOS, prefer the flake output instead:
-            `nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop`.
+            It asks for your server address on first launch.
 
             ## Android
 
