@@ -176,6 +176,18 @@ mod tests {
     use crate::db::Db;
     use crate::state::AppState;
 
+    /// A fixture directory no other run can collide with. `tempfile` is
+    /// deliberately not a dependency, and a fixed /tmp name is worse than no
+    /// cleanup: every one of these tests starts by deleting the directory, so
+    /// two concurrent runs (two worktrees, a CI matrix) delete each other's
+    /// files mid-test.
+    fn fixture_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("yomu-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// Router in OIDC mode: `oidc_enabled()` is true, but no session is
     /// presented, so `CurrentUser`-gated routes must reject.
     async fn oidc_router() -> axum::Router {
@@ -303,9 +315,7 @@ mod tests {
     /// not. Without this the wasm ships uncompressed to every visitor.
     #[tokio::test]
     async fn static_files_prefer_a_precompressed_sibling() {
-        let dir = std::env::temp_dir().join("yomu-precompressed-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fixture_dir("precompressed-test");
         std::fs::write(dir.join("app.wasm"), b"plain-wasm-bytes").unwrap();
         std::fs::write(dir.join("app.wasm.br"), b"brotli-wasm-bytes").unwrap();
         std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
@@ -357,9 +367,7 @@ mod tests {
     /// which would let a stale library listing be served from a cache.
     #[tokio::test]
     async fn static_assets_carry_cache_control_and_api_responses_do_not() {
-        let dir = std::env::temp_dir().join("yomu-cache-control-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fixture_dir("cache-control-test");
         std::fs::write(dir.join("yomu-web-9da5a24d4d3677cc_bg.wasm"), b"w").unwrap();
         std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
 
@@ -426,9 +434,7 @@ mod tests {
     /// This is what keeps `just web` and a hand-built dist working.
     #[tokio::test]
     async fn static_files_fall_back_to_identity_without_a_sibling() {
-        let dir = std::env::temp_dir().join("yomu-no-sibling-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fixture_dir("no-sibling-test");
         std::fs::write(dir.join("app.js"), b"console.log(1)").unwrap();
         std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
 
@@ -447,6 +453,218 @@ mod tests {
         let resp = super::router(state).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().get("content-encoding").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The SPA fallback is a separate `ServeFile`, so it needs its own
+    /// `precompressed_*` — and it is the hottest path there is: every deep
+    /// link and every cold navigation is served by it. Dropping the flag from
+    /// the fallback leaves the per-file test above green, so this pins it.
+    #[tokio::test]
+    async fn the_spa_fallback_prefers_a_precompressed_index() {
+        let dir = fixture_dir("spa-precompressed-test");
+        std::fs::write(dir.join("index.html"), b"<html>plain</html>").unwrap();
+        std::fs::write(dir.join("index.html.br"), b"<html>brotli</html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        // /library/42 matches no file and no API route: it falls through to
+        // the index, the way a bookmarked reader URL does.
+        let req = Request::builder()
+            .uri("/library/42")
+            .header("accept-encoding", "br")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+            Some("br"),
+            "the SPA fallback must serve index.html.br"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<html>brotli</html>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half: a hand-built `trunk build` dist has no `index.html.br`,
+    /// and a deep link must still render rather than 404.
+    #[tokio::test]
+    async fn the_spa_fallback_serves_identity_without_a_sibling() {
+        let dir = fixture_dir("spa-no-sibling-test");
+        std::fs::write(dir.join("index.html"), b"<html>plain</html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let req = Request::builder()
+            .uri("/library/42")
+            .header("accept-encoding", "br, gzip")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("content-encoding").is_none());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<html>plain</html>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The unclearable cache poisoning: `ServeDir` answers a miss with the SPA
+    /// shell, so a request for a hashed asset that no longer exists returns
+    /// 200 `text/html`. Stamped `immutable` that pins HTML under an asset URL
+    /// for a year — and if that exact build is ever served again (a rollback,
+    /// or a reverted frontend change reproducing the same trunk hash) the app
+    /// fetches wasm, gets HTML, and never boots. `sw.js` makes it durable: its
+    /// `refreshShell` sees `asset.ok` and caches the HTML under the asset URL.
+    /// Nothing but a manual cache clear escapes.
+    #[tokio::test]
+    async fn a_missing_hashed_asset_falls_back_to_the_shell_and_is_not_immutable() {
+        let dir = fixture_dir("missing-asset-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let req = Request::builder()
+            .uri("/yomu-web-0123456789abcdef_bg.wasm")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some(super::static_cache::REVALIDATE),
+            "the SPA shell must never be pinned under an asset URL"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<html>SHELL</html>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The second reachable path to the same bug: a source id may be 16 hex
+    /// characters (`registry.rs` allows alphanumeric plus `-`/`_`), so an SPA
+    /// route is indistinguishable from an asset by URL alone. `/manga/:id` and
+    /// `/read/:m/:c` escape only because uuid groups are 8/4/4/4/12 — a
+    /// convention living nowhere near the classifier. Asserted on served
+    /// responses, not on classifier strings.
+    #[tokio::test]
+    async fn spa_routes_revalidate_even_when_they_look_fingerprinted() {
+        let dir = fixture_dir("spa-cache-control-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+        std::fs::write(dir.join("styles-dcb9e8dca193296c.css"), b"body{}").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        let cache_control_of = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+                let resp = router.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                resp.headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            }
+        };
+
+        for route in ["/sources/deadbeefdeadbeef", "/library"] {
+            assert_eq!(
+                cache_control_of(route).await.as_deref(),
+                Some(super::static_cache::REVALIDATE),
+                "{route}"
+            );
+        }
+
+        // The positive must survive the fix: a hashed asset that actually
+        // exists is still pinned, which is the whole point of the feature.
+        assert_eq!(
+            cache_control_of("/styles-dcb9e8dca193296c.css")
+                .await
+                .as_deref(),
+            Some(super::static_cache::IMMUTABLE)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Vary` has two independent contributors: the cache layer adds
+    /// `accept-encoding`, the CORS layer adds the origin/preflight triple.
+    /// Setting either with `insert` erases the other, and which one loses
+    /// depends only on layer order — so both must be present on one response.
+    #[tokio::test]
+    async fn static_responses_vary_on_both_encoding_and_cors_headers() {
+        let dir = fixture_dir("vary-test");
+        std::fs::write(dir.join("index.html"), b"<html></html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let req = Request::builder()
+            .uri("/index.html")
+            .header("origin", "https://tauri.localhost")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let vary: String = resp
+            .headers()
+            .get_all("vary")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .to_ascii_lowercase();
+        for expected in [
+            "accept-encoding",
+            "origin",
+            "access-control-request-method",
+            "access-control-request-headers",
+        ] {
+            assert!(
+                vary.contains(expected),
+                "vary `{vary}` is missing {expected}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
