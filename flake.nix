@@ -38,6 +38,19 @@
     buildCommit = self.shortRev or self.dirtyShortRev or "unknown";
 
     rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+    # Panic locations otherwise embed ${rustToolchain}/lib/rustlib/src/...,
+    # which Nix reads as a runtime reference and follows into rustc, docs,
+    # rust-analyzer, clippy, rustfmt and gcc — 2.4 GiB of build tooling in the
+    # closure of a 13 MB binary. The remapped path was never resolvable on a
+    # user's machine anyway.
+    #
+    # -Cforce-frame-pointers=yes is not ours: cargoSetupHook puts it in
+    # .cargo/config.toml under [target.<host>], and cargo takes rustflags from
+    # the first source that applies rather than merging them, so a RUSTFLAGS
+    # environment variable silently drops it. Repeat it here to keep the
+    # nixpkgs default (profilers and backtraces rely on it).
+    remapRustflags = "-Cforce-frame-pointers=yes --remap-path-prefix=${rustToolchain}=/rust-toolchain";
     rustPlatform = pkgs.makeRustPlatform {
       cargo = rustToolchain;
       rustc = rustToolchain;
@@ -93,6 +106,7 @@
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
       env.YOMU_BUILD_COMMIT = buildCommit;
+      env.RUSTFLAGS = remapRustflags;
 
       meta = {
         description = "yomu backend: manga library, downloader, progress tracking";
@@ -107,6 +121,12 @@
 
       cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
       YOMU_BUILD_COMMIT = buildCommit;
+
+      # Same remap as the native packages, so panic strings in the wasm stop
+      # naming a store path. No frame-pointer flag here: trunk builds against
+      # wasm32, where RUSTFLAGS never reaches the host units cargoSetupHook's
+      # config is written for.
+      RUSTFLAGS = "--remap-path-prefix=${rustToolchain}=/rust-toolchain";
 
       nativeBuildInputs = [
         rustToolchain
@@ -148,6 +168,7 @@
       cargoBuildFlags = ["-p" "yomu-shell"];
       cargoTestFlags = ["-p" "yomu-shell"];
       env.YOMU_BUILD_COMMIT = buildCommit;
+      env.RUSTFLAGS = remapRustflags;
 
       nativeBuildInputs = with pkgs; [pkg-config wrapGAppsHook3];
       buildInputs = tauriLibs ++ [pkgs.glib-networking];
