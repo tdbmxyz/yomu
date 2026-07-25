@@ -105,6 +105,10 @@ impl Db {
 
     /// Chapters currently in the download queue (downloading, then pending,
     /// then failed), oldest-first within each state — for the Downloads view.
+    /// The tiebreak matches [`Self::next_pending_download`] exactly: one sync
+    /// stamps a whole listing with the same `fetched_at`, so without it the
+    /// list falls back to insertion order — newest first, the reverse of the
+    /// order the worker takes.
     pub async fn download_queue(&self) -> Result<Vec<ReadingUnit>> {
         let rows = sqlx::query_as::<_, UnitRow>(
             "SELECT * FROM reading_units
@@ -114,7 +118,7 @@ impl Db {
                           WHEN 'pending' THEN 1
                           ELSE 2
                       END,
-                      fetched_at",
+                      fetched_at, number IS NULL, number",
         )
         .fetch_all(&self.pool)
         .await?;
