@@ -31,6 +31,18 @@ shell server="http://127.0.0.1:4700":
     cd crates/yomu-web && trunk build --release
     YOMU_SERVER={{server}} cargo run -p yomu-shell
 
+# Signed release APK. The version comes from Cargo.toml and is injected, so
+# tauri.conf.json can't drift from the workspace; tauri.properties is
+# gitignored and keeps whatever version last resolved, so it is removed first.
+# Signing reads crates/yomu-shell/gen/android/keystore.properties.
+apk:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+    rm -f crates/yomu-shell/gen/android/app/tauri.properties
+    nix develop .#android --command bash -c \
+      "cd crates/yomu-shell && cargo tauri android build --apk --target aarch64 --config '{\"version\":\"$version\"}'"
+
 fmt:
     cargo fmt --all
 

@@ -117,8 +117,9 @@ amended: sync paging is by server `seq`, not event id).
    the desktop shell from the flake — `nix run
    github:tdbmxyz/yomu#yomu-desktop`, so it needs nix; releases publish no
    desktop binary (the AppImage was 1.07 GB, nearly all of it webkitgtk).
-   Android works (`nix develop .#android`, then in crates/yomu-shell
-   `cargo tauri android build --apk --target aarch64`); gradle project in
+   Android works (`just apk` — enters `.#android` itself, injects the
+   version from Cargo.toml since tauri.conf.json no longer carries one);
+   gradle project in
    gen/android is committed, release keystore + keystore.properties live
    in ~/.config/yomu (gitignored). Server URL: `YOMU_SERVER` env /
    `~/.config/yomu/server` on desktop; on Android the ServerGate connect
