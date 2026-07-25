@@ -581,14 +581,42 @@ where
             Ok((value, false))
         }
         Err(err) => {
-            // Only a downgrade, and only from Online: while a probe is
-            // Checking, the probe's own verdict is about to land.
-            if conn.get_untracked() == Connectivity::Online {
+            if should_downgrade(conn.get_untracked(), document_hidden()) {
                 conn.set(Connectivity::Offline);
             }
             cache_get(key).map(|value| (value, true)).ok_or(err)
         }
     }
+}
+
+/// Whether a failed request should flip the whole app to `Offline`.
+///
+/// Only a downgrade, and only from `Online`: while a probe is `Checking`,
+/// the probe's own verdict is about to land. And never while the page is
+/// hidden — a backgrounded app (screen off, app switcher, a phone that
+/// dozed) routinely loses in-flight requests, and on Android the WebView
+/// can freeze a fetch mid-flight. A failure nobody was watching says
+/// nothing about the server, but the resulting `Offline` outlives the
+/// background: it stops the pull driver (see `pull::start`) and puts every
+/// read in cache-first mode until something probes again.
+pub(crate) fn should_downgrade(conn: crate::Connectivity, hidden: bool) -> bool {
+    conn == crate::Connectivity::Online && !hidden
+}
+
+/// Whether returning to the app should re-probe the server: anything but a
+/// live `Online` deserves a fresh look, including a `Checking` left behind
+/// by a probe that was frozen before it could land.
+pub(crate) fn should_probe_on_resume(conn: crate::Connectivity) -> bool {
+    conn != crate::Connectivity::Online
+}
+
+/// `document.hidden`: false when the document object isn't reachable, so a
+/// non-browser context degrades to the old always-downgrade behaviour.
+pub(crate) fn document_hidden() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .map(|d| d.hidden())
+        .unwrap_or(false)
 }
 
 // ---- theme ----
@@ -848,5 +876,42 @@ pub fn set_reader_direction(manga_id: Uuid, direction: ReaderDirection) {
             ReaderDirection::Rtl => "rtl",
         };
         let _ = storage.set_item(&format!("{DIR_KEY_PREFIX}{manga_id}"), value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_downgrade, should_probe_on_resume};
+    use crate::Connectivity;
+
+    #[test]
+    fn a_failure_while_visible_takes_the_app_offline() {
+        assert!(should_downgrade(Connectivity::Online, false));
+    }
+
+    /// The reported bug: local saves running, app backgrounded, one poll
+    /// fails against a VPN that is perfectly fine — and the app came back
+    /// "offline", stalling the pull queue.
+    #[test]
+    fn a_failure_while_hidden_does_not() {
+        assert!(!should_downgrade(Connectivity::Online, true));
+    }
+
+    #[test]
+    fn only_online_can_be_downgraded() {
+        for hidden in [false, true] {
+            assert!(!should_downgrade(Connectivity::Offline, hidden));
+            // A probe is mid-flight; its verdict wins, not a racing read's.
+            assert!(!should_downgrade(Connectivity::Checking, hidden));
+        }
+    }
+
+    #[test]
+    fn coming_back_probes_unless_already_online() {
+        assert!(should_probe_on_resume(Connectivity::Offline));
+        // A `Checking` that outlived its probe (frozen webview) must not
+        // wedge the app: resuming retries it.
+        assert!(should_probe_on_resume(Connectivity::Checking));
+        assert!(!should_probe_on_resume(Connectivity::Online));
     }
 }
