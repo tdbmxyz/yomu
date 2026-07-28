@@ -23,3 +23,6 @@ tauri = { version = "2", features = [] }
 tauri-plugin-notification = "2"
 url.workspace = true
 reqwest.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true

@@ -569,6 +569,19 @@ button.danger:hover {
   font-size: 0.85rem;
 }
 
+/* "Not available": the source does not offer this chapter. Nothing is
+   broken, so the row stays muted — never --down, which means failure. */
+.download-row.download-unavailable {
+  border-color: var(--muted);
+}
+
+/* The reason carries its own muted colour: the Rust view also puts `muted`
+   on the span, and the two must not be the only thing keeping it quiet. */
+.download-reason {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 @media (max-width: 40rem) {
   .manga-grid {
     grid-template-columns: repeat(auto-fill, minmax(6.5rem, 1fr));
@@ -967,6 +980,14 @@ a.source-card:hover {
 
 .chapter-item.dl-failed {
   border-color: var(--down);
+}
+
+/* A chapter the source does not offer keeps the ordinary row: only this
+   small muted marker says it cannot be downloaded. */
+.chapter-unavailable {
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  color: var(--muted);
 }
 
 @keyframes dl-pulse {

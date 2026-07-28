@@ -23,6 +23,10 @@ pub enum SourceError {
     Parse(String),
     #[error("invalid source definition: {0}")]
     Definition(String),
+    /// The source served the chapter but does not offer it (premium,
+    /// locked). Distinct from `Parse`, which means our selectors are wrong.
+    #[error("chapter not available from this source: {0}")]
+    Unavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, SourceError>;

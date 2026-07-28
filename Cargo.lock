@@ -7101,7 +7101,10 @@ dependencies = [
 name = "yomu-shell"
 version = "2.0.0"
 dependencies = [
+ "hex",
  "reqwest 0.12.28",
+ "serde",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",

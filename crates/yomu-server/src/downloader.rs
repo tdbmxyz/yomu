@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use yomu_domain::{Origin, ReadingUnit};
 
+use crate::db::DownloadFailure;
 use crate::state::AppState;
 
 pub fn spawn(state: AppState) {
@@ -59,7 +60,7 @@ async fn run(state: AppState) {
 /// Fetch every page of the chapter into its directory.
 /// Files are `0000.<ext>`, `0001.<ext>`… so a directory listing sorts into
 /// reading order without any index file.
-async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32, String> {
+async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32, DownloadFailure> {
     let publication = state
         .db
         .get_publication(chapter.publication_id)
@@ -68,7 +69,9 @@ async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32
     // LocalFile publications are never queued; the streamer serves their
     // pages straight from the file.
     let Origin::Source { source_id, .. } = &publication.origin else {
-        return Err("publication is not source-backed".into());
+        return Err(DownloadFailure::Failed(
+            "publication is not source-backed".into(),
+        ));
     };
     let source = state
         .sources
@@ -77,10 +80,16 @@ async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32
 
     tracing::info!(publication = %publication.title, chapter = %chapter.title, "downloading");
 
+    // A chapter the source simply does not offer is a state of the world,
+    // not a fault of ours: record it as such so the retry and auto paths
+    // leave it alone.
     let pages = source
         .pages(&chapter.source_key)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            yomu_source::SourceError::Unavailable(reason) => DownloadFailure::Unavailable(reason),
+            other => DownloadFailure::Failed(other.to_string()),
+        })?;
 
     let dir = state.unit_dir(chapter.publication_id, chapter.id);
     let partial = dir.with_extension("partial");
@@ -93,7 +102,7 @@ async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32
     if let Err(reason) = fetched {
         // Don't leave half a chapter of litter behind a failed attempt.
         let _ = tokio::fs::remove_dir_all(&partial).await;
-        return Err(reason);
+        return Err(reason.into());
     }
 
     // Atomic-ish publish that never destroys a good copy: stage the old
@@ -107,7 +116,10 @@ async fn download_chapter(state: &AppState, chapter: &ReadingUnit) -> Result<u32
         if had_old {
             let _ = tokio::fs::rename(&backup, &dir).await;
         }
-        return Err(format!("publishing {}: {e}", dir.display()));
+        return Err(DownloadFailure::Failed(format!(
+            "publishing {}: {e}",
+            dir.display()
+        )));
     }
     let _ = tokio::fs::remove_dir_all(&backup).await;
 

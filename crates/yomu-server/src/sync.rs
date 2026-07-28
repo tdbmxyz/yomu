@@ -69,7 +69,9 @@ pub async fn refresh_publication(
 
     if publication.auto_download && !new_units.is_empty() {
         let ids: Vec<_> = new_units.iter().map(|c| c.id).collect();
-        state.db.mark_pending(&ids).await?;
+        // Nobody asked for these, so a chapter the source does not offer is
+        // passed over rather than re-attempted on every sweep.
+        state.db.mark_pending_new(&ids).await?;
         state.download_notify.notify_one();
     }
 
