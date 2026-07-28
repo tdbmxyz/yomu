@@ -470,14 +470,17 @@ pub async fn shell_delete_chapter(chapter_id: Uuid) -> Result<(), String> {
 // device — which never moved — stop matching anything the app asks for.
 // No mapping survives the re-key, so the only thing left that can still
 // recognise a directory is what is inside it: the page count and the hash
-// of the first page, which the server can compute for the same chapter.
+// of its first and last page, which the server can compute for the same
+// chapter.
 
 /// A stored chapter described by its content rather than by the name that
-/// went stale. Mirrors the shell's `device_chapter_fingerprint` answer.
+/// went stale. Mirrors the shell's `device_chapter_fingerprint` answer —
+/// the field names below are the JS keys that command returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceFingerprint {
     pub page_count: u32,
-    pub sha256: String,
+    pub sha256_first: String,
+    pub sha256_last: String,
 }
 
 /// What can be done about a set of orphaned directories: the renames that
@@ -496,20 +499,33 @@ pub struct RecoveryPlan {
 ///
 /// A rename is only proposed when the match is unique in **both**
 /// directions: exactly one current chapter has that content, and no other
-/// stored directory claims it. Two chapters can genuinely share a first
+/// *orphaned* directory claims it. Two chapters can genuinely share an end
 /// page (a cover, a "read on the site" splash), and renaming a directory
 /// onto the wrong id would leave the wrong pages under a correct-looking
 /// name with nothing to trigger a re-download. So anything less than
 /// certain is left exactly where it is and counted.
+///
+/// `stored` is every directory the device holds. The server lists *all* of
+/// this publication's downloaded units, including ones this device already
+/// has correctly named, so a current chapter whose directory is already
+/// here is not a target: it is a download that arrived by the normal route,
+/// and moving anything onto it would mean destroying it. Those are dropped
+/// from the candidates before uniqueness is judged, so an orphan whose only
+/// match is such a chapter reads as unmatched rather than as a rename the
+/// shell would (today) refuse.
 pub fn plan_recovery(
     local: &[(Uuid, DeviceFingerprint)],
     server: &[yomu_domain::UnitFingerprint],
+    stored: &std::collections::BTreeSet<String>,
 ) -> RecoveryPlan {
     let mut plan = RecoveryPlan::default();
     let mut candidates: Vec<(Uuid, Uuid)> = Vec::new();
     for (stale, fingerprint) in local {
         let mut hits = server.iter().filter(|unit| {
-            unit.page_count == fingerprint.page_count && unit.page0_sha256 == fingerprint.sha256
+            unit.page_count == fingerprint.page_count
+                && unit.page0_sha256 == fingerprint.sha256_first
+                && unit.page_last_sha256 == fingerprint.sha256_last
+                && !stored.contains(&unit.unit_id.to_string())
         });
         match (hits.next(), hits.next()) {
             (Some(hit), None) => candidates.push((*stale, hit.unit_id)),
@@ -549,13 +565,18 @@ pub async fn shell_chapter_fingerprint(chapter_id: Uuid) -> Result<DeviceFingerp
         .ok()
         .and_then(|v| v.as_f64())
         .ok_or("fingerprint without a page count")?;
-    let sha256 = js_sys::Reflect::get(&value, &"sha256".into())
+    let sha256_first = js_sys::Reflect::get(&value, &"sha256_first".into())
         .ok()
         .and_then(|v| v.as_string())
-        .ok_or("fingerprint without a hash")?;
+        .ok_or("fingerprint without a first-page hash")?;
+    let sha256_last = js_sys::Reflect::get(&value, &"sha256_last".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or("fingerprint without a last-page hash")?;
     Ok(DeviceFingerprint {
         page_count: page_count as u32,
-        sha256,
+        sha256_first,
+        sha256_last,
     })
 }
 
@@ -572,14 +593,54 @@ pub async fn shell_rename_chapter(from: Uuid, to: Uuid) -> Result<(), String> {
 }
 
 /// Move a mark from a stale unit id to the current one, keeping its page
-/// count and number. A no-op when nothing is marked under `from`, so a
-/// second recovery run finds nothing to do.
-pub fn rekey_device_mark(from: Uuid, to: Uuid) {
+/// count and taking `number` from the chapter it now names. A no-op when
+/// nothing is marked under `from`, so a second recovery run finds nothing
+/// to do.
+///
+/// The number is refreshed rather than carried: these marks are exactly the
+/// ones written before the number was recorded (`None`), and the current
+/// unit's number is already in hand at the call site. It is the cheap
+/// identity a future re-key would want to fall back on, so this is the
+/// moment to fill it in. A current unit without a number leaves whatever
+/// the mark had.
+pub fn rekey_device_mark(from: Uuid, to: Uuid, number: Option<f64>) {
     let mut marks = device_chapters();
-    if let Some(mark) = marks.remove(&from) {
+    if let Some(mut mark) = marks.remove(&from) {
+        mark.number = number.or(mark.number);
         marks.insert(to, mark);
         write_json(DEVICE_KEY, &marks);
     }
+}
+
+/// A mark stranded by a run interrupted between the two writes a recovery
+/// makes: the directory is renamed, then the mark is re-keyed. Killed in
+/// between (the OS reclaims the app, the phone sleeps) the device is left
+/// with the files under the *current* id and the mark still under the stale
+/// one — and the stale mark is no longer repairable by content, because the
+/// directory it names is gone. The chapter then reads as not saved while
+/// its pages sit right there, and nothing in a later run would notice.
+///
+/// So each run reconciles first. `stale` is this publication's marks that
+/// name neither a current chapter nor a directory on disk; `landed` is its
+/// current chapters that have a directory but no mark. A pair is only
+/// re-keyed when the page counts match one-to-one, for the same reason a
+/// rename is: an unrelated phantom mark (files deleted behind the app's
+/// back) must not be able to attach itself to an unrelated directory.
+/// Returns `(stale id, current id)` pairs.
+pub fn plan_mark_repair(stale: &[(Uuid, u32)], landed: &[(Uuid, u32)]) -> Vec<(Uuid, Uuid)> {
+    let mut pairs = Vec::new();
+    for (from, pages) in stale {
+        let mut hits = landed.iter().filter(|(_, other)| other == pages);
+        let (Some((to, _)), None) = (hits.next(), hits.next()) else {
+            continue;
+        };
+        // The other direction: two stranded marks of the same length are two
+        // guesses about one directory, not one repair.
+        if stale.iter().filter(|(_, other)| other == pages).count() == 1 {
+            pairs.push((*from, *to));
+        }
+    }
+    pairs
 }
 
 /// Drop a chapter's "on this device" mark (after deleting its files).
@@ -1028,8 +1089,12 @@ pub fn set_reader_direction(manga_id: Uuid, direction: ReaderDirection) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceFingerprint, plan_recovery, should_downgrade, should_probe_on_resume};
+    use super::{
+        DeviceFingerprint, plan_mark_repair, plan_recovery, should_downgrade,
+        should_probe_on_resume,
+    };
     use crate::Connectivity;
+    use std::collections::BTreeSet;
     use uuid::Uuid;
     use yomu_domain::UnitFingerprint;
 
@@ -1037,22 +1102,29 @@ mod tests {
         Uuid::from_bytes([n; 16])
     }
 
-    fn local(n: u8, pages: u32, sha: &str) -> (Uuid, DeviceFingerprint) {
+    fn local(n: u8, pages: u32, first: &str, last: &str) -> (Uuid, DeviceFingerprint) {
         (
             id(n),
             DeviceFingerprint {
                 page_count: pages,
-                sha256: sha.into(),
+                sha256_first: first.into(),
+                sha256_last: last.into(),
             },
         )
     }
 
-    fn server(n: u8, pages: u32, sha: &str) -> UnitFingerprint {
+    fn server(n: u8, pages: u32, first: &str, last: &str) -> UnitFingerprint {
         UnitFingerprint {
             unit_id: id(n),
             page_count: pages,
-            page0_sha256: sha.into(),
+            page0_sha256: first.into(),
+            page_last_sha256: last.into(),
         }
+    }
+
+    /// The directories on the device, as `plan_recovery` takes them.
+    fn stored(ids: &[u8]) -> BTreeSet<String> {
+        ids.iter().map(|n| id(*n).to_string()).collect()
     }
 
     /// The case this exists for: the directory is still on the phone under
@@ -1061,11 +1133,47 @@ mod tests {
     #[test]
     fn one_current_chapter_with_the_same_content_is_a_rename() {
         let plan = plan_recovery(
-            &[local(1, 18, "aa")],
-            &[server(9, 18, "aa"), server(8, 12, "bb")],
+            &[local(1, 18, "aa", "zz")],
+            &[server(9, 18, "aa", "zz"), server(8, 12, "bb", "yy")],
+            &stored(&[1]),
         );
         assert_eq!(plan.renames, vec![(id(1), id(9))]);
         assert_eq!((plan.ambiguous, plan.unmatched), (0, 0));
+    }
+
+    /// The server lists every downloaded unit of the publication, including
+    /// the ones this device already holds correctly named. Such a chapter is
+    /// not a target: its directory is a good download, and proposing a
+    /// rename onto it is proposing to destroy it. Nothing but the shell's
+    /// own refusal stood between this and that.
+    #[test]
+    fn a_chapter_already_stored_on_this_device_is_not_a_target() {
+        let plan = plan_recovery(
+            &[local(1, 18, "aa", "zz")],
+            &[server(9, 18, "aa", "zz")],
+            &stored(&[1, 9]),
+        );
+        assert!(
+            plan.renames.is_empty(),
+            "id 9 is already on disk; the orphan has nowhere to go"
+        );
+        assert_eq!((plan.ambiguous, plan.unmatched), (0, 1));
+    }
+
+    /// A first page is shared often enough — a credits page, a "read on the
+    /// site" splash — that it cannot carry the identity alone. With the two
+    /// colliding chapters both present the uniqueness guard catches it; with
+    /// only one of them left it never fires, so the last page has to be part
+    /// of the comparison.
+    #[test]
+    fn the_last_page_has_to_match_too() {
+        let plan = plan_recovery(
+            &[local(1, 18, "splash", "zz")],
+            &[server(9, 18, "splash", "yy")],
+            &stored(&[1]),
+        );
+        assert!(plan.renames.is_empty());
+        assert_eq!((plan.ambiguous, plan.unmatched), (0, 1));
     }
 
     /// Two chapters can share a first page — a cover, a "read on the site"
@@ -1074,8 +1182,9 @@ mod tests {
     #[test]
     fn two_current_chapters_with_the_same_content_are_left_alone() {
         let plan = plan_recovery(
-            &[local(1, 18, "aa")],
-            &[server(9, 18, "aa"), server(8, 18, "aa")],
+            &[local(1, 18, "aa", "zz")],
+            &[server(9, 18, "aa", "zz"), server(8, 18, "aa", "zz")],
+            &stored(&[1]),
         );
         assert!(plan.renames.is_empty());
         assert_eq!((plan.ambiguous, plan.unmatched), (1, 0));
@@ -1086,8 +1195,9 @@ mod tests {
     #[test]
     fn two_directories_claiming_one_chapter_are_left_alone() {
         let plan = plan_recovery(
-            &[local(1, 18, "aa"), local(2, 18, "aa")],
-            &[server(9, 18, "aa")],
+            &[local(1, 18, "aa", "zz"), local(2, 18, "aa", "zz")],
+            &[server(9, 18, "aa", "zz")],
+            &stored(&[1, 2]),
         );
         assert!(plan.renames.is_empty());
         assert_eq!((plan.ambiguous, plan.unmatched), (2, 0));
@@ -1097,7 +1207,11 @@ mod tests {
     /// or the server's own copy is gone. Counted, never guessed at.
     #[test]
     fn no_current_chapter_with_that_content_is_left_alone() {
-        let plan = plan_recovery(&[local(1, 18, "aa")], &[server(9, 18, "bb")]);
+        let plan = plan_recovery(
+            &[local(1, 18, "aa", "zz")],
+            &[server(9, 18, "bb", "yy")],
+            &stored(&[1]),
+        );
         assert!(plan.renames.is_empty());
         assert_eq!((plan.ambiguous, plan.unmatched), (0, 1));
     }
@@ -1106,7 +1220,11 @@ mod tests {
     /// length, is a different chapter.
     #[test]
     fn the_page_count_has_to_match_too() {
-        let plan = plan_recovery(&[local(1, 18, "aa")], &[server(9, 19, "aa")]);
+        let plan = plan_recovery(
+            &[local(1, 18, "aa", "zz")],
+            &[server(9, 19, "aa", "zz")],
+            &stored(&[1]),
+        );
         assert!(plan.renames.is_empty());
         assert_eq!(plan.unmatched, 1);
     }
@@ -1115,8 +1233,63 @@ mod tests {
     /// longer orphans, so nothing reaches the matcher.
     #[test]
     fn a_second_run_finds_nothing() {
-        let plan = plan_recovery(&[], &[server(9, 18, "aa")]);
+        let plan = plan_recovery(&[], &[server(9, 18, "aa", "zz")], &stored(&[9]));
         assert_eq!(plan, super::RecoveryPlan::default());
+    }
+
+    /// The whole interrupted-run story, at the level of the pure logic.
+    ///
+    /// Run one matches the orphan and the directory is renamed — then the
+    /// app is killed before the mark follows. Run two therefore sees the
+    /// files under the current id with nothing marking them, and a mark on
+    /// a stale id whose directory no longer exists: unmatchable by content,
+    /// and left forever without this repair. The pairing puts it back.
+    #[test]
+    fn a_run_interrupted_between_the_rename_and_the_mark_is_repaired_next_time() {
+        let plan = plan_recovery(
+            &[local(1, 18, "aa", "zz")],
+            &[server(9, 18, "aa", "zz")],
+            &stored(&[1]),
+        );
+        assert_eq!(plan.renames, vec![(id(1), id(9))]);
+
+        // The rename landed, the re-key did not. On disk: 9. Marked: 1.
+        let after = stored(&[9]);
+        assert!(
+            !after.contains(&id(1).to_string()),
+            "the stale mark has no directory left to fingerprint"
+        );
+        let orphan_pass = plan_recovery(&[], &[server(9, 18, "aa", "zz")], &after);
+        assert_eq!(
+            orphan_pass,
+            super::RecoveryPlan::default(),
+            "the orphan pass cannot see it: there is nothing to hash"
+        );
+
+        // The reconciliation can: one stranded mark, one unmarked directory
+        // belonging to a current chapter, same length.
+        assert_eq!(
+            plan_mark_repair(&[(id(1), 18)], &[(id(9), 18)]),
+            vec![(id(1), id(9))]
+        );
+    }
+
+    /// Two stranded marks of the same length are two guesses about one
+    /// directory. A phantom mark (files deleted behind the app's back) must
+    /// not be able to attach itself to somebody else's chapter.
+    #[test]
+    fn an_ambiguous_stranded_mark_is_left_alone() {
+        assert!(plan_mark_repair(&[(id(1), 18), (id(2), 18)], &[(id(9), 18)]).is_empty());
+        assert!(plan_mark_repair(&[(id(1), 18)], &[(id(9), 18), (id(8), 18)]).is_empty());
+        // A different length is a different chapter: no repair, no guess.
+        assert!(plan_mark_repair(&[(id(1), 18)], &[(id(9), 19)]).is_empty());
+    }
+
+    /// Nothing stranded, nothing unmarked: the ordinary run does no repair.
+    #[test]
+    fn a_device_with_nothing_stranded_is_left_untouched() {
+        assert!(plan_mark_repair(&[], &[(id(9), 18)]).is_empty());
+        assert!(plan_mark_repair(&[(id(1), 18)], &[]).is_empty());
     }
 
     #[test]

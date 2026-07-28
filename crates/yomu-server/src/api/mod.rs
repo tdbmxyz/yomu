@@ -1098,6 +1098,12 @@ mod tests {
             hex::encode(Sha256::digest(b"page-zero-bytes")),
             "the hash must be of the lowest-numbered page file"
         );
+        assert_eq!(
+            entries[0]["page_last_sha256"],
+            hex::encode(Sha256::digest(b"page-seven-bytes")),
+            "and the other end of the chapter, so a shared first page cannot \
+             pass for a whole identity"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

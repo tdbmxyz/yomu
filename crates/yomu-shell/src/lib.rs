@@ -226,16 +226,22 @@ fn device_list_chapters(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     Ok(chapters)
 }
 
-/// What identifies a stored chapter by content rather than by name.
+/// What identifies a stored chapter by content rather than by name. The field
+/// names cross the bridge verbatim (serde → the JS object the UI reads in
+/// `offline::shell_chapter_fingerprint`), so they must stay in step with it.
 #[derive(serde::Serialize)]
 struct DeviceFingerprint {
     page_count: u32,
-    sha256: String,
+    sha256_first: String,
+    sha256_last: String,
 }
 
-/// Fingerprint one stored chapter: how many page files it holds, and the
-/// hash of the lowest-numbered one. Page files are zero-padded (`0000.jpg`),
-/// so name order is page order — the same order the server hands back.
+/// Fingerprint one stored chapter: how many page files it holds, and the hash
+/// of its lowest- and highest-numbered page. Page files are zero-padded
+/// (`0000.jpg`), so name order is page order — the same order the server hands
+/// back. Both ends are hashed because two chapters sharing a first page (a
+/// credits page, a site splash) is ordinary, and one hash cannot then tell
+/// them apart; on a one-page chapter both hashes are that page.
 #[tauri::command]
 fn device_chapter_fingerprint(
     app: tauri::AppHandle,
@@ -253,10 +259,13 @@ fn device_chapter_fingerprint(
     let first = pages
         .first()
         .ok_or_else(|| format!("chapter {chapter} has no pages"))?;
-    let bytes = std::fs::read(first).map_err(|e| e.to_string())?;
+    let last = pages.last().expect("non-empty: first() succeeded");
+    let first = std::fs::read(first).map_err(|e| e.to_string())?;
+    let last = std::fs::read(last).map_err(|e| e.to_string())?;
     Ok(DeviceFingerprint {
         page_count: pages.len() as u32,
-        sha256: hex::encode(Sha256::digest(&bytes)),
+        sha256_first: hex::encode(Sha256::digest(&first)),
+        sha256_last: hex::encode(Sha256::digest(&last)),
     })
 }
 

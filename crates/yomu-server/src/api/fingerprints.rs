@@ -49,14 +49,21 @@ pub async fn list(
             _ => continue,
         };
         // `page_files` returns reading order, so the first entry is the
-        // lowest-numbered page — the same one the device stored as page 0.
-        let Ok(bytes) = tokio::fs::read(&files[0]).await else {
+        // lowest-numbered page — the same one the device stored as page 0 —
+        // and the last entry is its last page. Both ends are hashed: a shared
+        // first page is common enough (credits, a site splash) that it cannot
+        // carry the identity of a chapter on its own.
+        let (Ok(first), Ok(last)) = (
+            tokio::fs::read(&files[0]).await,
+            tokio::fs::read(files.last().expect("non-empty")).await,
+        ) else {
             continue;
         };
         fingerprints.push(UnitFingerprint {
             unit_id: unit.id,
             page_count: files.len() as u32,
-            page0_sha256: hex::encode(Sha256::digest(&bytes)),
+            page0_sha256: hex::encode(Sha256::digest(&first)),
+            page_last_sha256: hex::encode(Sha256::digest(&last)),
         });
     }
 

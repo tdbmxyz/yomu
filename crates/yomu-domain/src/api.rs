@@ -234,11 +234,19 @@ pub struct PagesResponse {
 /// One downloaded unit as content, not as an id: what a client compares a
 /// directory it can no longer name against. Additive to the frozen 1.x wire —
 /// it travels one route, `GET /manga/{id}/fingerprints`.
+///
+/// Both ends of the chapter are hashed, not just the first page. Chapters of
+/// the same length routinely share a first page — a series' credits page, a
+/// "read it on the site" splash — and where only one of two such chapters
+/// survives a re-key, a first-page-only identity has nothing left to catch the
+/// collision with. Sharing *both* ends and the length is a different order of
+/// coincidence. On a one-page chapter the two hashes are the same page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitFingerprint {
     pub unit_id: Uuid,
     pub page_count: u32,
     pub page0_sha256: String,
+    pub page_last_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
