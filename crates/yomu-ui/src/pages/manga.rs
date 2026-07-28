@@ -1034,11 +1034,16 @@ fn ChapterItem(
             <a class="chapter-title" href=format!("/read/{publication_id}/{id}")>
                 {unit.title.clone()}
             </a>
-            {unavailable_reason
-                .is_some()
-                .then(|| {
-                    view! { <span class="muted chapter-unavailable">"· not available"</span> }
-                })}
+            // Only while the chapter really is out of reach. It says the
+            // server cannot fetch it; once the chapter sits on this device
+            // the user can open and read it, so the marker would be a lie
+            // from where they are standing.
+            {move || {
+                (unavailable_reason.is_some() && !on_device())
+                    .then(|| {
+                        view! { <span class="muted chapter-unavailable">"· not available"</span> }
+                    })
+            }}
             {unit
                 .published_at
                 .map(|at| {

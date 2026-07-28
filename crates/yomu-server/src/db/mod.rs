@@ -906,6 +906,47 @@ mod tests {
         ));
     }
 
+    /// Dismiss is the only action the "Not available" group offers, and it
+    /// works solely because the dismiss statement lists 'unavailable' among
+    /// the states it clears. Drop that word and the button would go quietly
+    /// dead — the row would stay on the page forever.
+    #[tokio::test]
+    async fn dismiss_clears_an_unavailable_unit() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let unit = db.list_units(publication.id).await.unwrap()[0].id;
+
+        db.mark_pending(&[unit]).await.unwrap();
+        db.finish_download(
+            unit,
+            Err(DownloadFailure::Unavailable(
+                "premium on this source".into(),
+            )),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db.dismiss_downloads(&[unit]).await.unwrap(), 1);
+        let row = db
+            .list_units(publication.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.id == unit)
+            .unwrap();
+        assert!(matches!(row.download, DownloadState::None));
+        assert!(
+            !db.download_queue()
+                .await
+                .unwrap()
+                .iter()
+                .any(|u| u.id == unit)
+        );
+    }
+
     #[tokio::test]
     async fn library_keys_maps_source_key_to_id() {
         let db = Db::in_memory().await.unwrap();

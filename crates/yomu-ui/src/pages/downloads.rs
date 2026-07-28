@@ -78,11 +78,12 @@ fn DownloadsView(
     pull: crate::PullQueue,
     refetch: impl Fn() + Clone + 'static + Send,
 ) -> impl IntoView {
-    let split = |want: fn(&DownloadState) -> bool| in_state(&resp.queue, want);
-    let downloading = split(|s| matches!(s, DownloadState::Downloading));
-    let pending = split(|s| matches!(s, DownloadState::Pending));
-    let failed = split(is_failed);
-    let unavailable = split(|s| matches!(s, DownloadState::Unavailable { .. }));
+    let Groups {
+        downloading,
+        pending,
+        failed,
+        unavailable,
+    } = groups(&resp.queue);
 
     let client = use_client();
     // Bulk action over a set of chapter ids, then refetch.
@@ -264,18 +265,33 @@ fn DownloadsView(
     }
 }
 
-/// The queue entries in one state. The bulk actions collect their ids from
-/// these lists, so this grouping is what keeps an unavailable chapter out of
-/// `Retry all`: it is a state of its own, never a `Failed`.
-fn in_state(
-    queue: &[DownloadQueueEntry],
-    want: fn(&DownloadState) -> bool,
-) -> Vec<DownloadQueueEntry> {
-    queue.iter().filter(|e| want(&e.state)).cloned().collect()
+/// The queue split into the groups the page renders.
+#[derive(Debug, Default, PartialEq)]
+struct Groups {
+    downloading: Vec<DownloadQueueEntry>,
+    pending: Vec<DownloadQueueEntry>,
+    failed: Vec<DownloadQueueEntry>,
+    unavailable: Vec<DownloadQueueEntry>,
 }
 
-fn is_failed(state: &DownloadState) -> bool {
-    matches!(state, DownloadState::Failed { .. })
+/// Split the queue into its display groups. The bulk actions collect their
+/// ids from these lists, so this one function is what keeps an unavailable
+/// chapter out of `Retry all`: it is a state of its own, never a `Failed`.
+/// The view builds its groups here and nowhere else, so there is no second
+/// place for the distinction to be got wrong.
+fn groups(queue: &[DownloadQueueEntry]) -> Groups {
+    let mut g = Groups::default();
+    for entry in queue {
+        let bucket = match entry.state {
+            DownloadState::Downloading => &mut g.downloading,
+            DownloadState::Pending => &mut g.pending,
+            DownloadState::Failed { .. } => &mut g.failed,
+            DownloadState::Unavailable { .. } => &mut g.unavailable,
+            _ => continue,
+        };
+        bucket.push(entry.clone());
+    }
+    g
 }
 
 fn ids(entries: &[DownloadQueueEntry]) -> Vec<uuid::Uuid> {
@@ -301,7 +317,7 @@ fn device_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{device_rows, ids, in_state, is_failed};
+    use super::{device_rows, groups, ids};
     use crate::LocalDownload;
     use uuid::Uuid;
     use yomu_domain::{DownloadQueueEntry, DownloadState};
@@ -323,7 +339,8 @@ mod tests {
 
     /// The whole point of the state: `Retry all` re-queues the failed group,
     /// and a chapter the source will not serve must never end up in it —
-    /// retrying only re-fetches the same paywall.
+    /// retrying only re-fetches the same paywall. This asserts on the very
+    /// function the view groups with, so a slip there fails here.
     #[test]
     fn retry_all_never_collects_an_unavailable_unit() {
         let queue = vec![
@@ -342,14 +359,18 @@ mod tests {
                 },
             ),
             entry(3, DownloadState::Pending),
+            entry(4, DownloadState::Downloading),
+            entry(5, DownloadState::Downloaded { at: at() }),
         ];
-        assert_eq!(ids(&in_state(&queue, is_failed)), vec![Uuid::from_u128(1)]);
-        assert_eq!(
-            ids(&in_state(&queue, |s| matches!(
-                s,
-                DownloadState::Unavailable { .. }
-            ))),
-            vec![Uuid::from_u128(2)]
+        let g = groups(&queue);
+        assert_eq!(ids(&g.failed), vec![Uuid::from_u128(1)]);
+        assert_eq!(ids(&g.unavailable), vec![Uuid::from_u128(2)]);
+        assert_eq!(ids(&g.pending), vec![Uuid::from_u128(3)]);
+        assert_eq!(ids(&g.downloading), vec![Uuid::from_u128(4)]);
+        // A finished download belongs to no group and to no bulk action.
+        assert!(
+            !ids(&g.failed).contains(&Uuid::from_u128(5))
+                && !ids(&g.pending).contains(&Uuid::from_u128(5))
         );
     }
 

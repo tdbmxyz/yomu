@@ -575,8 +575,11 @@ button.danger:hover {
   border-color: var(--muted);
 }
 
+/* The reason carries its own muted colour: the Rust view also puts `muted`
+   on the span, and the two must not be the only thing keeping it quiet. */
 .download-reason {
   font-size: 0.85rem;
+  color: var(--muted);
 }
 
 @media (max-width: 40rem) {
@@ -984,6 +987,7 @@ a.source-card:hover {
 .chapter-unavailable {
   flex: 0 0 auto;
   font-size: 0.75rem;
+  color: var(--muted);
 }
 
 @keyframes dl-pulse {
