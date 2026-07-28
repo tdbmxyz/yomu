@@ -124,15 +124,26 @@ server's stored page — the shell writes exactly the bytes
 Verified on the live server: page 0 of a downloaded chapter is 221 184 B and
 hashes identically across requests.
 
-So a chapter can be recognised by `(page_count, sha256 of page 0)`.
+So a chapter can be recognised by `(page_count, sha256 of the first page,
+sha256 of the last page)`.
+
+Both ends are hashed, not just the first. Review found the residual risk: a
+one-to-one collision, where a dropped chapter and a surviving one have the
+same page count and the same opening page (a shared credits or splash page)
+and only one of them is still listed — the uniqueness guard cannot see the
+collision, and the result is the wrong pages under a right-looking name with
+nothing to trigger a re-download. Hashing the last page as well collapses that
+window for one extra read on each side, which both already have the sorted
+file list for. On a single-page chapter the two hashes are the same page.
 
 **Server:** `GET /api/v1/manga/{id}/fingerprints` returns, for every
-downloaded unit of that publication, `{unit_id, page_count, page0_sha256}`.
-Additive, so it does not disturb the frozen wire.
+downloaded unit of that publication,
+`{unit_id, page_count, page0_sha256, page_last_sha256}`. Additive, so it does
+not disturb the frozen wire.
 
 **Shell:** three commands — `device_list_chapters()`,
-`device_chapter_fingerprint(chapter)` (page count plus the hash of the
-lowest-numbered page file), and `device_rename_chapter(from, to)`.
+`device_chapter_fingerprint(chapter)` (page count plus the hashes of the
+lowest- and highest-numbered page files), and `device_rename_chapter(from, to)`.
 
 **Client:** a `Recover device downloads` action in More. For every device mark
 whose unit id is not a current unit of its publication, fingerprint the local
@@ -293,7 +304,15 @@ Stated plainly rather than left to inference:
   `chapters/<uuid>/` directories; there is none here. What was verified is the
   server half of the match — that the fingerprints it would serve are unique —
   plus the pure matching function's unit tests.
-- **`yomu-shell` is unbuilt.** It needs GTK, which this machine does not have;
-  it is excluded from `just check`. The three device commands are correct by
-  inspection only.
+- **`yomu-shell` was built after all, and it passes.** Every agent working on
+  this branch was told the crate cannot compile here, and that turned out to
+  be wrong: a bare `cargo` invocation fails on GTK, but the repo already ships
+  the answer — `nix develop .#tauri --command just check-shell` provides the
+  webview stack, and `cargo clippy -p yomu-shell --all-targets -- -D warnings`
+  finishes clean on the three new device commands and the two-ended
+  fingerprint. So the device code is compiler-checked, not inspection-only.
+
+  Worth remembering next time: `just check` excludes `yomu-shell` on purpose
+  and `just check-shell` exists precisely to cover it. "Excluded from the
+  default check" was repeatedly read as "cannot be checked".
 - **The browser tier remains uncovered by design**, as B2 states.
