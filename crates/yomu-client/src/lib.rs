@@ -12,6 +12,22 @@ use yomu_domain::{
     UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
 };
 
+/// One downloaded unit as content, not as an id: what a client compares a
+/// directory it can no longer name against. Declared here rather than in
+/// `yomu-domain` because it is additive to the frozen 1.x wire and only ever
+/// travels this one route.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnitFingerprint {
+    pub unit_id: Uuid,
+    pub page_count: u32,
+    pub page0_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FingerprintsResponse {
+    pub fingerprints: Vec<UnitFingerprint>,
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ClientError {
     #[error("request failed: {0}")]
@@ -213,6 +229,13 @@ impl YomuClient {
     pub async fn restore(&self, backup: &Backup) -> Result<RestoreSummary> {
         let req = self.http.post(self.url("api/v1/restore")?).json(backup);
         self.send(req).await
+    }
+
+    /// Content fingerprints of this publication's downloaded units. A client
+    /// whose stored chapters were orphaned by a source re-key can match its
+    /// own directories against these and recover them.
+    pub async fn fingerprints(&self, id: Uuid) -> Result<FingerprintsResponse> {
+        self.get(&format!("api/v1/manga/{id}/fingerprints")).await
     }
 
     /// Trigger a streamer rescan of the server's books folder.

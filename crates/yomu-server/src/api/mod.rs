@@ -6,6 +6,7 @@ mod categories;
 mod chapters;
 mod downloads;
 mod error;
+mod fingerprints;
 mod library;
 mod progress;
 mod sources;
@@ -48,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/manga/{id}/refresh", axum::routing::post(library::refresh))
         .route("/manga/{id}/cover", get(library::cover))
+        .route("/manga/{id}/fingerprints", get(fingerprints::list))
         .route(
             "/manga/{id}/position",
             axum::routing::put(progress::set_position),
@@ -963,6 +965,88 @@ mod tests {
                 "vary `{vary}` is missing {expected}"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The recovery this endpoint exists for matches a device directory
+    /// against the server by content, so the fingerprint must come from the
+    /// bytes actually on disk — and a unit the server never downloaded has no
+    /// bytes to match, so it must not appear at all rather than appear with a
+    /// hash of nothing.
+    #[tokio::test]
+    async fn fingerprints_describe_downloaded_units_and_omit_the_rest() {
+        use sha2::{Digest, Sha256};
+        use yomu_domain::{ChapterRef, MangaDetails, MangaSummary};
+
+        let dir = fixture_dir("fingerprints-test");
+        let details = MangaDetails {
+            summary: MangaSummary {
+                key: "m1".into(),
+                title: "Publication m1".into(),
+                cover_url: None,
+                in_library: None,
+            },
+            description: None,
+            genres: Vec::new(),
+            chapters: ["c1", "c2"]
+                .iter()
+                .enumerate()
+                .map(|(i, key)| ChapterRef {
+                    key: (*key).into(),
+                    title: format!("Chapter {key}"),
+                    number: Some(i as f64 + 1.0),
+                    source_order: i as u32,
+                    scanlator: None,
+                    published_at: None,
+                })
+                .collect(),
+        };
+
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details, false)
+            .await
+            .unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        // Only the first is downloaded; the second stays untouched.
+        db.finish_download(units[0].id, Ok(2)).await.unwrap();
+
+        let config = Config {
+            data_dir: dir.clone(),
+            ..Config::default()
+        };
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let unit_dir = state.unit_dir(publication.id, units[0].id);
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        std::fs::write(unit_dir.join("0000.jpg"), b"page-zero-bytes").unwrap();
+        std::fs::write(unit_dir.join("0001.jpg"), b"page-one-bytes").unwrap();
+
+        let req = Request::builder()
+            .uri(format!("/api/v1/manga/{}/fingerprints", publication.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = body["fingerprints"].as_array().unwrap();
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the downloaded unit is fingerprinted"
+        );
+        assert_eq!(entries[0]["unit_id"], units[0].id.to_string());
+        assert_eq!(entries[0]["page_count"], 2);
+        assert_eq!(
+            entries[0]["page0_sha256"],
+            hex::encode(Sha256::digest(b"page-zero-bytes")),
+            "the hash must be of the lowest-numbered page file"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
