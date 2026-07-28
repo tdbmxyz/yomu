@@ -5,18 +5,53 @@ use yomu_domain::ReadingUnit;
 
 use super::*;
 
+/// Why a download produced no pages.
+#[derive(Debug, Clone)]
+pub enum DownloadFailure {
+    /// Something broke on the way — a retry may well work.
+    Failed(String),
+    /// The source served the chapter but does not offer it (premium,
+    /// locked). Not a fault: retrying accomplishes nothing until the source
+    /// frees the chapter, so the bulk and automatic paths pass it over.
+    Unavailable(String),
+}
+
+/// So the many call sites that only ever produce a plain failure keep
+/// reading as `Err(reason)`.
+impl<S: Into<String>> From<S> for DownloadFailure {
+    fn from(reason: S) -> Self {
+        Self::Failed(reason.into())
+    }
+}
+
 impl Db {
-    /// Queue chapters for download; already queued/downloaded ones are left
-    /// alone. Returns how many were actually (re)queued.
+    /// Queue chapters the user asked for; already queued/downloaded ones are
+    /// left alone. An unavailable chapter is included on purpose: it can
+    /// stop being premium, and asking for it explicitly is the user's call.
+    /// Returns how many were actually (re)queued.
     pub async fn mark_pending(&self, unit_ids: &[Uuid]) -> Result<u32> {
+        self.queue(unit_ids, true).await
+    }
+
+    /// Queue chapters nobody asked for (the auto-download sweep). Skips
+    /// unavailable ones, which would otherwise be re-attempted every sweep
+    /// for as long as the source keeps them locked.
+    pub async fn mark_pending_new(&self, unit_ids: &[Uuid]) -> Result<u32> {
+        self.queue(unit_ids, false).await
+    }
+
+    async fn queue(&self, unit_ids: &[Uuid], include_unavailable: bool) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
         let mut queued = 0;
         for id in unit_ids {
             let result = sqlx::query(
                 "UPDATE reading_units SET download_state = 'pending', download_error = NULL
-                 WHERE id = ? AND download_state IN ('none', 'failed')",
+                 WHERE id = ?
+                   AND (download_state IN ('none', 'failed')
+                        OR (? AND download_state = 'unavailable'))",
             )
             .bind(id.to_string())
+            .bind(include_unavailable)
             .execute(&mut *tx)
             .await?;
             queued += result.rows_affected() as u32;
@@ -49,7 +84,7 @@ impl Db {
     pub async fn finish_download(
         &self,
         id: Uuid,
-        outcome: std::result::Result<u32, String>,
+        outcome: std::result::Result<u32, DownloadFailure>,
     ) -> Result<bool> {
         let now = Utc::now();
         let result = match outcome {
@@ -65,12 +100,17 @@ impl Db {
                 .execute(&self.pool)
                 .await?
             }
-            Err(reason) => {
+            Err(failure) => {
+                let (state, reason) = match failure {
+                    DownloadFailure::Failed(reason) => ("failed", reason),
+                    DownloadFailure::Unavailable(reason) => ("unavailable", reason),
+                };
                 sqlx::query(
-                    "UPDATE reading_units SET download_state = 'failed', downloaded_at = ?,
+                    "UPDATE reading_units SET download_state = ?, downloaded_at = ?,
                                          download_error = ?
                      WHERE id = ?",
                 )
+                .bind(state)
                 .bind(now)
                 .bind(reason)
                 .bind(id.to_string())
@@ -104,7 +144,8 @@ impl Db {
     }
 
     /// Chapters currently in the download queue (downloading, then pending,
-    /// then failed), oldest-first within each state — for the Downloads view.
+    /// then failed, then unavailable), oldest-first within each state — for
+    /// the Downloads view, which groups the unavailable ones separately.
     /// The tiebreak matches [`Self::next_pending_download`] exactly: one sync
     /// stamps a whole listing with the same `fetched_at`, so without it the
     /// list falls back to insertion order — newest first, the reverse of the
@@ -112,11 +153,12 @@ impl Db {
     pub async fn download_queue(&self) -> Result<Vec<ReadingUnit>> {
         let rows = sqlx::query_as::<_, UnitRow>(
             "SELECT * FROM reading_units
-             WHERE download_state IN ('downloading', 'pending', 'failed')
+             WHERE download_state IN ('downloading', 'pending', 'failed', 'unavailable')
              ORDER BY CASE download_state
                           WHEN 'downloading' THEN 0
                           WHEN 'pending' THEN 1
-                          ELSE 2
+                          WHEN 'failed' THEN 2
+                          ELSE 3
                       END,
                       fetched_at, number IS NULL, number",
         )
@@ -158,7 +200,9 @@ impl Db {
         ))
     }
 
-    /// Re-queue failed chapters (failed → pending). Returns rows changed.
+    /// Re-queue failed chapters (failed → pending). Unavailable chapters are
+    /// deliberately not touched: they are not failures, and retrying one in
+    /// bulk changes nothing until the source frees it. Returns rows changed.
     pub async fn retry_failed(&self, unit_ids: &[Uuid]) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
         let mut affected = 0;
@@ -176,15 +220,17 @@ impl Db {
         Ok(affected)
     }
 
-    /// Drop chapters from the queue (pending or failed → none). Downloading
-    /// and downloaded chapters are untouched. Returns rows changed.
+    /// Drop chapters from the queue (pending, failed or unavailable → none).
+    /// Downloading and downloaded chapters are untouched. Dismissing is how
+    /// the user clears an unavailable chapter they have seen and accepted.
+    /// Returns rows changed.
     pub async fn dismiss_downloads(&self, unit_ids: &[Uuid]) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
         let mut affected = 0;
         for id in unit_ids {
             let result = sqlx::query(
                 "UPDATE reading_units SET download_state = 'none', download_error = NULL
-                 WHERE id = ? AND download_state IN ('pending', 'failed')",
+                 WHERE id = ? AND download_state IN ('pending', 'failed', 'unavailable')",
             )
             .bind(id.to_string())
             .execute(&mut *tx)

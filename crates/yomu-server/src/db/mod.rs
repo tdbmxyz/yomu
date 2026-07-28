@@ -107,6 +107,7 @@ mod backup;
 mod catalog;
 mod categories;
 mod downloads;
+pub use downloads::DownloadFailure;
 mod progress;
 mod publications;
 mod read_marks;
@@ -308,6 +309,12 @@ impl TryFrom<UnitRow> for ReadingUnit {
                 at: row
                     .downloaded_at
                     .ok_or_else(|| DbError::Corrupt("failed without timestamp".into()))?,
+                reason: row.download_error.unwrap_or_default(),
+            },
+            "unavailable" => DownloadState::Unavailable {
+                at: row
+                    .downloaded_at
+                    .ok_or_else(|| DbError::Corrupt("unavailable without timestamp".into()))?,
                 reason: row.download_error.unwrap_or_default(),
             },
             other => return Err(DbError::Corrupt(format!("download_state {other:?}"))),
@@ -768,6 +775,135 @@ mod tests {
         let after = db.list_units(publication.id).await.unwrap();
         let failed_row = after.iter().find(|c| c.id == failed).unwrap();
         assert!(matches!(failed_row.download, DownloadState::Pending));
+    }
+
+    /// Migration 0012 widens a CHECK, which SQLite can only do by rebuilding
+    /// the table — and dropping `reading_units` fires the read marks' ON
+    /// DELETE CASCADE. Run it over a populated pre-0012 database and confirm
+    /// nothing was lost, because it runs over a real library exactly once.
+    #[tokio::test]
+    async fn the_unavailable_migration_keeps_units_read_marks_and_journal() {
+        use sqlx::Executor;
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        pool.execute("PRAGMA foreign_keys = ON").await.unwrap();
+        let m = sqlx::migrate!("./migrations");
+        for mig in m.iter() {
+            if mig.version >= 12 {
+                break;
+            }
+            let mut tx = pool.begin().await.unwrap();
+            tx.execute(&*mig.sql).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        pool.execute(
+            "INSERT INTO publications (id,kind,source_id,source_key,title,auto_download,category,added_at) VALUES ('p1','comics','fixture','m1','P',0,'reading','2026-01-01T00:00:00Z');
+             INSERT INTO reading_units (id,publication_id,source_key,title,number,source_order,fetched_at,download_state,downloaded_at,page_count) VALUES ('u1','p1','c1','C1',1,0,'2026-01-01T00:00:00Z','downloaded','2026-01-02T00:00:00Z',12);
+             INSERT INTO read_units (user_id,unit_id,at) VALUES ('00000000-0000-0000-0000-000000000000','u1','2026-01-03T00:00:00Z');
+             INSERT INTO progress_events (id,publication_id,unit_id,page,device,at) VALUES ('e1','p1','u1',3,'d','2026-01-03T00:00:00Z');",
+        )
+        .await
+        .unwrap();
+        let twelve = m.iter().find(|x| x.version == 12).unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        tx.execute(&*twelve.sql).await.unwrap();
+        tx.commit().await.unwrap();
+        for (what, sql) in [
+            ("units", "SELECT COUNT(*) FROM reading_units"),
+            ("read", "SELECT COUNT(*) FROM read_units"),
+            ("progress", "SELECT COUNT(*) FROM progress_events"),
+        ] {
+            let n: i64 = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+            assert_eq!(n, 1, "{what}");
+        }
+        let state: String =
+            sqlx::query_scalar("SELECT download_state FROM reading_units WHERE id='u1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "downloaded");
+        pool.execute("UPDATE reading_units SET download_state='unavailable' WHERE id='u1'")
+            .await
+            .unwrap();
+        let bad: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(bad.is_empty());
+    }
+
+    /// A premium chapter is not a failure: it survives a restart as its own
+    /// state, "retry all" leaves it alone (retrying accomplishes nothing
+    /// until the source frees it), yet it stays in the queue so the UI can
+    /// show it, and an explicit request still re-queues it — a chapter can
+    /// stop being premium and that is the user's call.
+    #[tokio::test]
+    async fn an_unavailable_unit_stays_out_of_the_retry_path() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        let (locked, failed) = (units[0].id, units[1].id);
+
+        db.mark_pending(&[locked]).await.unwrap();
+        db.finish_download(
+            locked,
+            Err(DownloadFailure::Unavailable(
+                "premium on this source".into(),
+            )),
+        )
+        .await
+        .unwrap();
+        db.mark_pending(&[failed]).await.unwrap();
+        db.finish_download(failed, Err("boom".into()))
+            .await
+            .unwrap();
+
+        let read_back = |id| {
+            let db = &db;
+            async move {
+                db.list_units(publication.id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|u| u.id == id)
+                    .unwrap()
+            }
+        };
+
+        // It reads back as its own state, carrying the source's wording.
+        let row = read_back(locked).await;
+        match &row.download {
+            DownloadState::Unavailable { reason, .. } => {
+                assert_eq!(reason, "premium on this source")
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+
+        // Retry-all moves the failure and nothing else.
+        assert_eq!(db.retry_failed(&[locked, failed]).await.unwrap(), 1);
+        assert!(matches!(
+            read_back(locked).await.download,
+            DownloadState::Unavailable { .. }
+        ));
+
+        // The queue still lists it, so the UI can group it.
+        let queue = db.download_queue().await.unwrap();
+        assert!(queue.iter().any(|u| u.id == locked));
+
+        // The automatic sweep passes it over…
+        assert_eq!(db.mark_pending_new(&[locked]).await.unwrap(), 0);
+        // …but an explicit request re-queues it.
+        assert_eq!(db.mark_pending(&[locked]).await.unwrap(), 1);
+        assert!(matches!(
+            read_back(locked).await.download,
+            DownloadState::Pending
+        ));
     }
 
     #[tokio::test]
