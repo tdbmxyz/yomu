@@ -447,6 +447,7 @@ pub(crate) async fn save_locally(
                     offline::DeviceMark {
                         manga: manga_id,
                         pages: count,
+                        number: offline::device_chapter_number(id),
                     },
                 );
             });

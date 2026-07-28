@@ -259,6 +259,13 @@ pub struct DeviceMark {
     #[serde(default = "Uuid::nil")]
     pub manga: Uuid,
     pub pages: u32,
+    /// The chapter's number when it was saved. The cheap identity: a source
+    /// that re-keys its URLs changes every unit id, but a chapter's number
+    /// still names it without hashing a single page. Absent on marks
+    /// written before this field existed, and whenever the publication
+    /// wasn't cached at save time.
+    #[serde(default)]
+    pub number: Option<f64>,
 }
 
 /// Chapters stored on this device, with their page count — enough to open
@@ -281,6 +288,7 @@ pub fn device_chapters() -> std::collections::BTreeMap<Uuid, DeviceMark> {
                         DeviceMark {
                             manga: Uuid::nil(),
                             pages,
+                            number: None,
                         },
                     )
                 })
@@ -293,16 +301,36 @@ pub fn device_chapter_pages(id: Uuid) -> Option<u32> {
     device_chapters().get(&id).map(|m| m.pages)
 }
 
+/// The number recorded with a stored chapter, as [`mark_device_chapter`]
+/// wrote it — so an in-memory mark can carry what storage carries.
+pub fn device_chapter_number(id: Uuid) -> Option<f64> {
+    device_chapters().get(&id).and_then(|m| m.number)
+}
+
 pub fn mark_device_chapter(manga_id: Uuid, id: Uuid, page_count: u32) {
     let mut chapters = device_chapters();
+    // The number comes from the publication view this device already
+    // cached — the one the save was started from — so recording it costs
+    // no request. An older mark's number is kept when that lookup misses.
+    let number =
+        unit_number_hint(manga_id, id).or_else(|| chapters.get(&id).and_then(|m| m.number));
     chapters.insert(
         id,
         DeviceMark {
             manga: manga_id,
             pages: page_count,
+            number,
         },
     );
     write_json(DEVICE_KEY, &chapters);
+}
+
+fn unit_number_hint(manga_id: Uuid, id: Uuid) -> Option<f64> {
+    cache_get::<yomu_domain::PublicationDetailResponse>(&format!("manga:{manga_id}"))?
+        .units
+        .into_iter()
+        .find(|unit| unit.id == id)?
+        .number
 }
 
 /// Manga with device-saved chapters, and how many each has.
@@ -433,6 +461,125 @@ pub async fn shell_delete_chapter(chapter_id: Uuid) -> Result<(), String> {
     let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
     shell_invoke("device_delete_chapter", args).await?;
     Ok(())
+}
+
+// ---- recovering orphaned device downloads ----
+//
+// A device names each stored chapter after its unit id. When a source
+// changes its URLs the server re-keys every unit, and the files on this
+// device — which never moved — stop matching anything the app asks for.
+// No mapping survives the re-key, so the only thing left that can still
+// recognise a directory is what is inside it: the page count and the hash
+// of the first page, which the server can compute for the same chapter.
+
+/// A stored chapter described by its content rather than by the name that
+/// went stale. Mirrors the shell's `device_chapter_fingerprint` answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceFingerprint {
+    pub page_count: u32,
+    pub sha256: String,
+}
+
+/// What can be done about a set of orphaned directories: the renames that
+/// are certain, and how many were left alone because more than one current
+/// chapter fits, or none does.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RecoveryPlan {
+    /// `(stale id, current id)`, in input order.
+    pub renames: Vec<(Uuid, Uuid)>,
+    pub ambiguous: usize,
+    pub unmatched: usize,
+}
+
+/// Match stored directories against the server's fingerprints for the same
+/// publication.
+///
+/// A rename is only proposed when the match is unique in **both**
+/// directions: exactly one current chapter has that content, and no other
+/// stored directory claims it. Two chapters can genuinely share a first
+/// page (a cover, a "read on the site" splash), and renaming a directory
+/// onto the wrong id would leave the wrong pages under a correct-looking
+/// name with nothing to trigger a re-download. So anything less than
+/// certain is left exactly where it is and counted.
+pub fn plan_recovery(
+    local: &[(Uuid, DeviceFingerprint)],
+    server: &[yomu_domain::UnitFingerprint],
+) -> RecoveryPlan {
+    let mut plan = RecoveryPlan::default();
+    let mut candidates: Vec<(Uuid, Uuid)> = Vec::new();
+    for (stale, fingerprint) in local {
+        let mut hits = server.iter().filter(|unit| {
+            unit.page_count == fingerprint.page_count && unit.page0_sha256 == fingerprint.sha256
+        });
+        match (hits.next(), hits.next()) {
+            (Some(hit), None) => candidates.push((*stale, hit.unit_id)),
+            (Some(_), Some(_)) => plan.ambiguous += 1,
+            _ => plan.unmatched += 1,
+        }
+    }
+    for (stale, target) in &candidates {
+        if candidates
+            .iter()
+            .filter(|(_, other)| other == target)
+            .count()
+            > 1
+        {
+            plan.ambiguous += 1;
+        } else {
+            plan.renames.push((*stale, *target));
+        }
+    }
+    plan
+}
+
+/// Directory names the shell actually holds (unit ids, staging dirs
+/// omitted) — the ground truth a stale mark is checked against.
+pub async fn shell_list_chapters() -> Result<Vec<String>, String> {
+    let value = shell_invoke("device_list_chapters", js_sys::Object::new()).await?;
+    let array = js_sys::Array::from(&value);
+    Ok(array.iter().filter_map(|item| item.as_string()).collect())
+}
+
+/// Describe one stored chapter by its content.
+pub async fn shell_chapter_fingerprint(chapter_id: Uuid) -> Result<DeviceFingerprint, String> {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
+    let value = shell_invoke("device_chapter_fingerprint", args).await?;
+    let page_count = js_sys::Reflect::get(&value, &"page_count".into())
+        .ok()
+        .and_then(|v| v.as_f64())
+        .ok_or("fingerprint without a page count")?;
+    let sha256 = js_sys::Reflect::get(&value, &"sha256".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or("fingerprint without a hash")?;
+    Ok(DeviceFingerprint {
+        page_count: page_count as u32,
+        sha256,
+    })
+}
+
+/// Re-key a stored chapter's directory. Errors (notably: the device
+/// already holds a chapter under the new id) are the caller's to count,
+/// not to recover from — the files stay where they are either way.
+pub async fn shell_rename_chapter(from: Uuid, to: Uuid) -> Result<(), String> {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &"from".into(), &from.to_string().into());
+    let _ = js_sys::Reflect::set(&args, &"to".into(), &to.to_string().into());
+    shell_invoke("device_rename_chapter", args)
+        .await
+        .map(|_| ())
+}
+
+/// Move a mark from a stale unit id to the current one, keeping its page
+/// count and number. A no-op when nothing is marked under `from`, so a
+/// second recovery run finds nothing to do.
+pub fn rekey_device_mark(from: Uuid, to: Uuid) {
+    let mut marks = device_chapters();
+    if let Some(mark) = marks.remove(&from) {
+        marks.insert(to, mark);
+        write_json(DEVICE_KEY, &marks);
+    }
 }
 
 /// Drop a chapter's "on this device" mark (after deleting its files).
@@ -881,8 +1028,96 @@ pub fn set_reader_direction(manga_id: Uuid, direction: ReaderDirection) {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_downgrade, should_probe_on_resume};
+    use super::{DeviceFingerprint, plan_recovery, should_downgrade, should_probe_on_resume};
     use crate::Connectivity;
+    use uuid::Uuid;
+    use yomu_domain::UnitFingerprint;
+
+    fn id(n: u8) -> Uuid {
+        Uuid::from_bytes([n; 16])
+    }
+
+    fn local(n: u8, pages: u32, sha: &str) -> (Uuid, DeviceFingerprint) {
+        (
+            id(n),
+            DeviceFingerprint {
+                page_count: pages,
+                sha256: sha.into(),
+            },
+        )
+    }
+
+    fn server(n: u8, pages: u32, sha: &str) -> UnitFingerprint {
+        UnitFingerprint {
+            unit_id: id(n),
+            page_count: pages,
+            page0_sha256: sha.into(),
+        }
+    }
+
+    /// The case this exists for: the directory is still on the phone under
+    /// the id the source's re-key threw away, and exactly one current
+    /// chapter has those bytes.
+    #[test]
+    fn one_current_chapter_with_the_same_content_is_a_rename() {
+        let plan = plan_recovery(
+            &[local(1, 18, "aa")],
+            &[server(9, 18, "aa"), server(8, 12, "bb")],
+        );
+        assert_eq!(plan.renames, vec![(id(1), id(9))]);
+        assert_eq!((plan.ambiguous, plan.unmatched), (0, 0));
+    }
+
+    /// Two chapters can share a first page — a cover, a "read on the site"
+    /// splash. Renaming onto the wrong one would leave wrong pages under a
+    /// right-looking name forever, so neither is touched.
+    #[test]
+    fn two_current_chapters_with_the_same_content_are_left_alone() {
+        let plan = plan_recovery(
+            &[local(1, 18, "aa")],
+            &[server(9, 18, "aa"), server(8, 18, "aa")],
+        );
+        assert!(plan.renames.is_empty());
+        assert_eq!((plan.ambiguous, plan.unmatched), (1, 0));
+    }
+
+    /// Ambiguity runs the other way too: two stored directories that both
+    /// fit one current chapter are two guesses, not one match.
+    #[test]
+    fn two_directories_claiming_one_chapter_are_left_alone() {
+        let plan = plan_recovery(
+            &[local(1, 18, "aa"), local(2, 18, "aa")],
+            &[server(9, 18, "aa")],
+        );
+        assert!(plan.renames.is_empty());
+        assert_eq!((plan.ambiguous, plan.unmatched), (2, 0));
+    }
+
+    /// Nothing on the server has that content — the chapter was dropped,
+    /// or the server's own copy is gone. Counted, never guessed at.
+    #[test]
+    fn no_current_chapter_with_that_content_is_left_alone() {
+        let plan = plan_recovery(&[local(1, 18, "aa")], &[server(9, 18, "bb")]);
+        assert!(plan.renames.is_empty());
+        assert_eq!((plan.ambiguous, plan.unmatched), (0, 1));
+    }
+
+    /// The page count is part of the identity: same first page, different
+    /// length, is a different chapter.
+    #[test]
+    fn the_page_count_has_to_match_too() {
+        let plan = plan_recovery(&[local(1, 18, "aa")], &[server(9, 19, "aa")]);
+        assert!(plan.renames.is_empty());
+        assert_eq!(plan.unmatched, 1);
+    }
+
+    /// A second run has nothing left to do: the marks it repaired are no
+    /// longer orphans, so nothing reaches the matcher.
+    #[test]
+    fn a_second_run_finds_nothing() {
+        let plan = plan_recovery(&[], &[server(9, 18, "aa")]);
+        assert_eq!(plan, super::RecoveryPlan::default());
+    }
 
     #[test]
     fn a_failure_while_visible_takes_the_app_offline() {

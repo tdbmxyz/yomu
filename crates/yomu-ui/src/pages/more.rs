@@ -25,6 +25,118 @@ fn download_json(filename: &str, json: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// The browser tier cannot be repaired from here, and the report must not
+/// pretend otherwise: pages saved in a browser live in the service worker's
+/// cache under the page URL, and that URL contains the chapter id. Moving
+/// them would mean copying every cached response to a new URL.
+const BROWSER_CAVEAT: &str = "Chapters saved in a browser are not covered: \
+    there each page is cached under its own address, which contains the \
+    chapter id, so those have to be downloaded again.";
+
+/// Find device downloads whose chapter id no longer exists, recognise them
+/// by content, and re-key both the files and the mark.
+///
+/// The mark records which title a chapter belongs to and that id did not
+/// change, so each orphan is only ever compared against the fingerprints of
+/// its own publication. Nothing is guessed: a directory that matches two
+/// current chapters, or none, is left exactly where it is and counted.
+async fn recover_device_downloads(client: &yomu_client::YomuClient) -> String {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    if !offline::shell_available() {
+        return format!("Nothing to do here. {BROWSER_CAVEAT}");
+    }
+    let stored: BTreeSet<String> = match offline::shell_list_chapters().await {
+        Ok(names) => names.into_iter().collect(),
+        Err(err) => return format!("Could not read this device's storage: {err}"),
+    };
+
+    let mut by_publication: BTreeMap<uuid::Uuid, Vec<uuid::Uuid>> = BTreeMap::new();
+    for (unit, mark) in offline::device_chapters() {
+        // A mark from before the manga id was recorded cannot be scoped to
+        // a publication, and searching the whole library on content is not
+        // a search, it is a coincidence waiting to happen.
+        if !mark.manga.is_nil() {
+            by_publication.entry(mark.manga).or_default().push(unit);
+        }
+    }
+
+    let (mut renamed, mut ambiguous, mut unmatched, mut refused, mut unreachable) = (0, 0, 0, 0, 0);
+    for (publication, units) in by_publication {
+        let Ok(detail) = client.publication(publication).await else {
+            unreachable += 1;
+            continue;
+        };
+        let current: BTreeSet<uuid::Uuid> = detail.units.iter().map(|u| u.id).collect();
+        let orphans: Vec<uuid::Uuid> = units
+            .into_iter()
+            .filter(|unit| !current.contains(unit))
+            .collect();
+        if orphans.is_empty() {
+            continue;
+        }
+        let Ok(server) = client.fingerprints(publication).await else {
+            unreachable += 1;
+            continue;
+        };
+        let mut local = Vec::new();
+        for unit in orphans {
+            // A mark with no directory behind it has no content to match.
+            if !stored.contains(&unit.to_string()) {
+                unmatched += 1;
+                continue;
+            }
+            match offline::shell_chapter_fingerprint(unit).await {
+                Ok(fingerprint) => local.push((unit, fingerprint)),
+                Err(_) => unmatched += 1,
+            }
+        }
+        let plan = offline::plan_recovery(&local, &server.fingerprints);
+        ambiguous += plan.ambiguous;
+        unmatched += plan.unmatched;
+        for (from, to) in plan.renames {
+            match offline::shell_rename_chapter(from, to).await {
+                Ok(()) => {
+                    offline::rekey_device_mark(from, to);
+                    renamed += 1;
+                }
+                // The device already holds that chapter under its current
+                // id; the good copy stays and the stale one is left alone.
+                Err(_) => refused += 1,
+            }
+        }
+    }
+
+    let mut report = if renamed == 0 {
+        "Found nothing to recover.".to_string()
+    } else {
+        format!("Recovered {renamed} chapter(s).")
+    };
+    if ambiguous > 0 {
+        report.push_str(&format!(
+            " {ambiguous} could not be told apart from another chapter and were left alone."
+        ));
+    }
+    if unmatched > 0 {
+        report.push_str(&format!(
+            " {unmatched} matched nothing in the library and were left alone."
+        ));
+    }
+    if refused > 0 {
+        report.push_str(&format!(
+            " {refused} were already saved under their new id and were left alone."
+        ));
+    }
+    if unreachable > 0 {
+        report.push_str(&format!(
+            " {unreachable} title(s) could not be checked (server unreachable)."
+        ));
+    }
+    report.push(' ');
+    report.push_str(BROWSER_CAVEAT);
+    report
+}
+
 #[component]
 pub fn More() -> impl IntoView {
     let current = RwSignal::new(offline::theme());
@@ -131,6 +243,23 @@ pub fn More() -> impl IntoView {
         }
     };
 
+    // Recovery for downloads orphaned by a source re-key: the files are
+    // still here, under directory names the server no longer knows.
+    let device_marks = crate::use_device_marks();
+    let recover_status = RwSignal::new(None::<String>);
+    let recover = {
+        let client = client.clone();
+        move |_| {
+            let client = client.clone();
+            recover_status.set(Some("Looking through saved chapters…".into()));
+            spawn_local(async move {
+                let report = recover_device_downloads(&client).await;
+                device_marks.set(offline::device_chapters());
+                recover_status.set(Some(report));
+            });
+        }
+    };
+
     view! {
         <section class="more">
             <h2>"Settings"</h2>
@@ -205,6 +334,20 @@ pub fn More() -> impl IntoView {
             </div>
             {move || {
                 rescan_status
+                    .get()
+                    .map(|msg| view! { <p class="muted backup-status">{msg}</p> })
+            }}
+
+            <p class="muted">
+                "If a source changed its addresses, chapters saved on this device "
+                "stop matching the library and read as not saved. This finds them "
+                "again by their contents, and only when the match is certain."
+            </p>
+            <div class="backup-actions">
+                <button class="button" on:click=recover>"Recover device downloads"</button>
+            </div>
+            {move || {
+                recover_status
                     .get()
                     .map(|msg| view! { <p class="muted backup-status">{msg}</p> })
             }}
