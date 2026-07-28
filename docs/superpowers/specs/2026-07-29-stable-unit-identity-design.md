@@ -202,3 +202,98 @@ hashes, and it costs nothing to record.
   `unavailable` selector happens to match, a genuine parse failure would be
   reported as premium. The selector is opt-in per source and should be narrow;
   the reason string names the source's own wording so it is recognisable.
+
+---
+
+## Verified — 2026-07-29, against the live library
+
+Measured on the running production server (read-only, `GET` only; the
+production database was never opened). The headline question was how much of
+the orphaned library the fingerprint recovery can actually re-key, since it
+refuses to guess when two chapters share a fingerprint.
+
+**Answer: 661 of 661 fingerprintable chapters are uniquely identified. Zero
+ambiguous.**
+
+### Method
+
+The `/fingerprints` endpoint does not exist on the running server (see
+"What could not be verified" below), so the fingerprint was recomputed the way
+the endpoint computes it, from public read-only endpoints:
+
+- `GET /api/v1/manga/{id}` — unit list, download states, unit-id timestamps;
+- `GET /api/v1/chapters/{unit}/pages` — `page_count`, which for a downloaded
+  unit is the number of page *files on disk*, the same value the endpoint
+  reports;
+- `GET /api/v1/chapters/{unit}/pages/0` — bytes piped straight into `sha256sum`
+  and discarded.
+
+One request every 200 ms, 661 chapters, nothing written.
+
+Caveat on strength: this measured the *original* fingerprint,
+`(page_count, sha256 of page 0)`. The endpoint has since been strengthened to
+carry the last page's hash as well, so the real matcher is strictly more
+discriminating than what was measured here. The numbers below are therefore a
+lower bound on how well it separates chapters.
+
+### Per publication
+
+The six publications re-keyed on 2026-07-27 are confirmed from the API: every
+one of their units carries a unit id minted within a six-second window on that
+date, and they total exactly **1132** chapters. The three publications from
+other sources kept their original, older ids — the re-key was one source's
+doing.
+
+| publication | re-keyed units | downloaded (server) | fingerprinted | unique | ambiguous |
+| --- | --- | --- | --- | --- | --- |
+| `019f3442…9ce0` | 178 | 178 | 178 | 178 | 0 |
+| `019f90c6…8e78b` | 267 | 266 | 266 | 266 | 0 |
+| `019f5108…6bb9` | 322 | 4 | 4 | 4 | 0 |
+| `019f90c1…5e36` | 152 | 0 | 0 | — | — |
+| `019f5109…6c54` | 111 | 111 | 111 | 111 | 0 |
+| `019f90c2…5994` | 102 | 102 | 102 | 102 | 0 |
+| **total** | **1132** | **661** | **661** | **661** | **0** |
+
+(Three further publications, 1995 units from two other sources, were not
+re-keyed and are listed here only to record that they were checked.)
+
+### What the measurement says about the design
+
+- **The refusal-to-guess clause never fires on this library.** Not one
+  `(page_count, sha256)` pair repeats inside a publication. Stronger: all 661
+  page-0 hashes are distinct *across all five publications together*, so the
+  hash alone carries the identity and `page_count` is only corroboration.
+- **`page_count` alone would have been useless.** 628 of the 661 chapters
+  share their page count with at least one sibling (173/178, 250/266, 107/111,
+  96/102, 2/4). Page counts cluster tightly — 9–74 pages in the widest
+  publication, 17–19 in the narrowest. Matching on number-of-pages, or on
+  chapter number, would have been a coin flip; hashing the content is what
+  makes the recovery decidable.
+- **The real ceiling is not ambiguity, it is server coverage.** 471 of the
+  1132 re-keyed chapters (42%) are not downloaded *on the server*, so no
+  fingerprint exists for them and a device copy of one of those cannot be
+  matched — it is left alone, uncounted as ambiguous but equally unrecovered.
+  One publication (`019f90c1…`, 152 units) has nothing downloaded at all and
+  is entirely outside the recovery's reach. This is a coverage limit of the
+  approach, not a defect: the server can only recognise content it still
+  holds. Whether it bites depends on how much the *device* holds that the
+  server does not, which cannot be seen from the server side.
+
+### What could not be verified here
+
+Stated plainly rather than left to inference:
+
+- **The re-key fix (B1) cannot be exercised against production.** The running
+  server predates this branch: `GET /api/v1/manga/{id}/fingerprints` returns
+  the SPA shell with `200 text/html`, which is both proof that the endpoint is
+  absent and a sighting of the unrouted-`/api` bug fixed on this branch. B1 is
+  covered by the in-repo regression test (a listing where every key changes,
+  asserting ids, download state and read marks survive), not by production.
+- **The end-to-end recovery was not run.** It needs a device with orphaned
+  `chapters/<uuid>/` directories; there is none here. What was verified is the
+  server half of the match — that the fingerprints it would serve are unique —
+  plus the pure matching function's unit tests.
+- **`yomu-shell` is unbuilt.** It needs GTK, which this machine does not have;
+  it is excluded from `just check`. The three device commands are correct by
+  inspection only.
+- **The browser tier remains uncovered by design**, as B2 states.
