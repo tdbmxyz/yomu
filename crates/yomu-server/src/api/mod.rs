@@ -90,9 +90,20 @@ pub fn router(state: AppState) -> Router {
             "/downloads/dismiss",
             axum::routing::post(downloads::dismiss),
         )
-        .with_state(state.clone());
+        .with_state(state.clone())
+        // Anything under /api/v1 this build does not serve is an error, not a
+        // page. Without this it reaches the SPA fallback below and comes back
+        // as 200 index.html, so a client calling a route older than itself
+        // gets a JSON decode error rather than a plain 404, and an API typo
+        // answers HTML.
+        .fallback(api_not_found);
 
-    let mut app = Router::new().nest("/api/v1", api);
+    let mut app = Router::new()
+        .nest("/api/v1", api)
+        // The same for prefixes the nest never sees: a future /api/v2, or
+        // /api/health from a client that dropped the version.
+        .route("/api", axum::routing::any(api_not_found))
+        .route("/api/{*rest}", axum::routing::any(api_not_found));
 
     if let Some(dir) = &state.config.static_dir {
         let index = dir.join("index.html");
@@ -171,6 +182,12 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
 /// Ceiling for an uploaded backup. Roughly 100× a 3k-chapter export, so it
 /// is a runaway guard rather than a limit any real library meets.
 const RESTORE_BODY_LIMIT: usize = 256 * 1024 * 1024;
+
+/// The answer for every unrouted `/api` path: a 404 in the same JSON shape
+/// every other API error uses, so a client can read it.
+async fn api_not_found() -> ApiError {
+    ApiError::NotFound
+}
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -974,6 +991,14 @@ mod tests {
     /// bytes actually on disk — and a unit the server never downloaded has no
     /// bytes to match, so it must not appear at all rather than appear with a
     /// hash of nothing.
+    ///
+    /// Both units get a full page directory, so the *only* thing that can keep
+    /// the second one out of the answer is its download state. (With pages on
+    /// disk for the downloaded unit alone, deleting the state check left the
+    /// test green: the missing-directory guard was silently doing its work.)
+    /// The downloaded unit gets more files than its recorded `page_count`, and
+    /// more than two of them, so a count read from the database and a listing
+    /// left unsorted are both visible from the response.
     #[tokio::test]
     async fn fingerprints_describe_downloaded_units_and_omit_the_rest() {
         use sha2::{Digest, Sha256};
@@ -1018,10 +1043,33 @@ mod tests {
         };
         let state = AppState::new(config, db, Registry::default(), None);
 
+        // Written newest-name-first: on a filesystem that hands back entries
+        // in creation order, an unsorted read starts at the last page, so the
+        // page-0 hash below catches it outright. Elsewhere the order is a hash
+        // of the names and eight pages make an accidental match unlikely.
+        let pages: [(&str, &[u8]); 8] = [
+            ("0007.jpg", b"page-seven-bytes"),
+            ("0006.gif", b"page-six-bytes"),
+            ("0005.avif", b"page-five-bytes"),
+            ("0004.jpg", b"page-four-bytes"),
+            ("0003.webp", b"page-three-bytes"),
+            ("0002.png", b"page-two-bytes"),
+            ("0001.jpg", b"page-one-bytes"),
+            ("0000.jpg", b"page-zero-bytes"),
+        ];
         let unit_dir = state.unit_dir(publication.id, units[0].id);
         std::fs::create_dir_all(&unit_dir).unwrap();
-        std::fs::write(unit_dir.join("0000.jpg"), b"page-zero-bytes").unwrap();
-        std::fs::write(unit_dir.join("0001.jpg"), b"page-one-bytes").unwrap();
+        for (name, bytes) in pages {
+            std::fs::write(unit_dir.join(name), bytes).unwrap();
+        }
+        // The undownloaded unit has pages on disk too — a leftover directory
+        // from a removed download is exactly this — so nothing but its state
+        // can keep it out of the answer.
+        let other_dir = state.unit_dir(publication.id, units[1].id);
+        std::fs::create_dir_all(&other_dir).unwrap();
+        for (name, bytes) in pages {
+            std::fs::write(other_dir.join(name), bytes).unwrap();
+        }
 
         let req = Request::builder()
             .uri(format!("/api/v1/manga/{}/fingerprints", publication.id))
@@ -1041,12 +1089,95 @@ mod tests {
             "only the downloaded unit is fingerprinted"
         );
         assert_eq!(entries[0]["unit_id"], units[0].id.to_string());
-        assert_eq!(entries[0]["page_count"], 2);
+        assert_eq!(
+            entries[0]["page_count"], 8,
+            "the count must be the files on disk, not the recorded page_count"
+        );
         assert_eq!(
             entries[0]["page0_sha256"],
             hex::encode(Sha256::digest(b"page-zero-bytes")),
             "the hash must be of the lowest-numbered page file"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A publication that does not exist is not a publication with nothing
+    /// downloaded. Answering both with an empty list has a recovery client
+    /// report zero matches for a library entry that is simply gone, so this
+    /// 404s like `GET /manga/{id}` next door.
+    #[tokio::test]
+    async fn fingerprints_404_for_an_unknown_publication() {
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(Config::default(), db, Registry::default(), None);
+        let req = Request::builder()
+            .uri(format!(
+                "/api/v1/manga/{}/fingerprints",
+                uuid::Uuid::now_v7()
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An `/api` path this build does not serve must say so. Unmatched paths
+    /// used to reach the static fallback, so a client calling a route its
+    /// server predates got 200 `text/html` and a JSON decode error instead of
+    /// a clean "not supported" — and any API typo answered with the SPA shell.
+    #[tokio::test]
+    async fn an_unknown_api_path_is_404_json_and_never_the_spa_shell() {
+        let dir = fixture_dir("api-404-test");
+        std::fs::write(dir.join("index.html"), b"<html>SHELL</html>").unwrap();
+
+        let config = Config {
+            static_dir: Some(dir.clone()),
+            ..Config::default()
+        };
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let router = super::router(state);
+
+        for uri in [
+            // A route a later version adds, called against this one.
+            "/api/v1/manga/019f4921-3946-7c20-9a67-d84d46072fe6/fingerprints/extra",
+            "/api/v1/not-a-route",
+            // A version prefix that does not exist at all.
+            "/api/v2/health",
+            "/api/health",
+        ] {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                !content_type.contains("text/html"),
+                "{uri} answered with the SPA shell ({content_type})"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body)
+                .unwrap_or_else(|e| panic!("{uri} did not answer JSON: {e}"));
+            assert!(body["message"].is_string(), "{uri}");
+        }
+
+        // The SPA still owns everything else, deep links included.
+        let req = Request::builder()
+            .uri("/library/42")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<html>SHELL</html>");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -28,6 +28,12 @@ pub async fn list(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<FingerprintsResponse>, ApiError> {
+    // A publication that is gone must not read as one with nothing
+    // downloaded: this is the call a client makes to decide what its own
+    // storage still corresponds to, and an empty list would have it conclude
+    // "no matches" instead of "no such publication". `list_units` is happy to
+    // return nothing for an unknown id, so ask first.
+    state.db.get_publication(id).await?;
     let units = state.db.list_units(id).await?;
     let mut fingerprints = Vec::new();
 
