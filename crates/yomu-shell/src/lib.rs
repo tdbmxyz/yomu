@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 fn configured_server() -> Option<String> {
@@ -196,6 +197,84 @@ fn device_delete_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), S
     std::fs::remove_dir_all(dir).map_err(|e| e.to_string())
 }
 
+// ---- recovering chapters the server re-keyed ----
+//
+// A stored chapter is named after its unit id, so when a source changed its
+// URLs and the server re-keyed every unit, the directories here stopped
+// matching anything and the downloads became invisible. No mapping survives
+// to undo that, but the bytes do: these pages are byte-for-byte what the
+// server stored, so a chapter can be recognised by its page count and the
+// hash of its first page and then renamed to the id it now has.
+
+/// Chapter directories currently on the device. A `.partial-` directory is a
+/// download in progress, not a chapter, so it is not listed.
+#[tauri::command]
+fn device_list_chapters(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let entries = match std::fs::read_dir(chapters_dir(&app)?) {
+        Ok(entries) => entries,
+        // Nothing has ever been saved: an empty device, not a failure.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut chapters: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.starts_with(".partial-"))
+        .collect();
+    chapters.sort();
+    Ok(chapters)
+}
+
+/// What identifies a stored chapter by content rather than by name.
+#[derive(serde::Serialize)]
+struct DeviceFingerprint {
+    page_count: u32,
+    sha256: String,
+}
+
+/// Fingerprint one stored chapter: how many page files it holds, and the
+/// hash of the lowest-numbered one. Page files are zero-padded (`0000.jpg`),
+/// so name order is page order — the same order the server hands back.
+#[tauri::command]
+fn device_chapter_fingerprint(
+    app: tauri::AppHandle,
+    chapter: String,
+) -> Result<DeviceFingerprint, String> {
+    checked_id(&chapter)?;
+    let dir = chapters_dir(&app)?.join(&chapter);
+    let mut pages: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    pages.sort();
+    let first = pages
+        .first()
+        .ok_or_else(|| format!("chapter {chapter} has no pages"))?;
+    let bytes = std::fs::read(first).map_err(|e| e.to_string())?;
+    Ok(DeviceFingerprint {
+        page_count: pages.len() as u32,
+        sha256: hex::encode(Sha256::digest(&bytes)),
+    })
+}
+
+/// Re-key a stored chapter. Refuses when the target already exists: that is
+/// a chapter the device holds under its current id, and overwriting it would
+/// destroy a good download to save a stale one.
+#[tauri::command]
+fn device_rename_chapter(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
+    checked_id(&from)?;
+    checked_id(&to)?;
+    let dir = chapters_dir(&app)?;
+    let target = dir.join(&to);
+    if target.exists() {
+        return Err(format!("chapter {to} is already stored on this device"));
+    }
+    std::fs::rename(dir.join(&from), &target).map_err(|e| e.to_string())
+}
+
 fn device_page_file(app: &tauri::AppHandle, chapter: &str, n: u32) -> Option<PathBuf> {
     let dir = chapters_dir(app).ok()?.join(checked_id(chapter).ok()?);
     let prefix = format!("{n:04}.");
@@ -229,7 +308,10 @@ pub fn run() {
             device_save_page,
             device_finish_chapter,
             device_delete_chapter,
-            device_save_cover
+            device_save_cover,
+            device_list_chapters,
+            device_chapter_fingerprint,
+            device_rename_chapter
         ])
         // Serves device-saved content: yomudev://localhost/chapter/<id>/<n>
         // and yomudev://localhost/cover/<manga>
