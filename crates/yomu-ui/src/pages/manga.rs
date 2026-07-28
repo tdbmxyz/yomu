@@ -956,8 +956,16 @@ fn ChapterItem(
         DownloadState::Pending | DownloadState::Downloading
     );
     let dl_failed = matches!(unit.download, DownloadState::Failed { .. });
-    let failed_reason = match &unit.download {
+    // An unavailable chapter is an ordinary chapter we cannot fetch, not a
+    // fault: no outline, no error colour — just a quiet marker and the
+    // reason on hover.
+    let unavailable_reason = match &unit.download {
+        DownloadState::Unavailable { reason, .. } => Some(reason.clone()),
+        _ => None,
+    };
+    let hover_reason = match &unit.download {
         DownloadState::Failed { reason, .. } => Some(format!("Download failed: {reason}")),
+        DownloadState::Unavailable { reason, .. } => Some(format!("Not available: {reason}")),
         _ => None,
     };
 
@@ -980,7 +988,7 @@ fn ChapterItem(
                 if offline && !on_device() {
                     Some("Not available offline".to_string())
                 } else {
-                    failed_reason.clone()
+                    hover_reason.clone()
                 }
             }
             on:pointerdown=pointer_down
@@ -1025,6 +1033,11 @@ fn ChapterItem(
             <a class="chapter-title" href=format!("/read/{publication_id}/{id}")>
                 {unit.title.clone()}
             </a>
+            {unavailable_reason
+                .is_some()
+                .then(|| {
+                    view! { <span class="muted chapter-unavailable">"· not available"</span> }
+                })}
             {unit
                 .published_at
                 .map(|at| {
