@@ -17,10 +17,21 @@ pub enum DownloadFailure {
 }
 
 /// So the many call sites that only ever produce a plain failure keep
-/// reading as `Err(reason)`.
-impl<S: Into<String>> From<S> for DownloadFailure {
-    fn from(reason: S) -> Self {
-        Self::Failed(reason.into())
+/// reading as `Err(reason)`. Deliberately two narrow impls rather than a
+/// blanket `From<S: Into<String>>`: the blanket one converts *anything*
+/// string-like, so an error type that already distinguishes unavailable from
+/// broken — [`yomu_source::SourceError`] does — could be stringified into
+/// `Failed` at a future call site with nothing to flag it. Reaching this
+/// conversion should require having thrown the distinction away on purpose.
+impl From<String> for DownloadFailure {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for DownloadFailure {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.to_owned())
     }
 }
 
