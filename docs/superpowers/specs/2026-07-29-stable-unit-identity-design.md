@@ -176,6 +176,26 @@ hashes, and it costs nothing to record.
 
 - **B1 mis-matching two different chapters that share a number.** Guarded by
   requiring uniqueness in both directions; the fallback is today's behaviour.
+
+  **Measured after implementation, and it is not free.** If a source drops
+  chapter 5 and publishes a *different* chapter also numbered 5 (a side story,
+  an omake), the row keeps its id, its `Downloaded` state and its stored
+  pages, and now points at the new chapter — server and device both serve the
+  wrong content, permanently, with nothing to trigger a re-download. Note the
+  pre-fix code did the same substitution through the merge path; the only
+  difference is that it changed the id, so a device lost its copy and
+  re-downloaded correct pages. The fix therefore trades *self-healing by data
+  loss* for *silent wrong content* in the mis-match case. That is the right
+  trade for the failure this exists to stop — a whole-library re-key — but it
+  is a trade, not a free win.
+
+- **B1 can suppress a new-chapter notification in one shape.** Uniqueness is
+  checked within the stale and fresh sets, not against rows that stayed in the
+  listing. If a stale row shares a number with a row still listed *and* a fresh
+  key carries that number, the stale row is re-keyed onto the fresh key and the
+  chapter is not announced as new. Requires an exact number collision. Recorded
+  rather than fixed: the pre-fix outcome (a third row, announced) is not
+  obviously better.
 - **B2 renaming a directory onto an existing one.** The rename refuses if the
   target exists.
 - **A2 hiding a real breakage.** If a site changes its markup *and* the
