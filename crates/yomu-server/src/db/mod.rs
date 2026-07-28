@@ -1349,6 +1349,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_stale_row_claimed_by_two_fresh_keys_is_not_re_keyed() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("old/a", Some(5.0))]), false)
+            .await
+            .unwrap();
+        let old = db.list_units(publication.id).await.unwrap().remove(0);
+
+        // One stale row numbered 5, two fresh keys numbered 5: the row
+        // cannot belong to both, so neither key may claim it. Re-keying it
+        // twice would leave both keys looking already-known and the second
+        // chapter would never be announced or downloaded.
+        let sync = db
+            .sync_units(
+                publication.id,
+                &details("m1", &[("new/a", Some(5.0)), ("new/b", Some(5.0))]).chapters,
+            )
+            .await
+            .unwrap();
+
+        let new_keys: std::collections::HashSet<&str> = sync
+            .new_units
+            .iter()
+            .map(|c| c.source_key.as_str())
+            .collect();
+        assert_eq!(
+            new_keys,
+            ["new/a", "new/b"].into_iter().collect(),
+            "both chapters are new; neither may be swallowed by a re-key"
+        );
+
+        let after = db.list_units(publication.id).await.unwrap();
+        let keys: std::collections::HashSet<&str> =
+            after.iter().map(|c| c.source_key.as_str()).collect();
+        assert_eq!(keys, ["new/a", "new/b"].into_iter().collect());
+        assert!(
+            after.iter().all(|c| c.id != old.id),
+            "an ambiguous match must fall through to reconcile, not guess"
+        );
+    }
+
+    #[tokio::test]
     async fn a_genuine_duplicate_still_merges_into_its_twin() {
         let db = Db::in_memory().await.unwrap();
         let publication = db
@@ -1359,6 +1401,19 @@ mod tests {
         db.mark_pending(&[c1.id]).await.unwrap();
         db.finish_download(c1.id, Ok(9)).await.unwrap();
         db.mark_read(SHARED, &[c1.id]).await.unwrap();
+        db.append_event(
+            SHARED,
+            &ProgressEvent {
+                id: Uuid::now_v7(),
+                publication_id: publication.id,
+                unit_id: c1.id,
+                page: 4,
+                device: "test".into(),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
 
         // The source lists the same chapter twice under two keys, so both
         // rows exist side by side...
@@ -1395,6 +1450,15 @@ mod tests {
         }));
         let read = db.read_ids(SHARED, publication.id).await.unwrap();
         assert!(read.contains(&after[0].id));
+        // The reading journal moves with the merge: where the user was in
+        // the old row is where they are in the twin.
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position.unit_id, after[0].id);
+        assert_eq!(position.page(), 4);
     }
 
     #[tokio::test]
