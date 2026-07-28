@@ -9,25 +9,12 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use yomu_domain::DownloadState;
+use yomu_domain::{DownloadState, FingerprintsResponse, UnitFingerprint};
 
 use super::ApiError;
 use crate::state::AppState;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UnitFingerprint {
-    pub unit_id: Uuid,
-    pub page_count: u32,
-    pub page0_sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct FingerprintsResponse {
-    pub fingerprints: Vec<UnitFingerprint>,
-}
 
 /// One entry per downloaded unit of this publication. Units that are not
 /// downloaded are omitted rather than reported empty: there is nothing on

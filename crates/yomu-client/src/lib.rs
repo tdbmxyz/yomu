@@ -5,28 +5,12 @@ use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
     AddPublicationRequest, ApiErrorBody, Backup, BrowseSort, BulkUnitsResponse, Category,
-    DownloadUnitsRequest, DownloadsResponse, EventsResponse, HealthResponse, Locator, MangaSummary,
-    MarkUnitsRequest, MeResponse, PagesResponse, Publication, PublicationDetailResponse,
-    PublicationWithLocator, PushEventsRequest, PushEventsResponse, ReadingUnit, RefreshResponse,
-    RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo, SourceSearchResults,
-    UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
+    DownloadUnitsRequest, DownloadsResponse, EventsResponse, FingerprintsResponse, HealthResponse,
+    Locator, MangaSummary, MarkUnitsRequest, MeResponse, PagesResponse, Publication,
+    PublicationDetailResponse, PublicationWithLocator, PushEventsRequest, PushEventsResponse,
+    ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo,
+    SourceSearchResults, UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
 };
-
-/// One downloaded unit as content, not as an id: what a client compares a
-/// directory it can no longer name against. Declared here rather than in
-/// `yomu-domain` because it is additive to the frozen 1.x wire and only ever
-/// travels this one route.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct UnitFingerprint {
-    pub unit_id: Uuid,
-    pub page_count: u32,
-    pub page0_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FingerprintsResponse {
-    pub fingerprints: Vec<UnitFingerprint>,
-}
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ClientError {
