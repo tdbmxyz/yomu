@@ -177,6 +177,13 @@ pub struct PagesSpec {
     /// (e.g. `run({... "images": [...]})`).
     #[serde(default)]
     pub images_json: Option<String>,
+    /// Selector matching a marker the site puts on a chapter it doesn't
+    /// serve for free. Consulted only when no page images were found, and
+    /// then the chapter reports as unavailable rather than as a parse
+    /// failure. Opt-in per source: without it a page with no images is
+    /// indistinguishable from selectors that stopped matching.
+    #[serde(default)]
+    pub unavailable: Option<String>,
 }
 
 /// First capture of `re` in the page — tried on the raw HTML, then on
@@ -314,6 +321,7 @@ struct CompiledSpec {
     chapter_number: Regex,
     page_image: Option<Rule>,
     pages_json: Option<Regex>,
+    pages_unavailable: Option<Selector>,
 }
 
 pub struct SelectorSource {
@@ -380,6 +388,7 @@ impl SelectorSource {
                         .map_err(|e| SourceError::Definition(format!("pages.images_json: {e}")))
                 })
                 .transpose()?,
+            pages_unavailable: spec.pages.unavailable.as_deref().map(sel).transpose()?,
         };
         if compiled.page_image.is_none() && compiled.pages_json.is_none() {
             return Err(SourceError::Definition(
@@ -640,10 +649,13 @@ impl SelectorSource {
             }
         }
         let Some(rule) = &self.compiled.page_image else {
-            return Err(SourceError::Parse(format!(
-                "no script-embedded page list matched {:?} on {page_url}",
-                self.spec.pages.images_json
-            )));
+            return Err(self.no_pages_error(
+                &Html::parse_document(html),
+                format!(
+                    "no script-embedded page list matched {:?} on {page_url}",
+                    self.spec.pages.images_json
+                ),
+            ));
         };
         let doc = Html::parse_document(html);
         let selector = rule
@@ -660,12 +672,37 @@ impl SelectorSource {
             }
         }
         if urls.is_empty() {
-            return Err(SourceError::Parse(format!(
-                "no page images matched {:?} on {page_url}",
-                self.spec.pages.image
-            )));
+            return Err(self.no_pages_error(
+                &doc,
+                format!(
+                    "no page images matched {:?} on {page_url}",
+                    self.spec.pages.image
+                ),
+            ));
         }
         Ok(urls)
+    }
+
+    /// Why a chapter yielded no pages. A source that describes its paywall
+    /// can say so; for everyone else this is a parse failure, since a page
+    /// with no images is otherwise indistinguishable from selectors that
+    /// stopped matching.
+    fn no_pages_error(&self, doc: &Html, parse_reason: String) -> SourceError {
+        let Some(selector) = &self.compiled.pages_unavailable else {
+            return SourceError::Parse(parse_reason);
+        };
+        let Some(marker) = doc.select(selector).next() else {
+            return SourceError::Parse(parse_reason);
+        };
+        // The site's own wording, so the reason is recognisable to a user
+        // who goes looking at the chapter.
+        let text = marker.text().collect::<String>();
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        SourceError::Unavailable(if text.is_empty() {
+            format!("marked by {:?}", self.spec.pages.unavailable)
+        } else {
+            text.chars().take(120).collect()
+        })
     }
 
     fn extract_number(&self, text: &str) -> Option<f64> {
