@@ -5,11 +5,11 @@ use url::Url;
 use uuid::Uuid;
 use yomu_domain::{
     AddPublicationRequest, ApiErrorBody, Backup, BrowseSort, BulkUnitsResponse, Category,
-    DownloadUnitsRequest, DownloadsResponse, EventsResponse, HealthResponse, Locator, MangaSummary,
-    MarkUnitsRequest, MeResponse, PagesResponse, Publication, PublicationDetailResponse,
-    PublicationWithLocator, PushEventsRequest, PushEventsResponse, ReadingUnit, RefreshResponse,
-    RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo, SourceSearchResults,
-    UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
+    DownloadUnitsRequest, DownloadsResponse, EventsResponse, FingerprintsResponse, HealthResponse,
+    Locator, MangaSummary, MarkUnitsRequest, MeResponse, PagesResponse, Publication,
+    PublicationDetailResponse, PublicationWithLocator, PushEventsRequest, PushEventsResponse,
+    ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo,
+    SourceSearchResults, UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -213,6 +213,13 @@ impl YomuClient {
     pub async fn restore(&self, backup: &Backup) -> Result<RestoreSummary> {
         let req = self.http.post(self.url("api/v1/restore")?).json(backup);
         self.send(req).await
+    }
+
+    /// Content fingerprints of this publication's downloaded units. A client
+    /// whose stored chapters were orphaned by a source re-key can match its
+    /// own directories against these and recover them.
+    pub async fn fingerprints(&self, id: Uuid) -> Result<FingerprintsResponse> {
+        self.get(&format!("api/v1/manga/{id}/fingerprints")).await
     }
 
     /// Trigger a streamer rescan of the server's books folder.

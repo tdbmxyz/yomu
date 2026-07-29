@@ -15,7 +15,7 @@ impl Db {
     ) -> Result<UnitSync> {
         let now = Utc::now();
         let mut tx = self.pool.begin().await?;
-        let existing: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        let mut existing: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
             "SELECT source_key FROM reading_units WHERE publication_id = ?",
         )
         .bind(publication_id.to_string())
@@ -32,6 +32,71 @@ impl Db {
             .iter()
             .filter(|c| current_keys.insert(c.key.clone()))
             .collect();
+
+        // Re-key: a source can change every chapter URL at once — a slug
+        // hash changes and the whole listing is renamed in one sweep. Keyed
+        // by URL alone, all of those chapters look new while every stored
+        // row looks stale, and the reconcile pass below would dutifully
+        // merge each row into its twin and delete the original. That is
+        // lossless here and silent data loss on a device: clients key their
+        // downloaded pages by unit id, and nothing tells them an id moved,
+        // so a whole library's downloads go invisible while the files sit
+        // on disk. So when a key that fell out of the listing plainly *is*
+        // a key that appeared in it — same number, or same title when
+        // unnumbered, and unambiguous in both directions — move the row to
+        // the new key instead. The upsert below then finds it by key and
+        // updates it in place: id, download state, page files, read marks
+        // and the reading journal all stay put. A match that could go two
+        // ways is not guessed at; it falls through to reconcile, which is
+        // lossless server-side.
+        type UnitKeyRow = (String, String, Option<f64>, String);
+        let stored: Vec<UnitKeyRow> = sqlx::query_as(
+            "SELECT id, source_key, number, title FROM reading_units WHERE publication_id = ?",
+        )
+        .bind(publication_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+        let stale: Vec<&UnitKeyRow> = stored
+            .iter()
+            .filter(|(_, key, ..)| !current_keys.contains(key))
+            .collect();
+        let fresh: Vec<&ChapterRef> = listing
+            .iter()
+            .filter(|c| !existing.contains(&c.key))
+            .copied()
+            .collect();
+        let same_chapter = |c: &ChapterRef, row: &UnitKeyRow| match c.number {
+            Some(number) => row.2 == Some(number),
+            None => row.2.is_none() && row.3 == c.title,
+        };
+        let mut candidates: Vec<Vec<usize>> = Vec::with_capacity(fresh.len());
+        let mut claims = vec![0usize; stale.len()];
+        for chapter in &fresh {
+            let hits: Vec<usize> = stale
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| same_chapter(chapter, row))
+                .map(|(i, _)| i)
+                .collect();
+            for &i in &hits {
+                claims[i] += 1;
+            }
+            candidates.push(hits);
+        }
+        for (chapter, hits) in fresh.iter().zip(&candidates) {
+            let &[i] = hits.as_slice() else { continue };
+            if claims[i] != 1 {
+                continue;
+            }
+            sqlx::query("UPDATE reading_units SET source_key = ? WHERE id = ?")
+                .bind(&chapter.key)
+                .bind(&stale[i].0)
+                .execute(&mut *tx)
+                .await?;
+            // The row is not new — it is the same chapter at a new address,
+            // and re-announcing it would re-notify and re-download it.
+            existing.insert(chapter.key.clone());
+        }
 
         let mut new_ids = Vec::new();
         for chapter in &listing {

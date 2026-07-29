@@ -13,6 +13,8 @@ leptos.workspace = true
 url.workspace = true
 web-sys = { workspace = true, features = [
     "Window",
+    "Document",
+    "Element",
     "Location",
     "Navigator",
     "ServiceWorkerContainer",

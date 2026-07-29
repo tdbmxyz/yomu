@@ -78,16 +78,12 @@ fn DownloadsView(
     pull: crate::PullQueue,
     refetch: impl Fn() + Clone + 'static + Send,
 ) -> impl IntoView {
-    let split = |want: fn(&DownloadState) -> bool| -> Vec<DownloadQueueEntry> {
-        resp.queue
-            .iter()
-            .filter(|e| want(&e.state))
-            .cloned()
-            .collect()
-    };
-    let downloading = split(|s| matches!(s, DownloadState::Downloading));
-    let pending = split(|s| matches!(s, DownloadState::Pending));
-    let failed = split(|s| matches!(s, DownloadState::Failed { .. }));
+    let Groups {
+        downloading,
+        pending,
+        failed,
+        unavailable,
+    } = groups(&resp.queue);
 
     let client = use_client();
     // Bulk action over a set of chapter ids, then refetch.
@@ -114,8 +110,9 @@ fn DownloadsView(
         }
     };
 
-    let pending_ids: Vec<_> = pending.iter().map(|e| e.unit_id).collect();
-    let failed_ids: Vec<_> = failed.iter().map(|e| e.unit_id).collect();
+    let pending_ids = ids(&pending);
+    let failed_ids = ids(&failed);
+    let unavailable_ids = ids(&unavailable);
     // The server's in-flight fetch joins the device saves in the top block,
     // so it is rendered from a stored copy rather than in place.
     let server_active = StoredValue::new(downloading);
@@ -133,6 +130,13 @@ fn DownloadsView(
     let clear_failed = {
         let action = action.clone();
         let ids = failed_ids.clone();
+        move |_| action(ids.clone(), false)
+    };
+    // Dismiss only: retrying a chapter the source does not offer would just
+    // fetch the same paywall again.
+    let dismiss_unavailable = {
+        let action = action.clone();
+        let ids = unavailable_ids.clone();
         move |_| action(ids.clone(), false)
     };
 
@@ -237,7 +241,61 @@ fn DownloadsView(
                 }
             })}
 
+        // Not a fault: the source does not offer these chapters, so there is
+        // nothing to retry — only to acknowledge and clear.
+        {(!unavailable.is_empty())
+            .then(|| {
+                let dismiss_unavailable = dismiss_unavailable.clone();
+                view! {
+                    <div class="download-group-head">
+                        <h3 class="shelf-title downloads-section">
+                            {format!("Not available ({})", unavailable.len())}
+                        </h3>
+                        <button class="button" on:click=dismiss_unavailable>"Dismiss"</button>
+                    </div>
+                    <ul class="download-list">
+                        {unavailable
+                            .into_iter()
+                            .map(|entry| view! { <QueueRow entry/> })
+                            .collect_view()}
+                    </ul>
+                }
+            })}
+
     }
+}
+
+/// The queue split into the groups the page renders.
+#[derive(Debug, Default, PartialEq)]
+struct Groups {
+    downloading: Vec<DownloadQueueEntry>,
+    pending: Vec<DownloadQueueEntry>,
+    failed: Vec<DownloadQueueEntry>,
+    unavailable: Vec<DownloadQueueEntry>,
+}
+
+/// Split the queue into its display groups. The bulk actions collect their
+/// ids from these lists, so this one function is what keeps an unavailable
+/// chapter out of `Retry all`: it is a state of its own, never a `Failed`.
+/// The view builds its groups here and nowhere else, so there is no second
+/// place for the distinction to be got wrong.
+fn groups(queue: &[DownloadQueueEntry]) -> Groups {
+    let mut g = Groups::default();
+    for entry in queue {
+        let bucket = match entry.state {
+            DownloadState::Downloading => &mut g.downloading,
+            DownloadState::Pending => &mut g.pending,
+            DownloadState::Failed { .. } => &mut g.failed,
+            DownloadState::Unavailable { .. } => &mut g.unavailable,
+            _ => continue,
+        };
+        bucket.push(entry.clone());
+    }
+    g
+}
+
+fn ids(entries: &[DownloadQueueEntry]) -> Vec<uuid::Uuid> {
+    entries.iter().map(|e| e.unit_id).collect()
 }
 
 /// In-flight device saves, ordered for display: a save that just failed
@@ -259,9 +317,62 @@ fn device_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::device_rows;
+    use super::{device_rows, groups, ids};
     use crate::LocalDownload;
     use uuid::Uuid;
+    use yomu_domain::{DownloadQueueEntry, DownloadState};
+
+    fn entry(n: u128, state: DownloadState) -> DownloadQueueEntry {
+        DownloadQueueEntry {
+            unit_id: Uuid::from_u128(n),
+            publication_id: Uuid::nil(),
+            publication_title: "A publication".into(),
+            unit_title: "Chapter 1".into(),
+            state,
+            progress: None,
+        }
+    }
+
+    fn at() -> chrono::DateTime<chrono::Utc> {
+        "2026-07-29T00:00:00Z".parse().unwrap()
+    }
+
+    /// The whole point of the state: `Retry all` re-queues the failed group,
+    /// and a chapter the source will not serve must never end up in it —
+    /// retrying only re-fetches the same paywall. This asserts on the very
+    /// function the view groups with, so a slip there fails here.
+    #[test]
+    fn retry_all_never_collects_an_unavailable_unit() {
+        let queue = vec![
+            entry(
+                1,
+                DownloadState::Failed {
+                    at: at(),
+                    reason: "boom".into(),
+                },
+            ),
+            entry(
+                2,
+                DownloadState::Unavailable {
+                    at: at(),
+                    reason: "premium on this source".into(),
+                },
+            ),
+            entry(3, DownloadState::Pending),
+            entry(4, DownloadState::Downloading),
+            entry(5, DownloadState::Downloaded { at: at() }),
+        ];
+        let g = groups(&queue);
+        assert_eq!(ids(&g.failed), vec![Uuid::from_u128(1)]);
+        assert_eq!(ids(&g.unavailable), vec![Uuid::from_u128(2)]);
+        assert_eq!(ids(&g.pending), vec![Uuid::from_u128(3)]);
+        assert_eq!(ids(&g.downloading), vec![Uuid::from_u128(4)]);
+        // A finished download belongs to no group and to no bulk action.
+        assert!(
+            !ids(&g.failed).contains(&Uuid::from_u128(5))
+                && !ids(&g.pending).contains(&Uuid::from_u128(5))
+        );
+    }
 
     fn save(title: &str, chapter: &str, failed: bool) -> LocalDownload {
         LocalDownload {
@@ -350,8 +461,15 @@ fn QueueRow(
         DownloadState::Failed { reason, .. } => Some(reason.clone()),
         _ => None,
     };
+    // Deliberately not the error styling: the reason is information, not a
+    // report of something broken.
+    let unavailable = match &entry.state {
+        DownloadState::Unavailable { reason, .. } => Some(reason.clone()),
+        _ => None,
+    };
+    let is_unavailable = unavailable.is_some();
     view! {
-        <li class="download-row">
+        <li class="download-row" class:download-unavailable=is_unavailable>
             <div class="download-row-head">
                 <a class="download-title" href=format!("/manga/{}", entry.publication_id)>
                     <strong>{entry.publication_title}</strong>
@@ -376,6 +494,8 @@ fn QueueRow(
                     }
                 })}
             {error.map(|reason| view! { <span class="error download-error">{reason}</span> })}
+            {unavailable
+                .map(|reason| view! { <span class="muted download-reason">{reason}</span> })}
         </li>
     }
 }

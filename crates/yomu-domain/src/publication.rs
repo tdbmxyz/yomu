@@ -186,8 +186,11 @@ pub struct ReadingUnit {
     pub read: bool,
 }
 
+/// The wire shape is frozen at 1.x — see [`DownloadStateWire`]. A 1.x client
+/// rejects a `state` tag it does not know, so [`DownloadState::Unavailable`]
+/// travels as a failure carrying a flag rather than as a tag of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(try_from = "DownloadStateWire", into = "DownloadStateWire")]
 pub enum DownloadState {
     /// Chapter is read live from the source when opened; nothing stored.
     None,
@@ -201,6 +204,80 @@ pub enum DownloadState {
         at: DateTime<Utc>,
         reason: String,
     },
+    /// The source does not offer this chapter (premium, locked). Not a
+    /// failure: nothing is broken and retrying changes nothing until the
+    /// source frees it.
+    Unavailable {
+        at: DateTime<Utc>,
+        reason: String,
+    },
+}
+
+/// The frozen 1.x JSON shape of a download state. `Unavailable` is encoded as
+/// a `failed` payload with `unavailable: true`: a 1.x client sees a failure,
+/// which is the honest degraded reading, and a 2.x client sees the
+/// distinction. The flag is omitted for an ordinary failure so payloads a 1.x
+/// client already understood stay byte-identical.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum DownloadStateWire {
+    None,
+    Pending,
+    Downloading,
+    Downloaded {
+        at: DateTime<Utc>,
+    },
+    Failed {
+        at: DateTime<Utc>,
+        reason: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unavailable: bool,
+    },
+}
+
+impl From<DownloadState> for DownloadStateWire {
+    fn from(s: DownloadState) -> Self {
+        match s {
+            DownloadState::None => DownloadStateWire::None,
+            DownloadState::Pending => DownloadStateWire::Pending,
+            DownloadState::Downloading => DownloadStateWire::Downloading,
+            DownloadState::Downloaded { at } => DownloadStateWire::Downloaded { at },
+            DownloadState::Failed { at, reason } => DownloadStateWire::Failed {
+                at,
+                reason,
+                unavailable: false,
+            },
+            DownloadState::Unavailable { at, reason } => DownloadStateWire::Failed {
+                at,
+                reason,
+                unavailable: true,
+            },
+        }
+    }
+}
+
+impl TryFrom<DownloadStateWire> for DownloadState {
+    // Reserved for future validation; conversion currently never fails.
+    type Error = String;
+
+    fn try_from(w: DownloadStateWire) -> Result<Self, String> {
+        Ok(match w {
+            DownloadStateWire::None => DownloadState::None,
+            DownloadStateWire::Pending => DownloadState::Pending,
+            DownloadStateWire::Downloading => DownloadState::Downloading,
+            DownloadStateWire::Downloaded { at } => DownloadState::Downloaded { at },
+            DownloadStateWire::Failed {
+                at,
+                reason,
+                unavailable: false,
+            } => DownloadState::Failed { at, reason },
+            DownloadStateWire::Failed {
+                at,
+                reason,
+                unavailable: true,
+            } => DownloadState::Unavailable { at, reason },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +336,77 @@ mod wire {
         assert_eq!(out["source_id"], "local", "old clients require source_id");
         assert_eq!(out["source_key"], "Solo Farming");
         assert_eq!(out["file_path"], "Solo Farming");
+    }
+
+    /// A premium chapter must reach a 1.x client as a failure — that client
+    /// rejects an unknown `state` — while a 2.x client sees the distinction.
+    #[test]
+    fn unavailable_serializes_inside_the_1x_failed_shape() {
+        let state = DownloadState::Unavailable {
+            at: "2026-07-29T00:00:00Z".parse().unwrap(),
+            reason: "premium on this source".into(),
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["state"], "failed");
+        assert_eq!(json["unavailable"], true);
+        assert_eq!(json["reason"], "premium on this source");
+        assert_eq!(
+            serde_json::from_value::<DownloadState>(json).unwrap(),
+            state
+        );
+    }
+
+    /// A 1.x payload has no flag and must stay an ordinary failure.
+    #[test]
+    fn a_1x_failure_without_the_flag_is_still_failed() {
+        let json = serde_json::json!({
+            "state": "failed",
+            "at": "2026-07-29T00:00:00Z",
+            "reason": "boom"
+        });
+        assert!(matches!(
+            serde_json::from_value::<DownloadState>(json).unwrap(),
+            DownloadState::Failed { .. }
+        ));
+    }
+
+    /// An ordinary failure must not grow a field: a 1.x client reading a 2.x
+    /// server should see byte-identical payloads for the states it knows.
+    #[test]
+    fn an_ordinary_failure_emits_no_flag() {
+        let state = DownloadState::Failed {
+            at: "2026-07-29T00:00:00Z".parse().unwrap(),
+            reason: "boom".into(),
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert!(json.get("unavailable").is_none());
+        assert_eq!(
+            serde_json::from_value::<DownloadState>(json).unwrap(),
+            state
+        );
+    }
+
+    /// The states that predate this change keep their exact 1.x tags.
+    #[test]
+    fn the_other_states_keep_their_1x_tags() {
+        for (state, tag) in [
+            (DownloadState::None, "none"),
+            (DownloadState::Pending, "pending"),
+            (DownloadState::Downloading, "downloading"),
+            (
+                DownloadState::Downloaded {
+                    at: "2026-07-29T00:00:00Z".parse().unwrap(),
+                },
+                "downloaded",
+            ),
+        ] {
+            let json = serde_json::to_value(&state).unwrap();
+            assert_eq!(json["state"], tag);
+            assert_eq!(
+                serde_json::from_value::<DownloadState>(json).unwrap(),
+                state
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Selector source parsing against fixture HTML (no network).
 
 use url::Url;
+use yomu_source::SourceError;
 use yomu_source::selector::{SelectorSource, SelectorSpec};
 
 fn fixture_source() -> SelectorSource {
@@ -197,4 +198,92 @@ fn empty_chapter_list_is_an_error_not_silence() {
     let url = Url::parse("https://fixture.test/manga/x").unwrap();
     let err = source.parse_manga("<html><body>cloudflare says hi</body></html>", &url);
     assert!(err.is_err());
+}
+
+/// A source can describe what a paywall looks like on that site. When the
+/// chapter serves no page images and that marker is on the page, nothing is
+/// broken — the chapter simply is not free — so it must not be reported as a
+/// parse failure.
+#[test]
+fn a_paywalled_chapter_is_unavailable_when_the_source_says_so() {
+    let source = source_with_unavailable(Some("div.premium-lock"));
+    let url = Url::parse("https://fixture.test/manga/solo-farming/chapter-173").unwrap();
+    let err = source
+        .parse_pages(&fixture("premium_chapter.html"), &url)
+        .expect_err("no page images on the page");
+
+    match err {
+        SourceError::Unavailable(reason) => {
+            assert!(
+                reason.contains("This chapter is premium"),
+                "the reason names the source's own wording: {reason}"
+            );
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+/// Sources that don't configure the key must behave exactly as before: an
+/// empty page is a parse failure, because without a marker we cannot tell a
+/// paywall from a selector that stopped matching.
+#[test]
+fn without_the_key_the_same_page_is_still_a_parse_error() {
+    let source = source_with_unavailable(None);
+    let url = Url::parse("https://fixture.test/manga/solo-farming/chapter-173").unwrap();
+    let err = source
+        .parse_pages(&fixture("premium_chapter.html"), &url)
+        .expect_err("no page images on the page");
+    assert!(matches!(err, SourceError::Parse(_)), "got {err:?}");
+}
+
+/// The marker only speaks when there are no images. A page that renders its
+/// pages is fine however the marker matches — a stray match must never hide
+/// a chapter the user can actually read.
+#[test]
+fn a_chapter_with_images_is_never_unavailable() {
+    let source = source_with_unavailable(Some("div.premium-lock"));
+    let url = Url::parse("https://fixture.test/manga/solo-farming/chapter-1").unwrap();
+    let html = fixture("chapter.html").replace(
+        "<body>",
+        r#"<body><div class="premium-lock">This chapter is premium</div>"#,
+    );
+    assert_eq!(source.parse_pages(&html, &url).unwrap().len(), 3);
+}
+
+/// And a page with neither images nor the marker is still a parse failure on
+/// a source that configures the key — that one really is broken.
+#[test]
+fn a_configured_source_still_reports_a_broken_selector() {
+    let source = source_with_unavailable(Some("div.premium-lock"));
+    let url = Url::parse("https://fixture.test/manga/solo-farming/chapter-2").unwrap();
+    let err = source
+        .parse_pages("<html><body><p>nothing here</p></body></html>", &url)
+        .expect_err("no page images on the page");
+    assert!(matches!(err, SourceError::Parse(_)), "got {err:?}");
+}
+
+fn source_with_unavailable(selector: Option<&str>) -> SelectorSource {
+    let unavailable = selector.map_or(String::new(), |s| format!("unavailable = {s:?}"));
+    let spec: SelectorSpec = toml::from_str(&format!(
+        r#"
+        id = "fixture"
+        name = "Fixture Scans"
+        base_url = "https://fixture.test"
+
+        [search]
+        url = "{{base}}/search?q={{query}}"
+        item = ".manga-item"
+        link = "a.manga-link@href"
+
+        [manga]
+        chapter_item = "li.chapter"
+        chapter_link = "a@href"
+
+        [pages]
+        image = ".reading-content img.page@data-src"
+        {unavailable}
+        "#
+    ))
+    .expect("valid spec");
+    SelectorSource::new(spec).expect("source compiles")
 }

@@ -107,6 +107,7 @@ mod backup;
 mod catalog;
 mod categories;
 mod downloads;
+pub use downloads::DownloadFailure;
 mod progress;
 mod publications;
 mod read_marks;
@@ -308,6 +309,12 @@ impl TryFrom<UnitRow> for ReadingUnit {
                 at: row
                     .downloaded_at
                     .ok_or_else(|| DbError::Corrupt("failed without timestamp".into()))?,
+                reason: row.download_error.unwrap_or_default(),
+            },
+            "unavailable" => DownloadState::Unavailable {
+                at: row
+                    .downloaded_at
+                    .ok_or_else(|| DbError::Corrupt("unavailable without timestamp".into()))?,
                 reason: row.download_error.unwrap_or_default(),
             },
             other => return Err(DbError::Corrupt(format!("download_state {other:?}"))),
@@ -770,6 +777,176 @@ mod tests {
         assert!(matches!(failed_row.download, DownloadState::Pending));
     }
 
+    /// Migration 0012 widens a CHECK, which SQLite can only do by rebuilding
+    /// the table — and dropping `reading_units` fires the read marks' ON
+    /// DELETE CASCADE. Run it over a populated pre-0012 database and confirm
+    /// nothing was lost, because it runs over a real library exactly once.
+    #[tokio::test]
+    async fn the_unavailable_migration_keeps_units_read_marks_and_journal() {
+        use sqlx::Executor;
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        pool.execute("PRAGMA foreign_keys = ON").await.unwrap();
+        let m = sqlx::migrate!("./migrations");
+        for mig in m.iter() {
+            if mig.version >= 12 {
+                break;
+            }
+            let mut tx = pool.begin().await.unwrap();
+            tx.execute(&*mig.sql).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        pool.execute(
+            "INSERT INTO publications (id,kind,source_id,source_key,title,auto_download,category,added_at) VALUES ('p1','comics','fixture','m1','P',0,'reading','2026-01-01T00:00:00Z');
+             INSERT INTO reading_units (id,publication_id,source_key,title,number,source_order,fetched_at,download_state,downloaded_at,page_count) VALUES ('u1','p1','c1','C1',1,0,'2026-01-01T00:00:00Z','downloaded','2026-01-02T00:00:00Z',12);
+             INSERT INTO read_units (user_id,unit_id,at) VALUES ('00000000-0000-0000-0000-000000000000','u1','2026-01-03T00:00:00Z');
+             INSERT INTO progress_events (id,publication_id,unit_id,page,device,at) VALUES ('e1','p1','u1',3,'d','2026-01-03T00:00:00Z');",
+        )
+        .await
+        .unwrap();
+        let twelve = m.iter().find(|x| x.version == 12).unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        tx.execute(&*twelve.sql).await.unwrap();
+        tx.commit().await.unwrap();
+        for (what, sql) in [
+            ("units", "SELECT COUNT(*) FROM reading_units"),
+            ("read", "SELECT COUNT(*) FROM read_units"),
+            ("progress", "SELECT COUNT(*) FROM progress_events"),
+        ] {
+            let n: i64 = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+            assert_eq!(n, 1, "{what}");
+        }
+        let state: String =
+            sqlx::query_scalar("SELECT download_state FROM reading_units WHERE id='u1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "downloaded");
+        pool.execute("UPDATE reading_units SET download_state='unavailable' WHERE id='u1'")
+            .await
+            .unwrap();
+        let bad: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(bad.is_empty());
+    }
+
+    /// A premium chapter is not a failure: it survives a restart as its own
+    /// state, "retry all" leaves it alone (retrying accomplishes nothing
+    /// until the source frees it), yet it stays in the queue so the UI can
+    /// show it, and an explicit request still re-queues it — a chapter can
+    /// stop being premium and that is the user's call.
+    #[tokio::test]
+    async fn an_unavailable_unit_stays_out_of_the_retry_path() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication(
+                "fixture",
+                &details("m1", &[("c2", Some(2.0)), ("c1", Some(1.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let units = db.list_units(publication.id).await.unwrap();
+        let (locked, failed) = (units[0].id, units[1].id);
+
+        db.mark_pending(&[locked]).await.unwrap();
+        db.finish_download(
+            locked,
+            Err(DownloadFailure::Unavailable(
+                "premium on this source".into(),
+            )),
+        )
+        .await
+        .unwrap();
+        db.mark_pending(&[failed]).await.unwrap();
+        db.finish_download(failed, Err("boom".into()))
+            .await
+            .unwrap();
+
+        let read_back = |id| {
+            let db = &db;
+            async move {
+                db.list_units(publication.id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|u| u.id == id)
+                    .unwrap()
+            }
+        };
+
+        // It reads back as its own state, carrying the source's wording.
+        let row = read_back(locked).await;
+        match &row.download {
+            DownloadState::Unavailable { reason, .. } => {
+                assert_eq!(reason, "premium on this source")
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+
+        // Retry-all moves the failure and nothing else.
+        assert_eq!(db.retry_failed(&[locked, failed]).await.unwrap(), 1);
+        assert!(matches!(
+            read_back(locked).await.download,
+            DownloadState::Unavailable { .. }
+        ));
+
+        // The queue still lists it, so the UI can group it.
+        let queue = db.download_queue().await.unwrap();
+        assert!(queue.iter().any(|u| u.id == locked));
+
+        // The automatic sweep passes it over…
+        assert_eq!(db.mark_pending_new(&[locked]).await.unwrap(), 0);
+        // …but an explicit request re-queues it.
+        assert_eq!(db.mark_pending(&[locked]).await.unwrap(), 1);
+        assert!(matches!(
+            read_back(locked).await.download,
+            DownloadState::Pending
+        ));
+    }
+
+    /// Dismiss is the only action the "Not available" group offers, and it
+    /// works solely because the dismiss statement lists 'unavailable' among
+    /// the states it clears. Drop that word and the button would go quietly
+    /// dead — the row would stay on the page forever.
+    #[tokio::test]
+    async fn dismiss_clears_an_unavailable_unit() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let unit = db.list_units(publication.id).await.unwrap()[0].id;
+
+        db.mark_pending(&[unit]).await.unwrap();
+        db.finish_download(
+            unit,
+            Err(DownloadFailure::Unavailable(
+                "premium on this source".into(),
+            )),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db.dismiss_downloads(&[unit]).await.unwrap(), 1);
+        let row = db
+            .list_units(publication.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.id == unit)
+            .unwrap();
+        assert!(matches!(row.download, DownloadState::None));
+        assert!(
+            !db.download_queue()
+                .await
+                .unwrap()
+                .iter()
+                .any(|u| u.id == unit)
+        );
+    }
+
     #[tokio::test]
     async fn library_keys_maps_source_key_to_id() {
         let db = Db::in_memory().await.unwrap();
@@ -1041,7 +1218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reuploaded_series_merges_twins_instead_of_duplicating() {
+    async fn reuploaded_series_re_keys_rows_instead_of_duplicating() {
         let db = Db::in_memory().await.unwrap();
         let publication = db
             .insert_publication(
@@ -1095,25 +1272,19 @@ mod tests {
 
         let units = db.list_units(publication.id).await.unwrap();
         let keys: Vec<&str> = units.iter().map(|c| c.source_key.as_str()).collect();
-        assert_eq!(keys, ["new/1", "new/2", "new/3"], "old twins merged away");
+        assert_eq!(keys, ["new/1", "new/2", "new/3"], "no old rows left over");
 
-        // Download carried over to the twin (pages moved on disk by the
-        // caller via the Rename op).
+        // The rows moved to the new keys rather than being replaced, so the
+        // download needs no transfer and nothing moves on disk.
         let new1 = units.iter().find(|c| c.source_key == "new/1").unwrap();
         let new2 = units.iter().find(|c| c.source_key == "new/2").unwrap();
+        assert_eq!((new1.id, new2.id), (old1.id, old2.id));
         assert!(
             matches!(new1.download, DownloadState::Downloaded { .. }),
-            "old/1's download transferred to new/1"
+            "old/1's download stayed with the row"
         );
         assert_eq!(new1.page_count, Some(9));
-        assert!(
-            sync.file_ops.contains(&UnitFileOp::Rename {
-                from: old1.id,
-                to: new1.id
-            }),
-            "caller told to move old/1's pages: {:?}",
-            sync.file_ops
-        );
+        assert!(sync.file_ops.is_empty(), "{:?}", sync.file_ops);
 
         // Read marks and the reading journal follow the twin.
         let read = db.read_ids(SHARED, publication.id).await.unwrap();
@@ -1133,6 +1304,202 @@ mod tests {
             .map(|c| c.source_key.as_str())
             .collect();
         assert_eq!(new_keys, ["new/3"]);
+    }
+
+    #[tokio::test]
+    async fn a_wholesale_url_change_keeps_unit_ids() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication(
+                "fixture",
+                &details("m1", &[("old/c1", Some(1.0)), ("old/c2", Some(2.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let before = db.list_units(publication.id).await.unwrap();
+        let ids_before: Vec<_> = before.iter().map(|c| c.id).collect();
+        db.mark_pending(&[before[0].id]).await.unwrap();
+        db.finish_download(before[0].id, Ok(12)).await.unwrap();
+        db.mark_read(SHARED, &[before[0].id]).await.unwrap();
+
+        // The same two chapters, every key different.
+        let sync = db
+            .sync_units(
+                publication.id,
+                &details("m1", &[("new/c1", Some(1.0)), ("new/c2", Some(2.0))]).chapters,
+            )
+            .await
+            .unwrap();
+
+        let after = db.list_units(publication.id).await.unwrap();
+        let ids_after: Vec<_> = after.iter().map(|c| c.id).collect();
+        assert_eq!(ids_before, ids_after, "ids must survive a re-key");
+        assert_eq!(after[0].source_key, "new/c1");
+        assert_eq!(after[1].source_key, "new/c2");
+        assert!(matches!(
+            after[0].download,
+            DownloadState::Downloaded { .. }
+        ));
+        assert_eq!(after[0].page_count, Some(12));
+        let read = db.read_ids(SHARED, publication.id).await.unwrap();
+        assert!(read.contains(&ids_before[0]));
+        // Nothing moved and nothing is new: a re-key must not re-notify,
+        // re-download, or shuffle files on disk.
+        assert!(sync.new_units.is_empty(), "{:?}", sync.new_units);
+        assert!(sync.file_ops.is_empty(), "{:?}", sync.file_ops);
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_number_match_is_not_re_keyed() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication(
+                "fixture",
+                &details("m1", &[("old/a", Some(5.0)), ("old/b", Some(5.0))]),
+                false,
+            )
+            .await
+            .unwrap();
+        let ids_before: std::collections::HashSet<Uuid> = db
+            .list_units(publication.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+
+        // Two stale rows numbered 5 and two fresh keys numbered 5: which
+        // is which is a guess, so nothing is re-keyed and today's
+        // behaviour (the reconcile pass) handles it.
+        db.sync_units(
+            publication.id,
+            &details("m1", &[("new/a", Some(5.0)), ("new/b", Some(5.0))]).chapters,
+        )
+        .await
+        .unwrap();
+
+        let after = db.list_units(publication.id).await.unwrap();
+        let keys: std::collections::HashSet<&str> =
+            after.iter().map(|c| c.source_key.as_str()).collect();
+        assert_eq!(keys, ["new/a", "new/b"].into_iter().collect());
+        assert!(
+            after.iter().all(|c| !ids_before.contains(&c.id)),
+            "an ambiguous match must fall through, not guess"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_stale_row_claimed_by_two_fresh_keys_is_not_re_keyed() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("old/a", Some(5.0))]), false)
+            .await
+            .unwrap();
+        let old = db.list_units(publication.id).await.unwrap().remove(0);
+
+        // One stale row numbered 5, two fresh keys numbered 5: the row
+        // cannot belong to both, so neither key may claim it. Re-keying it
+        // twice would leave both keys looking already-known and the second
+        // chapter would never be announced or downloaded.
+        let sync = db
+            .sync_units(
+                publication.id,
+                &details("m1", &[("new/a", Some(5.0)), ("new/b", Some(5.0))]).chapters,
+            )
+            .await
+            .unwrap();
+
+        let new_keys: std::collections::HashSet<&str> = sync
+            .new_units
+            .iter()
+            .map(|c| c.source_key.as_str())
+            .collect();
+        assert_eq!(
+            new_keys,
+            ["new/a", "new/b"].into_iter().collect(),
+            "both chapters are new; neither may be swallowed by a re-key"
+        );
+
+        let after = db.list_units(publication.id).await.unwrap();
+        let keys: std::collections::HashSet<&str> =
+            after.iter().map(|c| c.source_key.as_str()).collect();
+        assert_eq!(keys, ["new/a", "new/b"].into_iter().collect());
+        assert!(
+            after.iter().all(|c| c.id != old.id),
+            "an ambiguous match must fall through to reconcile, not guess"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_genuine_duplicate_still_merges_into_its_twin() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let c1 = db.list_units(publication.id).await.unwrap().remove(0);
+        db.mark_pending(&[c1.id]).await.unwrap();
+        db.finish_download(c1.id, Ok(9)).await.unwrap();
+        db.mark_read(SHARED, &[c1.id]).await.unwrap();
+        db.append_event(
+            SHARED,
+            &ProgressEvent {
+                id: Uuid::now_v7(),
+                publication_id: publication.id,
+                unit_id: c1.id,
+                page: 4,
+                device: "test".into(),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The source lists the same chapter twice under two keys, so both
+        // rows exist side by side...
+        db.sync_units(
+            publication.id,
+            &details("m1", &[("c1", Some(1.0)), ("dup/1", Some(1.0))]).chapters,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.list_units(publication.id).await.unwrap().len(), 2);
+
+        // ...then drops the old one. `dup/1` is already stored, so there is
+        // no fresh key to re-key onto: this is the duplicate the reconcile
+        // pass was written for, and it must still merge.
+        let sync = db
+            .sync_units(
+                publication.id,
+                &details("m1", &[("dup/1", Some(1.0))]).chapters,
+            )
+            .await
+            .unwrap();
+
+        let after = db.list_units(publication.id).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].source_key, "dup/1");
+        assert!(matches!(
+            after[0].download,
+            DownloadState::Downloaded { .. }
+        ));
+        assert_eq!(after[0].page_count, Some(9));
+        assert!(sync.file_ops.contains(&UnitFileOp::Rename {
+            from: c1.id,
+            to: after[0].id
+        }));
+        let read = db.read_ids(SHARED, publication.id).await.unwrap();
+        assert!(read.contains(&after[0].id));
+        // The reading journal moves with the merge: where the user was in
+        // the old row is where they are in the twin.
+        let position = db
+            .latest_position(SHARED, publication.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(position.unit_id, after[0].id);
+        assert_eq!(position.page(), 4);
     }
 
     #[tokio::test]

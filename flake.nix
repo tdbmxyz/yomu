@@ -38,10 +38,41 @@
     buildCommit = self.shortRev or self.dirtyShortRev or "unknown";
 
     rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+    # Panic locations otherwise embed ${rustToolchain}/lib/rustlib/src/...,
+    # which Nix reads as a runtime reference and follows into rustc, docs,
+    # rust-analyzer, clippy, rustfmt and gcc — 2.4 GiB of build tooling in the
+    # closure of a 13 MB binary. The remapped path was never resolvable on a
+    # user's machine anyway.
+    remapPathPrefix = "--remap-path-prefix=${rustToolchain}=/rust-toolchain";
+
+    # The native builds must additionally re-state a flag that is not ours:
+    # cargoSetupHook writes -Cforce-frame-pointers=yes into .cargo/config.toml
+    # under [target.<host>], and cargo takes rustflags from the first source
+    # that applies rather than merging them, so a RUSTFLAGS environment
+    # variable silently drops it. Profilers and backtraces rely on it.
+    #
+    # This is a hand-transcribed copy of what that hook currently writes. If a
+    # nixpkgs bump adds another flag to that table, this copy silently drops
+    # it — re-read `cargoSetupHook`'s generated .cargo/config.toml whenever the
+    # nixpkgs input moves.
+    remapRustflags = "-Cforce-frame-pointers=yes ${remapPathPrefix}";
+
     rustPlatform = pkgs.makeRustPlatform {
       cargo = rustToolchain;
       rustc = rustToolchain;
     };
+
+    # Every native rust package goes through here rather than setting
+    # env.RUSTFLAGS by hand: an opt-in flag repeated per package is one a new
+    # package forgets, and forgetting it costs a 40× closure with no error.
+    # RUSTFLAGS is set last on purpose — it is a property of how we build, not
+    # something a call site gets to override.
+    buildYomuRustPackage = args:
+      rustPlatform.buildRustPackage (args
+        // {
+          env = (args.env or {}) // {RUSTFLAGS = remapRustflags;};
+        });
 
     # Same scheme as chaos: wasm-bindgen-cli pinned by Cargo.lock so the CLI
     # and crate versions cannot drift. Refresh both hashes when the locked
@@ -84,7 +115,7 @@
       dbus
     ];
 
-    yomu-server = rustPlatform.buildRustPackage {
+    yomu-server = buildYomuRustPackage {
       pname = "yomu-server";
       inherit version;
       src = self;
@@ -107,6 +138,14 @@
 
       cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
       YOMU_BUILD_COMMIT = buildCommit;
+
+      # The same remap as the native packages, so panic strings in the wasm
+      # stop naming a store path — but without their -Cforce-frame-pointers,
+      # which there is nothing here to preserve: cargoSetupHook writes it under
+      # [target."x86_64-unknown-linux-gnu"], a table that never applies to the
+      # wasm32 units trunk builds, and with --target set cargo passes no
+      # rustflags to host build-script units either.
+      RUSTFLAGS = remapPathPrefix;
 
       nativeBuildInputs = [
         rustToolchain
@@ -133,12 +172,42 @@
       meta.description = "yomu web frontend (static trunk dist)";
     };
 
+    # What the server serves: the trunk dist plus brotli/gzip siblings built
+    # once here, so ServeDir never compresses per request. Kept separate from
+    # yomu-web because yomu-desktop bakes that one into the binary, where the
+    # siblings would be ~1.08 MB of files the asset protocol never serves.
+    # (Approximate on purpose: `src = self` and the baked build commit change
+    # the wasm, so an exact byte figure does not reproduce across checkouts.)
+    yomu-web-compressed =
+      pkgs.runCommand "yomu-web-compressed-${version}" {
+        nativeBuildInputs = [pkgs.brotli pkgs.gzip];
+        meta.description = "yomu web frontend with precompressed siblings";
+      } ''
+        cp -r ${yomu-web} $out
+        chmod -R u+w $out
+        # The file list is collected before anything is written: the loop
+        # creates .br/.gz entries in the very directory find is reading, and
+        # POSIX leaves it unspecified whether an in-progress readdir sees an
+        # entry added during the walk. The hazard is not a doubly-compressed
+        # file — no new name matches these patterns — it is a *skipped* one:
+        # the directory rehashing mid-walk can drop an entry find had not
+        # reached yet, and a wasm that quietly ships without its sibling looks
+        # exactly like a working build.
+        find $out -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' \
+          -o -name '*.html' -o -name '*.json' -o -name '*.svg' \
+          -o -name '*.webmanifest' \) -print0 > "$TMPDIR/targets"
+        while IFS= read -r -d "" f; do
+          brotli -q 11 -f -o "$f.br" "$f"
+          gzip -9 -c "$f" > "$f.gz"
+        done < "$TMPDIR/targets"
+      '';
+
     # Desktop shell (same scheme as chaos-desktop): generate_context! bakes
     # the web dist into the binary at compile time, so the yomu-web output
     # is copied in place before cargo runs. wrapGAppsHook3 wires GSettings
     # schemas + TLS (glib-networking), without which WebKitGTK apps crash or
     # fail https at runtime.
-    yomu-desktop = rustPlatform.buildRustPackage {
+    yomu-desktop = buildYomuRustPackage {
       pname = "yomu-desktop";
       inherit version;
       src = self;
@@ -158,6 +227,12 @@
       '';
 
       postInstall = ''
+        # yomu-shell is a staticlib/cdylib/rlib because the Android build
+        # needs the first two; buildRustPackage installs whatever it finds,
+        # and the .a alone is five sixths of this output. Only bin/yomu-shell
+        # ever runs on the desktop.
+        rm -f $out/lib/libyomu_shell_lib.a
+
         install -Dm644 crates/yomu-shell/icons/128x128.png \
           $out/share/icons/hicolor/128x128/apps/yomu.png
         install -Dm644 crates/yomu-shell/icons/32x32.png \
@@ -181,7 +256,7 @@
     };
   in {
     packages.${system} = {
-      inherit yomu-server yomu-web yomu-desktop;
+      inherit yomu-server yomu-web yomu-web-compressed yomu-desktop;
       default = yomu-server;
     };
 
@@ -238,6 +313,10 @@
             cargo-tauri
             jdk17
             androidComposition.androidsdk
+            # `just apk`'s strip guard unpacks the built APK to read the
+            # shipped .so; without this it borrows whatever unzip the caller's
+            # PATH happens to hold, and the recipe stops being hermetic.
+            unzip
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
 
