@@ -17,6 +17,53 @@ pub type Result<T> = std::result::Result<T, SourceError>;
 const IMAGE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "avif"];
 const COVER_STEMS: [&str; 2] = ["cover", "folder"];
 
+/// Publication formats the streamer cannot open. Counted per publication
+/// rather than passed over in silence: nine `.cbr` volumes sitting between
+/// `.cbz` ones used to go missing from a series without a trace.
+const UNSUPPORTED_EXTENSIONS: [&str; 8] =
+    ["cbr", "cb7", "cbt", "rar", "pdf", "epub", "mobi", "azw3"];
+
+/// Files one scan skipped because it cannot read their format.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Unsupported {
+    pub count: u32,
+    /// Lowercased extensions, sorted and deduplicated.
+    pub formats: Vec<String>,
+}
+
+impl Unsupported {
+    /// Count `name` when it looks like a book in a format we cannot read.
+    /// Everything else a library folder collects — `.nfo` sidecars, `.xml`,
+    /// scanner leftovers — is not a missing volume and must not be counted
+    /// as one, or every folder would claim to be incomplete.
+    fn record(&mut self, name: &str) {
+        let Some((_, ext)) = name.rsplit_once('.') else {
+            return;
+        };
+        let ext = ext.to_lowercase();
+        if !UNSUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+            return;
+        }
+        self.count += 1;
+        if let Err(at) = self.formats.binary_search(&ext) {
+            self.formats.insert(at, ext);
+        }
+    }
+
+    fn merge(&mut self, other: &Unsupported) {
+        self.count += other.count;
+        for ext in &other.formats {
+            if let Err(at) = self.formats.binary_search(ext) {
+                self.formats.insert(at, ext.clone());
+            }
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 /// Optional per-series metadata, Suwayomi-compatible subset.
 #[derive(Debug, Default, Deserialize)]
 struct Details {
@@ -91,7 +138,15 @@ impl Streamer {
         url
     }
 
-    pub(super) async fn series_details(&self, series: &str) -> Result<MangaDetails> {
+    /// Metadata for a series folder, given the unit names `discover_entry`
+    /// already decided are readable. `units` may be empty: a folder holding
+    /// only formats we cannot read still becomes a publication, so the
+    /// library can show it as unsupported instead of hiding it.
+    pub(super) async fn series_details(
+        &self,
+        series: &str,
+        units: &[String],
+    ) -> Result<MangaDetails> {
         let series_dir = self.resolve(series)?;
 
         let details: Details =
@@ -101,42 +156,30 @@ impl Streamer {
                 Err(_) => Details::default(),
             };
 
-        // Chapters: subdirectories and .cbz archives, in reading order
-        // (parsed number, name as fallback), source_order = recency rank.
-        let mut chapters = Vec::new();
-        let mut reader = tokio::fs::read_dir(&series_dir).await.map_err(io_err)?;
-        while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            let is_cbz = !is_dir && name.to_lowercase().ends_with(".cbz");
-            if !is_dir && !is_cbz {
-                continue;
-            }
-            let title = name.trim_end_matches(".cbz").trim_end_matches(".CBZ");
-            chapters.push(ChapterRef {
-                key: format!("{series}/{name}"),
-                title: title.to_string(),
-                number: chapter_number(title),
-                source_order: 0, // recency rank, assigned after sorting
-                scanlator: None,
-                published_at: None,
-            });
-        }
-        if chapters.is_empty() {
-            return Err(SourceError::Parse(format!(
-                "no units (subdirectories or .cbz) in {series:?}"
-            )));
-        }
+        // Units in reading order (parsed number, name as fallback);
+        // source_order is the recency rank, assigned after sorting.
+        let mut chapters: Vec<ChapterRef> = units
+            .iter()
+            .map(|name| {
+                let title = name.trim_end_matches(".cbz").trim_end_matches(".CBZ");
+                ChapterRef {
+                    key: format!("{series}/{name}"),
+                    title: title.to_string(),
+                    number: chapter_number(title),
+                    source_order: 0,
+                    scanlator: None,
+                    published_at: None,
+                }
+            })
+            .collect();
         chapters.sort_by(|a, b| match (a.number, b.number) {
             (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.title.cmp(&b.title),
         });
-        let last = chapters.len() as u32 - 1;
+        // saturating: an unsupported-only folder has no units at all.
+        let last = (chapters.len() as u32).saturating_sub(1);
         for (index, chapter) in chapters.iter_mut().enumerate() {
             chapter.source_order = last - index as u32;
         }
@@ -300,6 +343,8 @@ pub(super) struct Discovered {
     /// Books-dir-relative path — the publication's identity.
     pub path: String,
     pub details: MangaDetails,
+    /// Files in this folder the scan could not read.
+    pub unsupported: Unsupported,
 }
 
 impl Streamer {
@@ -362,44 +407,106 @@ impl Streamer {
             return Ok(Some(Discovered {
                 path: name.to_string(),
                 details: single_unit_details(name, &title, pages.first().cloned()),
+                unsupported: Unsupported::default(),
             }));
         }
 
-        // A directory is a series when it holds unit dirs or archives;
-        // a directory of loose images is a single-unit publication.
+        // A directory is a series when it holds readable unit dirs or
+        // archives; a directory of loose page images is a single-unit
+        // publication; one holding only unreadable formats becomes a
+        // publication with no units at all, flagged for the library.
         let dir = self.books_dir.join(name);
-        let mut has_units = false;
-        let mut has_images = false;
+        let mut candidates: Vec<(String, bool)> = Vec::new();
+        let mut has_pages = false;
+        let mut unsupported = Unsupported::default();
         let mut reader = tokio::fs::read_dir(&dir).await.map_err(io_err)?;
         while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
             let child = entry.file_name().to_string_lossy().into_owned();
             if child.starts_with('.') {
                 continue;
             }
-            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
-                || child.to_lowercase().ends_with(".cbz")
-            {
-                has_units = true;
+            let child_is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            if child_is_dir || child.to_lowercase().ends_with(".cbz") {
+                candidates.push((child, child_is_dir));
             } else if is_image_name(&child) {
-                has_images = true;
+                // Series art is not a page: a folder holding nothing but its
+                // cover is not a one-page publication.
+                has_pages |= !is_cover_name(&child);
+            } else {
+                unsupported.record(&child);
             }
         }
-        if has_units {
+
+        // A subdirectory is a unit only if it actually holds pages. One full
+        // of .pdf volumes used to import as a chapter that 404s on every page.
+        let mut units = Vec::new();
+        for (child, child_is_dir) in candidates {
+            if !child_is_dir {
+                units.push(child);
+                continue;
+            }
+            match self.unit_dir_contents(&dir.join(&child)).await {
+                Ok(contents) if contents.has_pages => units.push(child),
+                Ok(contents) => unsupported.merge(&contents.unsupported),
+                Err(err) => {
+                    tracing::warn!(dir = %child, %err, "streamer: unit dir unreadable");
+                }
+            }
+        }
+
+        if !units.is_empty() {
             return Ok(Some(Discovered {
                 path: name.to_string(),
-                details: self.series_details(name).await?,
+                details: self.series_details(name, &units).await?,
+                unsupported,
             }));
         }
-        if has_images {
+        if has_pages {
             let pages = self.pages(name).await?;
             return Ok(Some(Discovered {
                 path: name.to_string(),
                 details: single_unit_details(name, name, pages.first().cloned()),
+                unsupported,
+            }));
+        }
+        if !unsupported.is_empty() {
+            // Nothing readable, but these are books. Import the folder with
+            // no units so the library can say why it is empty, instead of
+            // dropping it and leaving the reader to wonder where it went.
+            return Ok(Some(Discovered {
+                path: name.to_string(),
+                details: self.series_details(name, &[]).await?,
+                unsupported,
             }));
         }
         tracing::info!(dir = %name, "streamer: no readable content, skipping");
         Ok(None)
     }
+
+    /// One level of a candidate unit directory: whether it holds any page
+    /// image, and what unreadable book files it carries otherwise.
+    async fn unit_dir_contents(&self, path: &Path) -> Result<UnitDirContents> {
+        let mut contents = UnitDirContents::default();
+        let mut reader = tokio::fs::read_dir(path).await.map_err(io_err)?;
+        while let Some(entry) = reader.next_entry().await.map_err(io_err)? {
+            let child = entry.file_name().to_string_lossy().into_owned();
+            if child.starts_with('.') {
+                continue;
+            }
+            if is_image_name(&child) {
+                contents.has_pages = true;
+            } else {
+                contents.unsupported.record(&child);
+            }
+        }
+        Ok(contents)
+    }
+}
+
+#[derive(Default)]
+struct UnitDirContents {
+    has_pages: bool,
+    unsupported: Unsupported,
 }
 
 /// A one-shot: the publication and its only unit share the path as key.
@@ -427,6 +534,16 @@ fn single_unit_details(path: &str, title: &str, cover: Option<Url>) -> MangaDeta
 
 fn io_err(e: std::io::Error) -> SourceError {
     SourceError::Http(e.to_string())
+}
+
+/// `cover.jpg` / `folder.png`: the folder's own art rather than a page.
+fn is_cover_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    COVER_STEMS.iter().any(|stem| {
+        IMAGE_EXTENSIONS
+            .iter()
+            .any(|ext| lower == format!("{stem}.{ext}"))
+    })
 }
 
 fn is_image_name(name: &str) -> bool {
@@ -540,7 +657,11 @@ mod tests {
 
         let streamer = Streamer::new(root.clone());
 
-        let details = streamer.series_details("Solo Farming").await.unwrap();
+        let units = ["Chapter 2".to_string(), "Chapter 1".to_string()];
+        let details = streamer
+            .series_details("Solo Farming", &units)
+            .await
+            .unwrap();
         assert_eq!(details.summary.title, "Solo Farming");
         assert_eq!(details.chapters.len(), 2);
         // Reading order with recency-rank source_order.

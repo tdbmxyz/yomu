@@ -1564,3 +1564,10 @@ body:has(.reader-overlay.flow) main {
   display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
   font-size: 0.75rem; background: rgba(200, 80, 80, 0.18); color: #d08080;
 }
+/* A folder yomu can see but not open: dimmed less than a missing file, and
+   amber rather than red — nothing is lost, the format just isn't readable. */
+.manga-card.unsupported .cover-wrap { opacity: 0.7; }
+.unsupported-badge {
+  display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+  font-size: 0.75rem; background: rgba(210, 150, 60, 0.18); color: #d0a060;
+}
