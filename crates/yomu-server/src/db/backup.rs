@@ -60,8 +60,9 @@ impl Db {
             let r = sqlx::query(
                 "INSERT INTO publications (id, kind, source_id, source_key, file_path, title,
                                            description, cover_url, auto_download, category,
-                                           added_at, last_checked_at, missing_since)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                           added_at, last_checked_at, missing_since,
+                                           unsupported_count, unsupported_formats)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(publication.id.to_string())
@@ -77,6 +78,8 @@ impl Db {
             .bind(publication.added_at)
             .bind(publication.last_checked_at)
             .bind(publication.missing_since)
+            .bind(publication.unsupported_count as i64)
+            .bind(publication.unsupported_formats.join(","))
             .execute(&mut *tx)
             .await?;
             // Genres ride along whether or not the publication row was new,

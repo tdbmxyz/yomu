@@ -134,6 +134,26 @@ impl Db {
         Ok(())
     }
 
+    /// Record what a books-dir scan had to skip in this publication's folder:
+    /// how many files, and which extensions. Returns whether the stored value
+    /// actually changed, so a rescan only reports a publication as updated
+    /// when something on disk really moved.
+    pub async fn set_unsupported(&self, id: Uuid, count: u32, formats: &[String]) -> Result<bool> {
+        let joined = formats.join(",");
+        let result = sqlx::query(
+            "UPDATE publications SET unsupported_count = ?, unsupported_formats = ?
+             WHERE id = ? AND (unsupported_count <> ? OR unsupported_formats <> ?)",
+        )
+        .bind(count as i64)
+        .bind(&joined)
+        .bind(id.to_string())
+        .bind(count as i64)
+        .bind(&joined)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Refresh scan-derived metadata (cover/description) without touching title
     /// (both columns are overwritten — pass the current value to keep it).
     pub async fn update_local_metadata(
