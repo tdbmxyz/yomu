@@ -208,6 +208,15 @@ fn MangaDetail(
     // server-download affordances make sense for them.
     let is_local = matches!(publication.origin, yomu_domain::Origin::LocalFile { .. });
     let missing = publication.missing_since.is_some();
+    // Volumes in the folder the scan could not read, e.g. "9 unreadable
+    // files: cbr" — the honest explanation for a series with gaps, or with
+    // no chapters at all.
+    let unsupported = (publication.unsupported_count > 0).then(|| {
+        (
+            publication.unsupported_count,
+            publication.unsupported_formats.join(", "),
+        )
+    });
     // "Continue" goes to the last known position — server's answer merged
     // with any unsynced offline events — or the first chapter.
     let locator = offline::effective_position(id, detail.locator.clone(), &offline::outbox());
@@ -305,6 +314,17 @@ fn MangaDetail(
                         >
                             "file missing"
                         </span>
+                    })}
+                    {unsupported.map(|(count, formats)| {
+                        let plural = if count == 1 { "file" } else { "files" };
+                        view! {
+                            <span
+                                class="unsupported-badge"
+                                title="yomu can see these files but cannot open their format yet — convert them to .cbz to read them here"
+                            >
+                                {format!("{count} unreadable {plural}: {formats}")}
+                            </span>
+                        }
                     })}
                     {publication
                         .description

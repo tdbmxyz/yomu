@@ -51,8 +51,20 @@ pub fn Library() -> impl IntoView {
         });
     }
 
-    // None = "All".
+    // None = "All". Seeded from the tab this device last used; the stored id
+    // is only honoured once the category list confirms it still exists.
     let selected = RwSignal::new(None::<String>);
+    Effect::new(move |seeded: Option<bool>| {
+        if seeded == Some(true) {
+            return true;
+        }
+        let Some(Ok(list)) = categories.get() else {
+            return false;
+        };
+        let known: Vec<String> = list.iter().map(|c| c.id.clone()).collect();
+        selected.set(offline::restore_category(&known));
+        true
+    });
     let selected_kind = RwSignal::new(offline::library_kind());
     // A cached kind that no longer has content falls back to Comics rather
     // than showing a confusing empty library.
@@ -164,6 +176,7 @@ pub fn Library() -> impl IntoView {
                                         <a
                                             class="manga-card"
                                             class:missing=entry.publication.missing_since.is_some()
+                                            class:unsupported=(entry.publication.unsupported_count > 0)
                                             href=format!("/manga/{}", entry.publication.id)
                                         >
                                             <span class="cover-wrap">
@@ -413,7 +426,10 @@ fn CategoryTabs(
         <div class="category-tabs">
             <button
                 class:active=move || selected.get().is_none()
-                on:click=move |_| selected.set(None)
+                on:click=move |_| {
+                    offline::set_library_category(None);
+                    selected.set(None);
+                }
             >
                 "All"
             </button>
@@ -429,7 +445,10 @@ fn CategoryTabs(
                     view! {
                         <button
                             class:active=is_active
-                            on:click=move |_| selected.set(Some(select_id.clone()))
+                            on:click=move |_| {
+                                offline::set_library_category(Some(&select_id));
+                                selected.set(Some(select_id.clone()));
+                            }
                         >
                             {format!("{} ({})", category.name, count_of(&id))}
                         </button>

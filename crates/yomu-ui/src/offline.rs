@@ -954,6 +954,35 @@ pub fn set_library_kind(kind: yomu_domain::Kind) {
     }
 }
 
+const LIBRARY_CATEGORY_KEY: &str = "yomu-library-category";
+
+/// The library category tab this device last selected, `None` for "All".
+/// Restored on relaunch so a reader who lives in Reading reopens there
+/// instead of re-picking the tab every visit. Per device, like the kind:
+/// the phone can sit on Reading while the tablet shows everything.
+pub fn library_category() -> Option<String> {
+    storage()
+        .and_then(|s| s.get_item(LIBRARY_CATEGORY_KEY).ok().flatten())
+        .filter(|id| !id.is_empty())
+}
+
+pub fn set_library_category(id: Option<&str>) {
+    if let Some(storage) = storage() {
+        let _ = storage.set_item(LIBRARY_CATEGORY_KEY, id.unwrap_or_default());
+    }
+}
+
+/// The stored tab, dropped when the server no longer has that category —
+/// otherwise a renamed or removed category leaves the reader staring at an
+/// empty grid under a tab that does not exist.
+pub fn restore_category(known: &[String]) -> Option<String> {
+    known_category(library_category(), known)
+}
+
+fn known_category(stored: Option<String>, known: &[String]) -> Option<String> {
+    stored.filter(|id| known.iter().any(|k| k == id))
+}
+
 /// Reflect the theme onto `<html data-theme>`, where the CSS reads it.
 pub fn apply_theme(theme: Theme) {
     if let Some(root) = web_sys::window()
@@ -1090,7 +1119,7 @@ pub fn set_reader_direction(manga_id: Uuid, direction: ReaderDirection) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceFingerprint, plan_mark_repair, plan_recovery, should_downgrade,
+        DeviceFingerprint, known_category, plan_mark_repair, plan_recovery, should_downgrade,
         should_probe_on_resume,
     };
     use crate::Connectivity;
@@ -1321,5 +1350,21 @@ mod tests {
         // wedge the app: resuming retries it.
         assert!(should_probe_on_resume(Connectivity::Checking));
         assert!(!should_probe_on_resume(Connectivity::Online));
+    }
+
+    /// A remembered tab survives a relaunch, but only while the server still
+    /// has that category — otherwise the reader lands on a tab that does not
+    /// exist and sees an empty library.
+    #[test]
+    fn a_remembered_category_is_dropped_once_the_server_forgets_it() {
+        let known = vec!["reading".to_string(), "paused".to_string()];
+        assert_eq!(
+            known_category(Some("reading".into()), &known),
+            Some("reading".to_string())
+        );
+        assert_eq!(known_category(Some("archive".into()), &known), None);
+        assert_eq!(known_category(None, &known), None);
+        // No categories loaded yet is not a reason to keep a bogus tab.
+        assert_eq!(known_category(Some("reading".into()), &[]), None);
     }
 }
