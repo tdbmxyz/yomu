@@ -294,6 +294,8 @@ mod wire {
             added_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             last_checked_at: Some("2026-01-02T00:00:00Z".parse().unwrap()),
             missing_since: None,
+            unsupported_count: 0,
+            unsupported_formats: Vec::new(),
         }
     }
 

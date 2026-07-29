@@ -50,6 +50,11 @@ pub struct Publication {
     pub last_checked_at: Option<DateTime<Utc>>,
     /// Set while a LocalFile publication's file has vanished from disk.
     pub missing_since: Option<DateTime<Utc>>,
+    /// Files in a LocalFile publication's folder the scan could not read
+    /// because of their format, and the extensions they carry (sorted,
+    /// deduplicated). Zero and empty for source-origin publications.
+    pub unsupported_count: u32,
+    pub unsupported_formats: Vec<String>,
 }
 
 /// The frozen 1.x JSON shape of a publication. One place defines the wire:
@@ -82,6 +87,14 @@ struct PublicationWire {
     last_checked_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     missing_since: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    unsupported_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unsupported_formats: Vec<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl From<Publication> for PublicationWire {
@@ -108,6 +121,8 @@ impl From<Publication> for PublicationWire {
             added_at: p.added_at,
             last_checked_at: p.last_checked_at,
             missing_since: p.missing_since,
+            unsupported_count: p.unsupported_count,
+            unsupported_formats: p.unsupported_formats,
         }
     }
 }
@@ -138,6 +153,8 @@ impl TryFrom<PublicationWire> for Publication {
             added_at: w.added_at,
             last_checked_at: w.last_checked_at,
             missing_since: w.missing_since,
+            unsupported_count: w.unsupported_count,
+            unsupported_formats: w.unsupported_formats,
         })
     }
 }

@@ -94,7 +94,15 @@ pub async fn scan(
                 .insert_local_publication(&found.path, &found.details)
                 .await
             {
-                Ok(_) => outcome.added += 1,
+                Ok(publication) => {
+                    db.set_unsupported(
+                        publication.id,
+                        found.unsupported.count,
+                        &found.unsupported.formats,
+                    )
+                    .await?;
+                    outcome.added += 1;
+                }
                 Err(DbError::Constraint(err)) => {
                     tracing::warn!(path = %found.path, %err, "streamer: insert skipped");
                 }
@@ -163,7 +171,13 @@ async fn sync_known(
     )
     .await?;
     db.set_genres(publication.id, &found.details.genres).await?;
-    let mut changed = false;
+    let mut changed = db
+        .set_unsupported(
+            publication.id,
+            found.unsupported.count,
+            &found.unsupported.formats,
+        )
+        .await?;
     if publication.missing_since.is_some() {
         db.set_missing_since(publication.id, None).await?;
         changed = true;
@@ -270,6 +284,128 @@ mod tests {
         // Idempotent: nothing new the second time.
         let again = scan(&streamer, &db, None).await.unwrap();
         assert_eq!((again.added, again.updated, again.missing), (0, 0, 0));
+    }
+
+    /// A folder of volumes in a format we cannot read, next to the cover art
+    /// a previous library manager left behind. It used to import as a
+    /// one-chapter publication whose only page WAS the cover; it must now
+    /// import with no units and say what it skipped.
+    #[tokio::test]
+    async fn unreadable_volumes_beside_a_cover_import_with_no_units() {
+        let fx = Fixture::new("cover-only");
+        fx.page("Death Notes/cover.jpg");
+        std::fs::write(fx.root.join("Death Notes/T01.cbr"), b"rar").unwrap();
+        std::fs::write(fx.root.join("Death Notes/T02.cbr"), b"rar").unwrap();
+        // Sidecars are not volumes and must not be counted as missing ones.
+        std::fs::write(fx.root.join("Death Notes/series.nfo"), b"meta").unwrap();
+
+        let db = Db::in_memory().await.unwrap();
+        let streamer = Streamer::new(fx.root.clone());
+        let outcome = scan(&streamer, &db, None).await.unwrap();
+        assert_eq!(outcome.added, 1);
+
+        let pubs = db.list_local_publications().await.unwrap();
+        let found = pubs.iter().find(|p| p.title == "Death Notes").unwrap();
+        assert_eq!(
+            db.list_units(found.id).await.unwrap().len(),
+            0,
+            "the cover must not become a chapter"
+        );
+        assert_eq!(found.unsupported_count, 2);
+        assert_eq!(found.unsupported_formats, vec!["cbr".to_string()]);
+        // The cover still identifies it on the shelf.
+        assert_eq!(
+            found.cover_url.as_ref().map(|u| u.as_str()),
+            Some("local:///Death%20Notes/cover.jpg")
+        );
+    }
+
+    /// Subdirectories holding only unreadable files are not units. This
+    /// folder used to import as N chapters, every one of which 404d.
+    #[tokio::test]
+    async fn subdirectories_without_pages_are_not_units() {
+        let fx = Fixture::new("pdf-dirs");
+        for volume in ["T01", "T02", "T03"] {
+            let dir = fx.root.join(format!("Perfect Edition/{volume}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{volume}.pdf")), b"%PDF").unwrap();
+            std::fs::write(dir.join("release.nfo"), b"meta").unwrap();
+        }
+
+        let db = Db::in_memory().await.unwrap();
+        let streamer = Streamer::new(fx.root.clone());
+        scan(&streamer, &db, None).await.unwrap();
+
+        let pubs = db.list_local_publications().await.unwrap();
+        let found = pubs.iter().find(|p| p.title == "Perfect Edition").unwrap();
+        assert_eq!(db.list_units(found.id).await.unwrap().len(), 0);
+        assert_eq!(found.unsupported_count, 3);
+        assert_eq!(found.unsupported_formats, vec!["pdf".to_string()]);
+    }
+
+    /// The quiet one: readable and unreadable volumes side by side. The
+    /// readable ones import, and the gap is reported instead of vanishing.
+    #[tokio::test]
+    async fn a_mixed_folder_imports_what_it_can_and_reports_the_rest() {
+        let fx = Fixture::new("mixed");
+        fx.cbz("Clover/T04.cbz", &["001.png"]);
+        fx.cbz("Clover/T05.cbz", &["001.png"]);
+        std::fs::write(fx.root.join("Clover/T01.cbr"), b"rar").unwrap();
+        std::fs::write(fx.root.join("Clover/T02.CBR"), b"rar").unwrap();
+        std::fs::write(fx.root.join("Clover/T03.epub"), b"zip").unwrap();
+
+        let db = Db::in_memory().await.unwrap();
+        let streamer = Streamer::new(fx.root.clone());
+        scan(&streamer, &db, None).await.unwrap();
+
+        let pubs = db.list_local_publications().await.unwrap();
+        let found = pubs.iter().find(|p| p.title == "Clover").unwrap();
+        assert_eq!(db.list_units(found.id).await.unwrap().len(), 2);
+        assert_eq!(found.unsupported_count, 3);
+        // Sorted, deduplicated, case-folded.
+        assert_eq!(
+            found.unsupported_formats,
+            vec!["cbr".to_string(), "epub".to_string()]
+        );
+
+        // Idempotent: the flag is already stored, so nothing "changed".
+        let again = scan(&streamer, &db, None).await.unwrap();
+        assert_eq!((again.added, again.updated), (0, 0));
+    }
+
+    /// The guard must not swallow real single-unit publications: loose pages
+    /// stay a publication even when a cover sits among them.
+    #[tokio::test]
+    async fn loose_pages_beside_a_cover_are_still_one_unit() {
+        let fx = Fixture::new("loose-cover");
+        fx.page("Oneshot/cover.jpg");
+        fx.page("Oneshot/001.png");
+        fx.page("Oneshot/002.png");
+
+        let db = Db::in_memory().await.unwrap();
+        let streamer = Streamer::new(fx.root.clone());
+        scan(&streamer, &db, None).await.unwrap();
+
+        let pubs = db.list_local_publications().await.unwrap();
+        let found = pubs.iter().find(|p| p.title == "Oneshot").unwrap();
+        assert_eq!(db.list_units(found.id).await.unwrap().len(), 1);
+        assert_eq!(found.unsupported_count, 0);
+        assert!(found.unsupported_formats.is_empty());
+    }
+
+    /// Interrupted downloads are hidden files. They stay invisible, and in
+    /// particular are never reported as unsupported volumes.
+    #[tokio::test]
+    async fn hidden_partial_downloads_stay_invisible() {
+        let fx = Fixture::new("partial");
+        std::fs::create_dir_all(fx.root.join("Summit")).unwrap();
+        std::fs::write(fx.root.join("Summit/.T01.cbz.0azQdC"), b"partial").unwrap();
+
+        let db = Db::in_memory().await.unwrap();
+        let streamer = Streamer::new(fx.root.clone());
+        let outcome = scan(&streamer, &db, None).await.unwrap();
+        assert_eq!(outcome.added, 0);
+        assert!(db.list_local_publications().await.unwrap().is_empty());
     }
 
     #[tokio::test]

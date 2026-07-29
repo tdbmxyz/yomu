@@ -195,6 +195,9 @@ struct PublicationRow {
     added_at: DateTime<Utc>,
     last_checked_at: Option<DateTime<Utc>>,
     missing_since: Option<DateTime<Utc>>,
+    unsupported_count: i64,
+    /// Comma-joined extensions; empty string when nothing was skipped.
+    unsupported_formats: String,
 }
 
 impl TryFrom<PublicationRow> for Publication {
@@ -229,8 +232,20 @@ impl TryFrom<PublicationRow> for Publication {
             added_at: row.added_at,
             last_checked_at: row.last_checked_at,
             missing_since: row.missing_since,
+            unsupported_count: row.unsupported_count.max(0) as u32,
+            unsupported_formats: split_formats(&row.unsupported_formats),
         })
     }
+}
+
+/// The comma-joined `unsupported_formats` column back into a list. Empty
+/// string means "nothing skipped" and must not yield `[""]`.
+fn split_formats(joined: &str) -> Vec<String> {
+    joined
+        .split(',')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(sqlx::FromRow)]
@@ -663,6 +678,8 @@ mod tests {
                 added_at: Utc::now(),
                 last_checked_at: None,
                 missing_since: None,
+                unsupported_count: 0,
+                unsupported_formats: Vec::new(),
             }],
             units: Vec::new(),
             read_unit_ids: Vec::new(),
