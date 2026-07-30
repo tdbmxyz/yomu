@@ -52,6 +52,44 @@ pub fn request_token(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(|(_, value)| value.to_string())
 }
 
+/// Paths under `/api/v1` reachable with no session.
+///
+/// Exact matches only. A prefix test would make `/healthz` public, and
+/// worse, any future route naming a public prefix. Everything absent from
+/// this list is content, and content requires identity — which is the
+/// point: a new route is protected because someone has to come here to
+/// exempt it.
+pub fn is_public(path: &str) -> bool {
+    matches!(
+        path,
+        "/health"
+            | "/auth/me"
+            | "/auth/login"
+            | "/auth/callback"
+            | "/auth/exchange"
+            // Signing out with a session the server already dropped must
+            // not 401: the caller's goal is to have no session.
+            | "/auth/logout"
+    )
+}
+
+/// The two routes an `<img>` loads, which may present a media token
+/// instead of a session (see `media_token.rs`). Not public: without a
+/// valid token they still 401.
+pub fn takes_media_token(path: &str) -> bool {
+    let mut segments = path.split('/').skip(1);
+    match (segments.next(), segments.next(), segments.next()) {
+        // /manga/{id}/cover
+        (Some("manga"), Some(_), Some("cover")) => segments.next().is_none(),
+        // /chapters/{id}/pages/{n} — but not the page list, which is JSON
+        // the client fetches with a header.
+        (Some("chapters"), Some(_), Some("pages")) => {
+            segments.next().is_some_and(|n| !n.is_empty()) && segments.next().is_none()
+        }
+        _ => false,
+    }
+}
+
 async fn resolve(parts: &Parts, state: &AppState) -> Option<User> {
     if !state.config.auth.oidc_enabled() {
         return state.db.user_by_id(SHARED_USER).await.ok();
@@ -105,6 +143,50 @@ mod tests {
         assert_eq!(request_token(&headers).as_deref(), Some("cookie-tok"));
         headers.insert(header::AUTHORIZATION, "Bearer bearer-tok".parse().unwrap());
         assert_eq!(request_token(&headers).as_deref(), Some("bearer-tok"));
+    }
+
+    /// The routes that must answer without a session, and why: health
+    /// tells an app the server is there and how to sign in, /auth carries
+    /// the sign-in itself. Everything else is content.
+    #[test]
+    fn only_the_sign_in_surface_is_public() {
+        assert!(is_public("/health"));
+        assert!(is_public("/auth/me"));
+        assert!(is_public("/auth/login"));
+        assert!(is_public("/auth/callback"));
+        assert!(is_public("/auth/exchange"));
+        // Signing out with a session the server already dropped must not
+        // 401: the caller's goal is to have no session.
+        assert!(is_public("/auth/logout"));
+
+        assert!(!is_public("/library"));
+        assert!(!is_public("/manga/0199-abc"));
+        assert!(!is_public("/chapters/0199-abc/pages/3"));
+        assert!(!is_public("/sources"));
+        assert!(!is_public("/auth/media-token"));
+    }
+
+    /// Prefix matching would make /healthz public, and any future route
+    /// that happens to share a public prefix.
+    #[test]
+    fn public_paths_match_exactly() {
+        assert!(!is_public("/health/../library"));
+        assert!(!is_public("/healthz"));
+        assert!(!is_public("/auth/me/library"));
+        assert!(!is_public(""));
+    }
+
+    /// The image routes are not public — they are reachable *with a media
+    /// token*, which is a different thing, decided elsewhere.
+    #[test]
+    fn image_routes_take_a_media_token_but_are_not_public() {
+        assert!(!is_public("/manga/0199-abc/cover"));
+        assert!(takes_media_token("/manga/0199-abc/cover"));
+        assert!(takes_media_token("/chapters/0199-abc/pages/12"));
+        // The page *list* is JSON, fetched by the client with a header.
+        assert!(!takes_media_token("/chapters/0199-abc/pages"));
+        assert!(!takes_media_token("/library"));
+        assert!(!takes_media_token("/manga/0199-abc"));
     }
 
     #[test]
