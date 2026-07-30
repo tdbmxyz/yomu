@@ -11,6 +11,7 @@ pub mod offline;
 mod pager;
 mod pages;
 mod pull;
+mod refresh;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
