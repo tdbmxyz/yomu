@@ -86,6 +86,9 @@ pub fn Library() -> impl IntoView {
             }
         }
     });
+    crate::cache::remember_scroll("yomu-scroll:library".to_string(), move || {
+        library.value.get().is_some()
+    });
     let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
     // Any settled outcome ends the spinner — a refresh that fails must not
     // leave it turning.

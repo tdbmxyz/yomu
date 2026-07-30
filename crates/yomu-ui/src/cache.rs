@@ -259,6 +259,41 @@ pub fn patch_detail_locator(
     detail.mark_stale();
 }
 
+/// Return to where the list was left.
+///
+/// Saved from scroll events as they happen, not in `on_cleanup`: that
+/// runs after navigation has already reset scroll to 0 (and that reset's
+/// own event fires asynchronously, past the listener's removal, so it
+/// cannot clobber the recording). `ready` gates the restore until there
+/// is content to scroll through.
+pub fn remember_scroll(key: String, ready: impl Fn() -> bool + 'static) {
+    let save_key = key.clone();
+    let save = window_event_listener(leptos::ev::scroll, move |_| {
+        if let Some(storage) = window().session_storage().ok().flatten() {
+            let y = window().scroll_y().unwrap_or(0.0);
+            let _ = storage.set_item(&save_key, &y.to_string());
+        }
+    });
+    on_cleanup(move || save.remove());
+
+    let restored = StoredValue::new(false);
+    Effect::new(move |_| {
+        if !ready() || restored.get_value() {
+            return;
+        }
+        restored.set_value(true);
+        let key = key.clone();
+        request_animation_frame(move || {
+            if let Some(storage) = window().session_storage().ok().flatten()
+                && let Ok(Some(saved)) = storage.get_item(&key)
+                && let Ok(y) = saved.parse::<f64>()
+            {
+                window().scroll_to_with_x_and_y(0.0, y);
+            }
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
