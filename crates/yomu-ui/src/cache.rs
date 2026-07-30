@@ -222,6 +222,43 @@ pub fn mark_publication_stale(library: LibraryCache, detail: DetailCache) {
     detail.mark_stale();
 }
 
+/// Write a reading position into the library list without a fetch.
+///
+/// The locator is exact — the reader knows the unit and the page — so it
+/// is patched. `unread_count` is not: `set_position` also folds the
+/// position into read marks server-side (`api/progress.rs`,
+/// `auto_mark_read`) by a reading-order rule the client must not
+/// duplicate. So the cache is also flagged stale, and the next view
+/// corrects the counts behind the list already on screen.
+pub fn patch_locator(
+    library: LibraryCache,
+    publication_id: uuid::Uuid,
+    locator: &yomu_domain::Locator,
+    unit_title: Option<String>,
+) {
+    library.patch(&(), |list| {
+        if let Some(entry) = list.iter_mut().find(|e| e.publication.id == publication_id) {
+            entry.locator = Some(locator.clone());
+            if unit_title.is_some() {
+                entry.locator_unit_title = unit_title.clone();
+            }
+        }
+    });
+    library.mark_stale();
+}
+
+/// The same, for the open publication's detail.
+pub fn patch_detail_locator(
+    detail: DetailCache,
+    publication_id: uuid::Uuid,
+    locator: &yomu_domain::Locator,
+) {
+    detail.patch(&publication_id, |(value, _)| {
+        value.locator = Some(locator.clone());
+    });
+    detail.mark_stale();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +330,68 @@ mod tests {
         assert_eq!(cache.answer(&1), Some("one".to_string()));
         cache.patch(&1, |v| v.push('!'));
         assert_eq!(cache.answer(&1), Some("one!".to_string()));
+    }
+
+    fn at() -> chrono::DateTime<chrono::Utc> {
+        "2026-07-30T00:00:00Z".parse().unwrap()
+    }
+
+    fn entry(id: uuid::Uuid) -> yomu_domain::PublicationWithLocator {
+        yomu_domain::PublicationWithLocator {
+            publication: yomu_domain::Publication {
+                id,
+                kind: yomu_domain::Kind::Comics,
+                origin: yomu_domain::Origin::LocalFile {
+                    path: id.to_string(),
+                },
+                title: "A publication".into(),
+                description: None,
+                cover_url: None,
+                auto_download: false,
+                category: "reading".into(),
+                genres: Vec::new(),
+                added_at: at(),
+                last_checked_at: None,
+                missing_since: None,
+                unsupported_count: 0,
+                unsupported_formats: Vec::new(),
+            },
+            locator: None,
+            unit_count: 3,
+            unread_count: 3,
+            downloaded_count: 0,
+            latest_unit_at: None,
+            locator_unit_title: None,
+        }
+    }
+
+    /// Returning from the reader must show the position just read, with no
+    /// fetch: the client knows it exactly, so it is written in rather than
+    /// waited for.
+    #[test]
+    fn a_reading_position_is_written_into_the_library_entry() {
+        let mine = uuid::Uuid::from_u128(1);
+        let other = uuid::Uuid::from_u128(2);
+        let library: LibraryCache = Keyed::default();
+        library.store((), vec![entry(other), entry(mine)]);
+
+        let locator = yomu_domain::Locator {
+            unit_id: uuid::Uuid::from_u128(9),
+            locations: yomu_domain::Locations::Page { page: 4 },
+            at: at(),
+        };
+        patch_locator(library, mine, &locator, Some("Chapter 5".into()));
+
+        let list = library.answer(&()).expect("cached");
+        let updated = list.iter().find(|e| e.publication.id == mine).unwrap();
+        assert_eq!(updated.locator.as_ref().unwrap().page(), 4);
+        assert_eq!(updated.locator_unit_title.as_deref(), Some("Chapter 5"));
+        // Every other title is untouched.
+        let untouched = list.iter().find(|e| e.publication.id == other).unwrap();
+        assert!(untouched.locator.is_none());
+        // The unread count follows a server rule (auto_mark_read), so it is
+        // refreshed rather than guessed.
+        assert!(library.is_stale());
     }
 
     /// Single-entry by design: opening title B evicts title A, which is
