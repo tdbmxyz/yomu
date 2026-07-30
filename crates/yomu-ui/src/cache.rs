@@ -84,9 +84,71 @@ where
     }
 }
 
+/// What a page should do when it is (re)entered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fetch {
+    /// The cache answers and nothing has happened since. Do nothing.
+    No,
+    /// Show what is cached, correct it quietly.
+    Background,
+    /// Nothing to show; fetch with the loading state.
+    Blocking,
+}
+
+/// The whole staleness policy, in one place.
+pub fn decide(answered: bool, stale: bool, refreshed: bool, came_online: bool) -> Fetch {
+    match (answered, stale || refreshed || came_online) {
+        (false, _) => Fetch::Blocking,
+        (true, true) => Fetch::Background,
+        (true, false) => Fetch::No,
+    }
+}
+
+/// An Offline->Online *transition*, not "we are online".
+///
+/// `first_run` is the guard that matters: `was_online` starts false on
+/// every mount, so without it every visit looks like a reconnection and
+/// refetches, silently undoing the whole point of the cache.
+pub fn came_online(online: bool, was_online: bool, first_run: bool) -> bool {
+    online && !was_online && !first_run
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing cached: a spinner is the honest answer.
+    #[test]
+    fn an_empty_cache_blocks() {
+        assert_eq!(decide(false, false, false, false), Fetch::Blocking);
+        // Even with a trigger — there is nothing to show meanwhile.
+        assert_eq!(decide(false, true, true, true), Fetch::Blocking);
+    }
+
+    /// The whole feature: a plain revisit costs nothing.
+    #[test]
+    fn a_plain_revisit_does_not_fetch() {
+        assert_eq!(decide(true, false, false, false), Fetch::No);
+    }
+
+    /// A trigger refreshes behind the list already on screen.
+    #[test]
+    fn a_trigger_refreshes_in_the_background() {
+        assert_eq!(decide(true, true, false, false), Fetch::Background);
+        assert_eq!(decide(true, false, true, false), Fetch::Background);
+        assert_eq!(decide(true, false, false, true), Fetch::Background);
+    }
+
+    /// `was_online` starts false on every mount, so without the first-run
+    /// guard every visit looks like a reconnection and refetches — which
+    /// silently undoes this entire change.
+    #[test]
+    fn the_first_run_is_never_a_reconnection() {
+        assert!(!came_online(true, false, true));
+        assert!(came_online(true, false, false));
+        assert!(!came_online(true, true, false));
+        assert!(!came_online(false, true, false));
+    }
 
     /// The stored key is the whole point: without it, opening title B
     /// answers with title A's chapters.
