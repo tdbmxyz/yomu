@@ -44,8 +44,24 @@ pub fn Home() -> impl IntoView {
         });
     }
 
+    let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
+    // Any settled outcome ends the spinner — a refresh that fails must not
+    // leave it turning.
+    Effect::new(move |_| {
+        let _ = (library.value.get(), library.error.get());
+        pull.refreshing.set(false);
+    });
+
     view! {
         <section class="home">
+            <div
+                class="pull-refresh"
+                class:armed=move || pull.armed.get()
+                class:spinning=move || pull.refreshing.get()
+                style:height=move || format!("{}px", pull.distance.get())
+            >
+                <span class="pull-refresh-dot"></span>
+            </div>
             // A failed refresh is shown beside the shelves, never instead
             // of them.
             {move || {

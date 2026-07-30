@@ -173,7 +173,23 @@ pub fn MangaPage() -> impl IntoView {
     // background driver (see crate::pull), so it survives leaving this
     // page and app restarts — nothing to do here.
 
+    let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
+    // Any settled outcome ends the spinner — a refresh that fails must not
+    // leave it turning.
+    Effect::new(move |_| {
+        let _ = (detail.value.get(), detail.error.get());
+        pull.refreshing.set(false);
+    });
+
     view! {
+        <div
+            class="pull-refresh"
+            class:armed=move || pull.armed.get()
+            class:spinning=move || pull.refreshing.get()
+            style:height=move || format!("{}px", pull.distance.get())
+        >
+            <span class="pull-refresh-dot"></span>
+        </div>
         // A failed refresh is shown beside the chapter list, never instead
         // of it.
         {move || detail.error.get().map(|err| view! { <p class="error">{err}</p> })}

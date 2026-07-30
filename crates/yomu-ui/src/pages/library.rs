@@ -86,12 +86,27 @@ pub fn Library() -> impl IntoView {
             }
         }
     });
+    let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
+    // Any settled outcome ends the spinner — a refresh that fails must not
+    // leave it turning.
+    Effect::new(move |_| {
+        let _ = (library.value.get(), library.error.get());
+        pull.refreshing.set(false);
+    });
     // In-library filters, applied client-side over the loaded list.
     let search = RwSignal::new(String::new());
     let active_genre = RwSignal::new(None::<String>);
 
     view! {
         <section>
+            <div
+                class="pull-refresh"
+                class:armed=move || pull.armed.get()
+                class:spinning=move || pull.refreshing.get()
+                style:height=move || format!("{}px", pull.distance.get())
+            >
+                <span class="pull-refresh-dot"></span>
+            </div>
             {move || {
                 let entries = library.value.get().unwrap_or_default();
                 view! { <KindSwitcher entries selected_kind/> }
