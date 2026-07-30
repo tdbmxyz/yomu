@@ -113,6 +113,105 @@ pub fn came_online(online: bool, was_online: bool, first_run: bool) -> bool {
     online && !was_online && !first_run
 }
 
+/// What a page renders from: the payload, and an error that never
+/// replaces a payload already on screen.
+#[derive(Clone, Copy)]
+pub struct Kept<V: Send + Sync + 'static> {
+    pub value: RwSignal<Option<V>>,
+    pub error: RwSignal<Option<String>>,
+}
+
+/// Wire a cache to a page: seed from the cache, fetch only on a trigger,
+/// and keep both in step.
+///
+/// `refresh` is the page's existing counter, so every current caller
+/// keeps working by bumping it — a mutation, the manga page's download
+/// poll, or pull-to-refresh.
+pub fn keep_alive<K, V, Fut>(
+    cache: Keyed<K, V>,
+    key: K,
+    refresh: RwSignal<u32>,
+    conn: RwSignal<crate::Connectivity>,
+    fetch: impl Fn() -> Fut + 'static,
+) -> Kept<V>
+where
+    K: Clone + PartialEq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<V, yomu_client::ClientError>> + 'static,
+{
+    let kept = Kept {
+        value: RwSignal::new(cache.answer(&key)),
+        error: RwSignal::new(None),
+    };
+    let was_online = StoredValue::new(false);
+    let last_refresh = StoredValue::new(refresh.get_untracked());
+    let fetch = std::rc::Rc::new(fetch);
+    Effect::new(move |prev: Option<()>| {
+        let online = conn.get() == crate::Connectivity::Online;
+        let bump = refresh.get();
+        let refreshed = bump != last_refresh.get_value();
+        last_refresh.set_value(bump);
+        let reconnected = came_online(online, was_online.get_value(), prev.is_none());
+        was_online.set_value(online);
+
+        let answer = cache.answer(&key);
+        // Seed the view from whatever the cache holds, before deciding.
+        if answer.is_some() {
+            kept.value.set(answer.clone());
+        }
+        if decide(answer.is_some(), cache.is_stale(), refreshed, reconnected) == Fetch::No {
+            return;
+        }
+        let key = key.clone();
+        let fetch = fetch.clone();
+        leptos::task::spawn_local(async move {
+            match fetch().await {
+                Ok(value) => {
+                    cache.store(key, value.clone());
+                    kept.value.set(Some(value));
+                    kept.error.set(None);
+                }
+                // A failed refresh must never empty a list being read: the
+                // cached payload stays, the error is shown beside it.
+                Err(err) => kept.error.set(Some(err.to_string())),
+            }
+        });
+    });
+    kept
+}
+
+/// The library list, shared by the Library and Home pages — they fetch the
+/// same thing, so switching between them costs nothing.
+pub type LibraryCache = Keyed<(), Vec<yomu_domain::PublicationWithLocator>>;
+/// The category list, shared by the Library and manga pages.
+pub type CategoriesCache = Keyed<(), Vec<yomu_domain::Category>>;
+/// One open publication. The bool is the served-from-cache flag that tells
+/// rows which chapters will not open.
+pub type DetailCache = Keyed<uuid::Uuid, (yomu_domain::PublicationDetailResponse, bool)>;
+
+pub fn use_library_cache() -> LibraryCache {
+    use_context().expect("LibraryCache provided by App")
+}
+
+pub fn use_categories_cache() -> CategoriesCache {
+    use_context().expect("CategoriesCache provided by App")
+}
+
+pub fn use_detail_cache() -> DetailCache {
+    use_context().expect("DetailCache provided by App")
+}
+
+/// Everything a change to one publication can invalidate.
+///
+/// Takes the caches rather than reading them, because callers are inside
+/// spawned tasks: a `use_context` after an await has no reactive owner and
+/// returns None silently (auth playbook §7.1). `Keyed` is `Copy`, so the
+/// caller captures it during setup for free.
+pub fn mark_publication_stale(library: LibraryCache, detail: DetailCache) {
+    library.mark_stale();
+    detail.mark_stale();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

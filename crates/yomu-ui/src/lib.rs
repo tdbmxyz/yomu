@@ -180,6 +180,12 @@ pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(device_marks);
     let pull_queue: PullQueue = RwSignal::new(offline::load_pull_queue());
     provide_context(pull_queue);
+    // Page data that outlives the page component, so returning to a list
+    // is free (see cache.rs). Library and Home share one, since they read
+    // the same library() list.
+    provide_context(cache::LibraryCache::default());
+    provide_context(cache::CategoriesCache::default());
+    provide_context(cache::DetailCache::default());
     // Write-through: persist any change so the queue survives restarts.
     Effect::new(move |_| {
         pull_queue.with(|q| offline::save_pull_queue(q));
