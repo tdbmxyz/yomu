@@ -204,6 +204,12 @@ fn MangaDetail(
     categories: crate::cache::Kept<Vec<Category>>,
 ) -> impl IntoView {
     let client = use_client();
+    // Captured here, not inside the handlers' spawned tasks: a context
+    // read after an await silently returns None. The page's own `refresh`
+    // already refetches this detail, but nothing tells the library list —
+    // and it shows unread counts and categories that these actions change.
+    let library_cache = crate::cache::use_library_cache();
+    let detail_cache = crate::cache::use_detail_cache();
     let publication = detail.publication.clone();
     let id = publication.id;
     // LocalFile publications: their content *is* the server copy, so no
@@ -243,6 +249,7 @@ fn MangaDetail(
                             0 => "No new chapters".into(),
                             n => format!("{n} new chapter(s)"),
                         }));
+                        crate::cache::mark_publication_stale(library_cache, detail_cache);
                         refresh.update(|n| *n += 1);
                     }
                     Err(err) => status.set(Some(format!("Refresh failed: {err}"))),
@@ -262,7 +269,10 @@ fn MangaDetail(
                     category: None,
                 };
                 match client.update_publication(id, &req).await {
-                    Ok(_) => refresh.update(|n| *n += 1),
+                    Ok(_) => {
+                        crate::cache::mark_publication_stale(library_cache, detail_cache);
+                        refresh.update(|n| *n += 1);
+                    }
                     Err(err) => status.set(Some(format!("Update failed: {err}"))),
                 }
             });
@@ -281,7 +291,10 @@ fn MangaDetail(
                     category: Some(value),
                 };
                 match client.update_publication(id, &req).await {
-                    Ok(_) => refresh.update(|n| *n += 1),
+                    Ok(_) => {
+                        crate::cache::mark_publication_stale(library_cache, detail_cache);
+                        refresh.update(|n| *n += 1);
+                    }
                     Err(err) => status.set(Some(format!("Update failed: {err}"))),
                 }
             });
@@ -295,6 +308,11 @@ fn MangaDetail(
             spawn_local(async move {
                 match client.delete_publication(id).await {
                     Ok(()) => {
+                        // The row is gone, so this clears rather than
+                        // flags: showing it until a refetch lands would be
+                        // worse than a spinner.
+                        library_cache.clear();
+                        detail_cache.clear();
                         let _ = window().location().set_href("/");
                     }
                     Err(err) => status.set(Some(format!("Delete failed: {err}"))),
@@ -557,6 +575,10 @@ fn ChapterList(
             .collect::<std::collections::HashMap<Uuid, String>>(),
     );
     let publication_title = StoredValue::new(publication_title);
+    // Captured during setup; the handlers below read them after an await,
+    // where a context lookup silently returns None.
+    let library_cache = crate::cache::use_library_cache();
+    let detail_cache = crate::cache::use_detail_cache();
     let local_downloads = crate::use_local_downloads();
     let device_marks = crate::use_device_marks();
     let pull_queue = crate::use_pull_queue();
@@ -649,6 +671,9 @@ fn ChapterList(
                 offline::queue_marks(&mark_ids, read);
                 status.set(Some("Marked offline — will sync when back online".into()));
             }
+            // Unread counts on the library grid and the home shelves are
+            // exactly what this changed.
+            crate::cache::mark_publication_stale(library_cache, detail_cache);
             refresh.update(|n| *n += 1);
         });
     };

@@ -196,14 +196,18 @@ pub fn App(config: AppConfig) -> impl IntoView {
     // marks recorded while it wasn't. Covers startup (the boot gate flips
     // to Online) and every later recovery, badge retries included.
     let flush_client = YomuClient::new(config.api_base.clone());
+    let flush_library = cache::use_library_cache();
+    let flush_detail = cache::use_detail_cache();
     Effect::new(move |_| {
         if conn.get() != Connectivity::Online {
             return;
         }
         let client = flush_client.clone();
         spawn_local(async move {
-            offline::flush_outbox(&client).await;
-            offline::flush_marks(&client).await;
+            // The caches travel in: inside this task a context read has no
+            // reactive owner and would silently return None.
+            offline::flush_outbox(&client, flush_library, flush_detail).await;
+            offline::flush_marks(&client, flush_library, flush_detail).await;
         });
     });
     // The OS says a network came back: one free probe.

@@ -414,9 +414,15 @@ fn CategoryTabs(
                     update_enabled: !category.update_enabled,
                 };
                 let id = category.id.clone();
+                let categories_cache = crate::cache::use_categories_cache();
+                let library_cache = crate::cache::use_library_cache();
                 spawn_local(async move {
                     match client.update_category(&id, &req).await {
-                        Ok(_) => refresh.update(|n| *n += 1),
+                        Ok(_) => {
+                            categories_cache.mark_stale();
+                            library_cache.mark_stale();
+                            refresh.update(|n| *n += 1);
+                        }
                         Err(err) => leptos::logging::warn!("category update: {err}"),
                     }
                 });
