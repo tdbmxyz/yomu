@@ -4,6 +4,7 @@ mod catalog;
 mod config;
 mod db;
 mod downloader;
+mod media_token;
 mod notifier;
 mod oidc;
 mod state;
