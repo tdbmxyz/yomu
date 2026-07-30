@@ -15,6 +15,28 @@ pub struct HealthResponse {
     pub commit: Option<String>,
 }
 
+/// What an app posts to trade an identity-provider access token for a
+/// yomu session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeRequest {
+    pub access_token: String,
+}
+
+/// A yomu session, for a client that holds it as a bearer token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Short-lived credential for the two routes an `<img>` loads, which
+/// cannot carry an `Authorization` header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaTokenResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Uniform error body returned by the API for non-2xx responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiErrorBody {

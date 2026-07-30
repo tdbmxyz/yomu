@@ -32,6 +32,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", axum::routing::post(auth::logout))
+        .route("/auth/exchange", axum::routing::post(auth::exchange))
+        .route("/auth/media-token", get(auth::media_token))
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/sources/{id}/browse", get(sources::browse))
@@ -291,6 +293,9 @@ mod tests {
             ("POST", "/api/v1/progress/events".into()),
             ("GET", "/api/v1/backup".into()),
             ("POST", "/api/v1/restore".into()),
+            // Minting an image credential is itself privileged: it
+            // delegates a session, so it cannot be had without one.
+            ("GET", "/api/v1/auth/media-token".into()),
         ];
         for (method, path) in routes {
             assert_eq!(
@@ -332,6 +337,24 @@ mod tests {
                 "{method} {path} must answer without a session"
             );
         }
+    }
+
+    /// Without an app client there is no app sign-in to offer, and the
+    /// endpoint must be absent rather than look like a broken one.
+    #[tokio::test]
+    async fn exchange_is_absent_until_an_app_client_is_configured() {
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/exchange")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"access_token":"x"}"#))
+            .unwrap();
+        let status = super::router(state).oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

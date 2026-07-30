@@ -111,11 +111,24 @@ pub struct AuthConfig {
     /// not use `*`.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Client id of the *public* provider the native shells use, distinct
+    /// from the confidential `client_id` above that the browser flow
+    /// uses. Empty disables app sign-in: `/auth/exchange` answers 404 and
+    /// `/health` advertises nothing, so an app pointed here never shows a
+    /// sign-in button it cannot satisfy.
+    #[serde(default)]
+    pub app_client_id: String,
 }
 
 impl AuthConfig {
     pub fn oidc_enabled(&self) -> bool {
         self.issuer.is_some()
+    }
+
+    /// Whether a native app can sign in here: an issuer to authenticate
+    /// against, and a public client for the app to be.
+    pub fn app_sign_in_enabled(&self) -> bool {
+        self.oidc_enabled() && !self.app_client_id.is_empty()
     }
 }
 

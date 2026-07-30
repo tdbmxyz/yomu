@@ -9,13 +9,16 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use yomu_domain::{AuthMode, MeResponse};
+use yomu_domain::{
+    AuthMode, ExchangeRequest, MediaTokenResponse, MeResponse, SessionResponse,
+};
 
 use super::ApiError;
 use crate::auth::{
-    DEFAULT_SESSION_DAYS, OptionalUser, SESSION_COOKIE, new_token, request_token, token_hash,
+    CurrentUser, DEFAULT_SESSION_DAYS, OptionalUser, SESSION_COOKIE, new_token, request_token,
+    token_hash,
 };
-use crate::oidc::OidcRuntime;
+use crate::oidc::{IntrospectionError, OidcRuntime};
 use crate::state::AppState;
 
 pub async fn me(
@@ -89,6 +92,72 @@ pub async fn callback(
         Redirect::temporary("/"),
     )
         .into_response())
+}
+
+/// Trade an identity-provider access token for a yomu session.
+///
+/// The app holds the result as a bearer for the session's whole life, so
+/// there is no refresh dance on the client: when it expires, the app
+/// signs in again. Nothing downstream knows the session came from here
+/// rather than from the browser flow.
+pub async fn exchange(
+    State(state): State<AppState>,
+    Json(req): Json<ExchangeRequest>,
+) -> Result<Json<SessionResponse>, ApiError> {
+    if !state.config.auth.app_sign_in_enabled() {
+        return Err(ApiError::NotFound);
+    }
+    let oidc = require_oidc(&state)?;
+    // Unreachable or refusing us: not the caller's fault, and needs
+    // different words on screen than "sign in again".
+    let introspection = oidc
+        .introspect(&req.access_token)
+        .await
+        .map_err(ApiError::UpstreamFailed)?;
+
+    let claims = introspection
+        .identity(&state.config.auth.app_client_id)
+        .map_err(|err| match err {
+            IntrospectionError::Inactive => ApiError::Unauthorized,
+            IntrospectionError::WrongClient => {
+                ApiError::Forbidden("this token was not issued for yomu".into())
+            }
+        })?;
+
+    let username = claims.preferred_username.as_deref().unwrap_or(&claims.sub);
+    let display_name = claims.name.as_deref().unwrap_or(username);
+    let user = state
+        .db
+        .upsert_oidc_user(&claims.sub, username, display_name)
+        .await?;
+
+    let days = match state.config.auth.session_days {
+        0 => DEFAULT_SESSION_DAYS,
+        days => days,
+    } as i64;
+    let expires_at = Utc::now() + Duration::days(days);
+    let token = new_token();
+    state
+        .db
+        .create_session(&token_hash(&token), user.id, expires_at)
+        .await?;
+    tracing::info!(username = user.username, "app sign-in");
+    Ok(Json(SessionResponse { token, expires_at }))
+}
+
+/// A short-lived credential for the two routes an `<img>` loads.
+///
+/// Itself authenticated: the token delegates a session the caller
+/// already holds, for requests that cannot carry one.
+pub async fn media_token(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> Json<MediaTokenResponse> {
+    const TTL_SECS: u64 = 60 * 60;
+    Json(MediaTokenResponse {
+        token: state.media_key.mint(user.id, TTL_SECS),
+        expires_at: Utc::now() + Duration::seconds(TTL_SECS as i64),
+    })
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
