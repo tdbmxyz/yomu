@@ -6,9 +6,10 @@
 //! `[auth]` is configured — the built-in shared account: every request
 //! resolves to [`SHARED_USER`], no login involved.
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, State};
 use axum::http::header;
 use axum::http::request::Parts;
+use axum::response::IntoResponse;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use yomu_domain::User;
@@ -98,6 +99,58 @@ async fn resolve(parts: &Parts, state: &AppState) -> Option<User> {
     state.db.user_by_session(&token_hash(&token)).await.ok()
 }
 
+/// Default-deny for everything under `/api/v1`.
+///
+/// Resolves the session once and puts the `User` in request extensions,
+/// so `CurrentUser` becomes a read rather than a second database hit.
+/// Anything not named in [`is_public`] needs that user; the two image
+/// routes may present a media token instead, because an `<img>` cannot
+/// send a header.
+///
+/// This is a layer rather than an extractor on every handler because
+/// axum offers no way to enumerate a router's routes: with per-handler
+/// extractors, the next route added is open again and no test can catch
+/// it. Here a route is reachable only because someone exempted it.
+///
+/// In single-account mode `resolve` returns the shared user for
+/// everyone, so a deployment without `[auth]` is unaffected.
+pub async fn require_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let (parts, body) = request.into_parts();
+    let user = resolve(&parts, &state).await;
+    let mut request = axum::extract::Request::from_parts(parts, body);
+
+    if let Some(user) = user {
+        request.extensions_mut().insert(user);
+        return next.run(request).await;
+    }
+
+    let path = request.uri().path().to_string();
+    if is_public(&path) {
+        return next.run(request).await;
+    }
+    if takes_media_token(&path)
+        && let Some(token) = media_token_param(request.uri().query())
+        && let Some(id) = state.media_key.verify(&token, 0)
+        && let Ok(user) = state.db.user_by_id(id).await
+    {
+        request.extensions_mut().insert(user);
+        return next.run(request).await;
+    }
+    ApiError::Unauthorized.into_response()
+}
+
+fn media_token_param(query: Option<&str>) -> Option<String> {
+    query?
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == "mt")
+        .map(|(_, value)| value.to_string())
+}
+
 /// Extractor for handlers that need a user (progress reads/writes). In
 /// single-account mode this is always the shared user; in OIDC mode it
 /// requires a valid session.
@@ -107,6 +160,12 @@ impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        // `require_auth` already resolved this request. The fallback
+        // keeps the extractor correct on its own, for a router built
+        // without the layer.
+        if let Some(user) = parts.extensions.get::<User>() {
+            return Ok(CurrentUser(user.clone()));
+        }
         resolve(parts, state)
             .await
             .map(CurrentUser)
@@ -125,6 +184,9 @@ impl FromRequestParts<AppState> for OptionalUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(user) = parts.extensions.get::<User>() {
+            return Ok(OptionalUser(Some(user.clone())));
+        }
         Ok(OptionalUser(resolve(parts, state).await))
     }
 }

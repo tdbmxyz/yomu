@@ -91,6 +91,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(downloads::dismiss),
         )
         .with_state(state.clone())
+        // Default-deny: everything above needs a session unless
+        // `auth::is_public` names it. A layer rather than an extractor on
+        // every handler, so a route added later is protected by default
+        // (see auth::require_auth).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_auth,
+        ))
         // Anything under /api/v1 this build does not serve is an error, not a
         // page. Without this it reaches the SPA fallback below and comes back
         // as 200 index.html, so a client calling a route older than itself
@@ -239,6 +247,91 @@ mod tests {
             .body(Body::from("{}"))
             .unwrap();
         router.oneshot(req).await.unwrap().status()
+    }
+
+    /// Every route the router serves, called with no credentials against a
+    /// server that has `[auth]` configured.
+    ///
+    /// The reads are the point. Before the gate became a layer, `[auth]`
+    /// protected every mutation and no read: the library, the chapter
+    /// lists and the page images answered anyone who asked, which is the
+    /// content itself.
+    #[tokio::test]
+    async fn no_route_answers_without_a_session() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
+        let routes: Vec<(&str, String)> = vec![
+            ("GET", "/api/v1/library".into()),
+            ("POST", "/api/v1/library".into()),
+            ("POST", "/api/v1/library/rescan".into()),
+            ("GET", "/api/v1/categories".into()),
+            ("PUT", "/api/v1/categories/reading".into()),
+            ("GET", format!("/api/v1/manga/{ID}")),
+            ("PUT", format!("/api/v1/manga/{ID}")),
+            ("DELETE", format!("/api/v1/manga/{ID}")),
+            ("POST", format!("/api/v1/manga/{ID}/refresh")),
+            ("GET", format!("/api/v1/manga/{ID}/cover")),
+            ("GET", format!("/api/v1/manga/{ID}/fingerprints")),
+            ("PUT", format!("/api/v1/manga/{ID}/position")),
+            ("GET", format!("/api/v1/chapters/{ID}/pages")),
+            ("GET", format!("/api/v1/chapters/{ID}/pages/0")),
+            ("POST", format!("/api/v1/chapters/{ID}/download")),
+            ("POST", "/api/v1/chapters/download".into()),
+            ("POST", "/api/v1/chapters/remove-downloads".into()),
+            ("POST", "/api/v1/chapters/mark".into()),
+            ("GET", "/api/v1/sources".into()),
+            ("GET", "/api/v1/sources/x/search".into()),
+            ("GET", "/api/v1/sources/x/browse".into()),
+            ("GET", "/api/v1/search".into()),
+            ("GET", "/api/v1/covers".into()),
+            ("GET", "/api/v1/updates".into()),
+            ("GET", "/api/v1/downloads".into()),
+            ("POST", "/api/v1/downloads/retry".into()),
+            ("POST", "/api/v1/downloads/dismiss".into()),
+            ("GET", "/api/v1/progress/events".into()),
+            ("POST", "/api/v1/progress/events".into()),
+            ("GET", "/api/v1/backup".into()),
+            ("POST", "/api/v1/restore".into()),
+        ];
+        for (method, path) in routes {
+            assert_eq!(
+                status_of(method, &path).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} answered without a session"
+            );
+        }
+    }
+
+    /// An image route with a media token is not public — a bad token is
+    /// still 401. This is what keeps the query-string credential from
+    /// being a hole rather than a delegation.
+    #[tokio::test]
+    async fn an_invalid_media_token_does_not_open_an_image_route() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
+        for query in ["mt=", "mt=nonsense", "mt=a.b.c"] {
+            assert_eq!(
+                status_of("GET", &format!("/api/v1/manga/{ID}/cover?{query}")).await,
+                StatusCode::UNAUTHORIZED,
+                "cover opened with {query}"
+            );
+        }
+    }
+
+    /// The sign-in surface: an app holding no session must be able to ask
+    /// where it is and how to sign in, or "not signed in" is
+    /// indistinguishable from "server down".
+    #[tokio::test]
+    async fn the_sign_in_surface_stays_reachable() {
+        for (method, path) in [
+            ("GET", "/api/v1/health"),
+            ("GET", "/api/v1/auth/me"),
+            ("POST", "/api/v1/auth/logout"),
+        ] {
+            assert_ne!(
+                status_of(method, path).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} must answer without a session"
+            );
+        }
     }
 
     #[tokio::test]

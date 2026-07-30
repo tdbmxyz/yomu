@@ -91,6 +91,9 @@ pub struct AppState {
     pub oidc: Option<Arc<OidcRuntime>>,
     /// Browse pages currently revalidating in the background.
     pub catalog_inflight: Arc<crate::catalog::Inflight>,
+    /// Signing key for the image-route tokens, generated per process
+    /// (see media_token.rs).
+    pub media_key: Arc<crate::media_token::Key>,
     /// Serves the watched books dir (local-file publications).
     pub streamer: Arc<crate::streamer::Streamer>,
 }
@@ -116,6 +119,7 @@ impl AppState {
             download_progress: Arc::new(RwLock::new(None)),
             oidc: oidc.map(Arc::new),
             catalog_inflight: Arc::new(crate::catalog::Inflight::default()),
+            media_key: Arc::new(crate::media_token::Key::generate()),
             streamer,
         }
     }
