@@ -118,6 +118,17 @@ pub struct AuthConfig {
     /// sign-in button it cannot satisfy.
     #[serde(default)]
     pub app_client_id: String,
+    /// The secret a trusted reverse proxy stamps, supplied **through the
+    /// environment** as `YOMU_AUTH__PROXY_SECRET` — typically the same
+    /// `EnvironmentFile` traefik reads, so one secret serves both sides
+    /// and they cannot drift apart.
+    ///
+    /// Never write it into the config file: `nix/module.nix` renders
+    /// these settings into the world-readable nix store. Use this or
+    /// [`Self::proxy_secret_file`], whichever suits the deployment;
+    /// this one wins if both are set.
+    #[serde(default)]
+    pub proxy_secret: String,
     /// File holding the secret a trusted reverse proxy stamps on every
     /// request it forwards. When it names a readable, non-empty file,
     /// yomu accepts the identity the proxy's forward-auth resolved

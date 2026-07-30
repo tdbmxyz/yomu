@@ -113,8 +113,10 @@ pub struct ActiveDownload {
 
 impl AppState {
     pub fn new(config: Config, db: Db, sources: Registry, oidc: Option<OidcRuntime>) -> Self {
-        let proxy_secret =
-            crate::proxy_identity::load_secret(config.auth.proxy_secret_file.as_deref());
+        let proxy_secret = crate::proxy_identity::load_secret(
+            &config.auth.proxy_secret,
+            config.auth.proxy_secret_file.as_deref(),
+        );
         let streamer = Arc::new(crate::streamer::Streamer::new(config.books.dir.clone()));
         Self {
             config: Arc::new(config),

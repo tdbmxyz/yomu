@@ -35,9 +35,15 @@ pub struct ProxyUser {
     pub display_name: String,
 }
 
-/// Read the shared secret. `None` — unset, unreadable, or empty — turns
-/// the header path off, which is the safe direction.
-pub fn load_secret(path: Option<&Path>) -> Option<String> {
+/// The shared secret, from the environment-supplied value or the file.
+///
+/// `None` — neither set, unreadable, or empty — turns the header path
+/// off, which is the safe direction.
+pub fn load_secret(inline: &str, path: Option<&Path>) -> Option<String> {
+    let inline = inline.trim();
+    if !inline.is_empty() {
+        return Some(inline.to_string());
+    }
     let contents = std::fs::read_to_string(path?).ok()?;
     let secret = contents.trim().to_string();
     if secret.is_empty() {
@@ -185,14 +191,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let empty = dir.join("empty");
         std::fs::write(&empty, "   \n").unwrap();
-        assert_eq!(load_secret(Some(&empty)), None);
+        assert_eq!(load_secret("", Some(&empty)), None);
 
         let real = dir.join("secret");
         std::fs::write(&real, "s3cret\n").unwrap();
-        assert_eq!(load_secret(Some(&real)).as_deref(), Some("s3cret"));
+        assert_eq!(load_secret("", Some(&real)).as_deref(), Some("s3cret"));
 
-        assert_eq!(load_secret(None), None);
-        assert_eq!(load_secret(Some(&dir.join("missing"))), None);
+        assert_eq!(load_secret("", None), None);
+        assert_eq!(load_secret("  ", None), None);
+        // The environment-supplied value wins, so one age file can feed
+        // both traefik and yomu without them drifting apart.
+        assert_eq!(
+            load_secret("from-env", Some(&real)).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(load_secret("", Some(&dir.join("missing"))), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
