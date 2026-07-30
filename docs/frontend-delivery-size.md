@@ -14,6 +14,9 @@ went wrong on one repo or the other rather than things we anticipated.
 Ordered by payoff per unit of effort. The first three are the whole story;
 the rest is polish.
 
+Companion: `app-auth-playbook.md` — signing the Tauri/Android app into an
+SSO'd server, from the same pair of repos.
+
 ---
 
 ## 0. Measure the wire, not the repo

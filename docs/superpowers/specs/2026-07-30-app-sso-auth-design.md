@@ -49,15 +49,24 @@ app out until this work lands, which is the trade being made.
 
 ## 1. Identity on every route
 
-`resolve()` already centralises the decision. What changes is which
-handlers demand a user, and a test that keeps it that way.
+**Default-deny at the layer, not per handler.** Adding `CurrentUser` to
+28 handlers would work today and rot tomorrow: the next route added is
+open again, and no test can catch it, because axum exposes no way to
+enumerate a `Router`'s routes. So the gate moves one level up.
 
-- Every handler currently taking no user extractor or `OptionalUser`
-  takes `CurrentUser`, except the four in the allowlist below.
-- `OptionalUser` disappears from `library::list`, `library::detail`,
-  `downloads::list` and `updates::list`. They used it to *enrich* a
-  response with positions while staying usable signed-out; signed-out is
-  no longer a state the API serves.
+A middleware wraps the whole `/api/v1` router:
+
+- it resolves the session once and puts the `User` in request
+  extensions, so `CurrentUser` becomes a cheap read rather than a second
+  database hit;
+- with no user it returns 401 — **unless** the path is allowlisted;
+- for the two image routes it also accepts a media token (§3).
+
+A new route is therefore protected by the fact that someone had to
+*exempt* it, which is the property worth having. `OptionalUser`
+disappears from `library::list`, `library::detail`, `downloads::list` and
+`updates::list`: they used it to enrich a response while staying usable
+signed-out, and signed-out is no longer a state the API serves.
 
 Allowlist — reachable with no session, and the test names them
 explicitly:
@@ -69,11 +78,12 @@ explicitly:
 | `GET /auth/login`, `GET /auth/callback` | the browser sign-in flow itself |
 | `POST /auth/exchange` | the app's sign-in (new, §2) |
 
-**The coverage test** walks every route in the router, calls it with no
-credentials against a server with `[auth]` configured, and asserts 401
-unless the route is allowlisted. Adding a route without auth then fails
-CI. The list of routes is derived from the router rather than
-hand-maintained, so a new route cannot be forgotten.
+**The coverage test** drives a representative request for every route the
+router serves against a server with `[auth]` configured and no
+credentials, asserting 401 outside the allowlist. Because the gate is a
+layer, this list existing is a convenience rather than the guarantee —
+the guarantee is that a route must be named in `is_public()` to be
+reachable, and `is_public()` is a single `match` with its own tests.
 
 In single-account mode (`[auth]` absent) nothing changes: `resolve()`
 returns `SHARED_USER` and every request succeeds as before. This section
