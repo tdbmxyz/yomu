@@ -199,11 +199,32 @@ async fn api_not_found() -> ApiError {
     ApiError::NotFound
 }
 
-async fn health() -> Json<HealthResponse> {
+/// Deliberately unauthenticated, and deliberately the place the sign-in
+/// advertisement lives: behind a forward-auth proxy an unauthenticated
+/// call is a redirect to an origin that sends no CORS header, which a
+/// webview reports as a plain network error. Without one endpoint that
+/// always answers, an app cannot tell "not signed in" from "unreachable".
+async fn health(axum::extract::State(state): axum::extract::State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         commit: option_env!("YOMU_BUILD_COMMIT").map(Into::into),
+        // Only when there is an app sign-in to advertise: an app pointed
+        // at a server without SSO must not show a button it can never
+        // satisfy.
+        auth: state
+            .config
+            .auth
+            .app_sign_in_enabled()
+            .then(|| yomu_domain::AuthAdvertisement {
+                issuer: state
+                    .config
+                    .auth
+                    .issuer
+                    .clone()
+                    .expect("app_sign_in_enabled implies an issuer"),
+                client_id: state.config.auth.app_client_id.clone(),
+            }),
     })
 }
 
@@ -337,6 +358,47 @@ mod tests {
                 "{method} {path} must answer without a session"
             );
         }
+    }
+
+    /// A server with no app sign-in advertises none, so an app pointed at
+    /// it never shows a sign-in button. And the 1.x fields stay exactly
+    /// where they were: an old client parses this response as before.
+    #[tokio::test]
+    async fn health_advertises_sign_in_only_when_there_is_one() {
+        async fn body(config: Config) -> serde_json::Value {
+            let db = Db::in_memory().await.unwrap();
+            let state = AppState::new(config, db, Registry::default(), None);
+            let req = Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap();
+            let resp = super::router(state).oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let single = body(Config::default()).await;
+        assert!(single.get("auth").is_none());
+        assert_eq!(single["status"], "ok");
+        assert!(single["version"].is_string());
+
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        config.auth.client_id = "yomu".into();
+        config.auth.client_secret = "secret".into();
+        config.auth.app_client_id = "yomu-app".into();
+        let advertised = body(config).await;
+        assert_eq!(advertised["auth"]["client_id"], "yomu-app");
+        assert_eq!(advertised["auth"]["issuer"], "https://auth.example.test/");
+        assert_eq!(advertised["status"], "ok");
+
+        // An issuer without an app client is the browser-only
+        // deployment: nothing for an app to do.
+        let mut browser_only = Config::default();
+        browser_only.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        assert!(body(browser_only).await.get("auth").is_none());
     }
 
     /// Without an app client there is no app sign-in to offer, and the

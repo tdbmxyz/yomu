@@ -13,6 +13,21 @@ pub struct HealthResponse {
     /// Short commit hash the server was built from, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// How a native app signs in here. Absent when the server has no app
+    /// sign-in to offer, which is how an app knows to skip it entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthAdvertisement>,
+}
+
+/// Everything a native app needs to start a sign-in, so that nothing
+/// about the identity provider is compiled into the app: it
+/// self-configures from a server address alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthAdvertisement {
+    pub issuer: url::Url,
+    /// The *public* client the native apps use, not the confidential one
+    /// behind the browser flow.
+    pub client_id: String,
 }
 
 /// What an app posts to trade an identity-provider access token for a
