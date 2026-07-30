@@ -32,6 +32,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", axum::routing::post(auth::logout))
+        .route("/auth/exchange", axum::routing::post(auth::exchange))
+        .route("/auth/media-token", get(auth::media_token))
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/sources/{id}/browse", get(sources::browse))
@@ -91,6 +93,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(downloads::dismiss),
         )
         .with_state(state.clone())
+        // Default-deny: everything above needs a session unless
+        // `auth::is_public` names it. A layer rather than an extractor on
+        // every handler, so a route added later is protected by default
+        // (see auth::require_auth).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_auth,
+        ))
         // Anything under /api/v1 this build does not serve is an error, not a
         // page. Without this it reaches the SPA fallback below and comes back
         // as 200 index.html, so a client calling a route older than itself
@@ -189,11 +199,34 @@ async fn api_not_found() -> ApiError {
     ApiError::NotFound
 }
 
-async fn health() -> Json<HealthResponse> {
+/// Deliberately unauthenticated, and deliberately the place the sign-in
+/// advertisement lives: behind a forward-auth proxy an unauthenticated
+/// call is a redirect to an origin that sends no CORS header, which a
+/// webview reports as a plain network error. Without one endpoint that
+/// always answers, an app cannot tell "not signed in" from "unreachable".
+async fn health(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         commit: option_env!("YOMU_BUILD_COMMIT").map(Into::into),
+        // Only when there is an app sign-in to advertise: an app pointed
+        // at a server without SSO must not show a button it can never
+        // satisfy.
+        auth: state
+            .config
+            .auth
+            .app_sign_in_enabled()
+            .then(|| yomu_domain::AuthAdvertisement {
+                issuer: state
+                    .config
+                    .auth
+                    .issuer
+                    .clone()
+                    .expect("app_sign_in_enabled implies an issuer"),
+                client_id: state.config.auth.app_client_id.clone(),
+            }),
     })
 }
 
@@ -239,6 +272,217 @@ mod tests {
             .body(Body::from("{}"))
             .unwrap();
         router.oneshot(req).await.unwrap().status()
+    }
+
+    /// Every route the router serves, called with no credentials against a
+    /// server that has `[auth]` configured.
+    ///
+    /// The reads are the point. Before the gate became a layer, `[auth]`
+    /// protected every mutation and no read: the library, the chapter
+    /// lists and the page images answered anyone who asked, which is the
+    /// content itself.
+    #[tokio::test]
+    async fn no_route_answers_without_a_session() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
+        let routes: Vec<(&str, String)> = vec![
+            ("GET", "/api/v1/library".into()),
+            ("POST", "/api/v1/library".into()),
+            ("POST", "/api/v1/library/rescan".into()),
+            ("GET", "/api/v1/categories".into()),
+            ("PUT", "/api/v1/categories/reading".into()),
+            ("GET", format!("/api/v1/manga/{ID}")),
+            ("PUT", format!("/api/v1/manga/{ID}")),
+            ("DELETE", format!("/api/v1/manga/{ID}")),
+            ("POST", format!("/api/v1/manga/{ID}/refresh")),
+            ("GET", format!("/api/v1/manga/{ID}/cover")),
+            ("GET", format!("/api/v1/manga/{ID}/fingerprints")),
+            ("PUT", format!("/api/v1/manga/{ID}/position")),
+            ("GET", format!("/api/v1/chapters/{ID}/pages")),
+            ("GET", format!("/api/v1/chapters/{ID}/pages/0")),
+            ("POST", format!("/api/v1/chapters/{ID}/download")),
+            ("POST", "/api/v1/chapters/download".into()),
+            ("POST", "/api/v1/chapters/remove-downloads".into()),
+            ("POST", "/api/v1/chapters/mark".into()),
+            ("GET", "/api/v1/sources".into()),
+            ("GET", "/api/v1/sources/x/search".into()),
+            ("GET", "/api/v1/sources/x/browse".into()),
+            ("GET", "/api/v1/search".into()),
+            ("GET", "/api/v1/covers".into()),
+            ("GET", "/api/v1/updates".into()),
+            ("GET", "/api/v1/downloads".into()),
+            ("POST", "/api/v1/downloads/retry".into()),
+            ("POST", "/api/v1/downloads/dismiss".into()),
+            ("GET", "/api/v1/progress/events".into()),
+            ("POST", "/api/v1/progress/events".into()),
+            ("GET", "/api/v1/backup".into()),
+            ("POST", "/api/v1/restore".into()),
+            // Minting an image credential is itself privileged: it
+            // delegates a session, so it cannot be had without one.
+            ("GET", "/api/v1/auth/media-token".into()),
+        ];
+        for (method, path) in routes {
+            assert_eq!(
+                status_of(method, &path).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} answered without a session"
+            );
+        }
+    }
+
+    /// An image route with a media token is not public — a bad token is
+    /// still 401. This is what keeps the query-string credential from
+    /// being a hole rather than a delegation.
+    #[tokio::test]
+    async fn an_invalid_media_token_does_not_open_an_image_route() {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
+        for query in ["mt=", "mt=nonsense", "mt=a.b.c"] {
+            assert_eq!(
+                status_of("GET", &format!("/api/v1/manga/{ID}/cover?{query}")).await,
+                StatusCode::UNAUTHORIZED,
+                "cover opened with {query}"
+            );
+        }
+    }
+
+    /// The sign-in surface: an app holding no session must be able to ask
+    /// where it is and how to sign in, or "not signed in" is
+    /// indistinguishable from "server down".
+    #[tokio::test]
+    async fn the_sign_in_surface_stays_reachable() {
+        for (method, path) in [
+            ("GET", "/api/v1/health"),
+            ("GET", "/api/v1/auth/me"),
+            ("POST", "/api/v1/auth/logout"),
+        ] {
+            assert_ne!(
+                status_of(method, path).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} must answer without a session"
+            );
+        }
+    }
+
+    /// The identity headers a forward-auth proxy stamps are believed only
+    /// alongside the shared secret. Without it — which is every request
+    /// arriving on the direct LAN route, where nothing overwrites what a
+    /// client sent — they are just headers, and prove nothing.
+    #[tokio::test]
+    async fn forged_proxy_headers_do_not_sign_anyone_in() {
+        let dir = std::env::temp_dir().join(format!("yomu-proxyapi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret_file = dir.join("secret");
+        std::fs::write(&secret_file, "s3cret\n").unwrap();
+
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        config.auth.client_id = "yomu".into();
+        config.auth.proxy_secret_file = Some(secret_file);
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let call = |headers: Vec<(&'static str, &'static str)>| {
+            let router = super::router(state.clone());
+            async move {
+                let mut req = Request::builder().method("GET").uri("/api/v1/library");
+                for (name, value) in headers {
+                    req = req.header(name, value);
+                }
+                router
+                    .oneshot(req.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        // Identity without the secret: ignored.
+        assert_eq!(
+            call(vec![
+                ("x-authentik-uid", "uid-1"),
+                ("x-authentik-username", "tibo"),
+            ])
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Wrong secret: ignored.
+        assert_eq!(
+            call(vec![
+                ("x-yomu-proxy-secret", "wrong"),
+                ("x-authentik-username", "tibo"),
+            ])
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Correctly stamped: signed in, and the library answers.
+        assert_eq!(
+            call(vec![
+                ("x-yomu-proxy-secret", "s3cret"),
+                ("x-authentik-uid", "uid-1"),
+                ("x-authentik-username", "tibo"),
+            ])
+            .await,
+            StatusCode::OK
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server with no app sign-in advertises none, so an app pointed at
+    /// it never shows a sign-in button. And the 1.x fields stay exactly
+    /// where they were: an old client parses this response as before.
+    #[tokio::test]
+    async fn health_advertises_sign_in_only_when_there_is_one() {
+        async fn body(config: Config) -> serde_json::Value {
+            let db = Db::in_memory().await.unwrap();
+            let state = AppState::new(config, db, Registry::default(), None);
+            let req = Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap();
+            let resp = super::router(state).oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let single = body(Config::default()).await;
+        assert!(single.get("auth").is_none());
+        assert_eq!(single["status"], "ok");
+        assert!(single["version"].is_string());
+
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        config.auth.client_id = "yomu".into();
+        config.auth.client_secret = "secret".into();
+        config.auth.app_client_id = "yomu-app".into();
+        let advertised = body(config).await;
+        assert_eq!(advertised["auth"]["client_id"], "yomu-app");
+        assert_eq!(advertised["auth"]["issuer"], "https://auth.example.test/");
+        assert_eq!(advertised["status"], "ok");
+
+        // An issuer without an app client is the browser-only
+        // deployment: nothing for an app to do.
+        let mut browser_only = Config::default();
+        browser_only.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        assert!(body(browser_only).await.get("auth").is_none());
+    }
+
+    /// Without an app client there is no app sign-in to offer, and the
+    /// endpoint must be absent rather than look like a broken one.
+    #[tokio::test]
+    async fn exchange_is_absent_until_an_app_client_is_configured() {
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/exchange")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"code":"c","verifier":"v"}"#))
+            .unwrap();
+        let status = super::router(state).oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -7077,6 +7077,7 @@ dependencies = [
  "figment",
  "futures",
  "hex",
+ "hmac",
  "percent-encoding",
  "regex",
  "reqwest 0.12.28",

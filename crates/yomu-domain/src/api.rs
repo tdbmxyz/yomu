@@ -13,6 +13,47 @@ pub struct HealthResponse {
     /// Short commit hash the server was built from, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// How a native app signs in here. Absent when the server has no app
+    /// sign-in to offer, which is how an app knows to skip it entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthAdvertisement>,
+}
+
+/// Everything a native app needs to start a sign-in, so that nothing
+/// about the identity provider is compiled into the app: it
+/// self-configures from a server address alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthAdvertisement {
+    pub issuer: url::Url,
+    /// The *public* client the native apps use, not the confidential one
+    /// behind the browser flow.
+    pub client_id: String,
+}
+
+/// What an app posts to turn a finished browser sign-in into a yomu
+/// session. The code, not a token: yomu redeems it itself, so the code
+/// can only have been issued to yomu's own app client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeRequest {
+    /// The authorization code the provider handed the app.
+    pub code: String,
+    /// The PKCE verifier the app generated for this sign-in.
+    pub verifier: String,
+}
+
+/// A yomu session, for a client that holds it as a bearer token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Short-lived credential for the two routes an `<img>` loads, which
+/// cannot carry an `Authorization` header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaTokenResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// Uniform error body returned by the API for non-2xx responses.

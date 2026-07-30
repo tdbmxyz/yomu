@@ -111,11 +111,47 @@ pub struct AuthConfig {
     /// not use `*`.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Client id the native shells use. Usually the same public client as
+    /// `client_id`, with the app's custom scheme as a second redirect URI.
+    /// Empty disables app sign-in: `/auth/exchange` answers 404 and
+    /// `/health` advertises nothing, so an app pointed here never shows a
+    /// sign-in button it cannot satisfy.
+    #[serde(default)]
+    pub app_client_id: String,
+    /// The secret a trusted reverse proxy stamps, supplied **through the
+    /// environment** as `YOMU_AUTH__PROXY_SECRET` — typically the same
+    /// `EnvironmentFile` traefik reads, so one secret serves both sides
+    /// and they cannot drift apart.
+    ///
+    /// Never write it into the config file: `nix/module.nix` renders
+    /// these settings into the world-readable nix store. Use this or
+    /// [`Self::proxy_secret_file`], whichever suits the deployment;
+    /// this one wins if both are set.
+    #[serde(default)]
+    pub proxy_secret: String,
+    /// File holding the secret a trusted reverse proxy stamps on every
+    /// request it forwards. When it names a readable, non-empty file,
+    /// yomu accepts the identity the proxy's forward-auth resolved
+    /// (`X-authentik-*`) on requests carrying that secret — so a browser
+    /// already signed in at the proxy is not asked to sign in twice.
+    ///
+    /// A *path*, not the secret: `nix/module.nix` renders these settings
+    /// into the world-readable nix store, so the value must live outside
+    /// it (agenix, systemd credentials). Unset, unreadable or empty
+    /// disables the header path entirely rather than failing open.
+    #[serde(default)]
+    pub proxy_secret_file: Option<std::path::PathBuf>,
 }
 
 impl AuthConfig {
     pub fn oidc_enabled(&self) -> bool {
         self.issuer.is_some()
+    }
+
+    /// Whether a native app can sign in here: an issuer to authenticate
+    /// against, and a public client for the app to be.
+    pub fn app_sign_in_enabled(&self) -> bool {
+        self.oidc_enabled() && !self.app_client_id.is_empty()
     }
 }
 
