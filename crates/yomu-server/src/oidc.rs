@@ -40,6 +40,10 @@ pub struct Discovery {
     authorization_endpoint: Url,
     token_endpoint: Url,
     userinfo_endpoint: Url,
+    /// RFC 7662. authentik publishes it; a provider that does not cannot
+    /// offer app sign-in, and `introspect` says so rather than guessing.
+    #[serde(default)]
+    introspection_endpoint: Option<Url>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +52,7 @@ struct TokenResponse {
 }
 
 /// Claims yomu cares about, via the userinfo endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct UserInfo {
     pub sub: String,
     #[serde(default)]
@@ -57,7 +61,83 @@ pub struct UserInfo {
     pub name: Option<String>,
 }
 
+/// RFC 7662 response, plus the profile claims authentik includes.
+#[derive(Debug, Deserialize)]
+pub struct Introspection {
+    pub active: bool,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub sub: Option<String>,
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Why a presented token is not one yomu will act on. Kept apart because
+/// they need different words on screen: one means sign in again, the
+/// other means this token was never for us.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IntrospectionError {
+    /// Expired, revoked, or not a token at all.
+    Inactive,
+    /// Valid — for a different application on the same provider.
+    WrongClient,
+}
+
+impl Introspection {
+    /// The identity this token speaks for, if it is ours to accept.
+    ///
+    /// The client check is the reason introspection is used at all: a
+    /// userinfo call answers "who is this" but not "who was this issued
+    /// to", so without it any access token from any application on the
+    /// same provider could be traded for a yomu session.
+    pub fn identity(&self, app_client_id: &str) -> Result<UserInfo, IntrospectionError> {
+        if !self.active {
+            return Err(IntrospectionError::Inactive);
+        }
+        if self.client_id.as_deref() != Some(app_client_id) {
+            return Err(IntrospectionError::WrongClient);
+        }
+        let sub = self.sub.clone().ok_or(IntrospectionError::Inactive)?;
+        Ok(UserInfo {
+            sub,
+            preferred_username: self.preferred_username.clone(),
+            name: self.name.clone(),
+        })
+    }
+}
+
 impl OidcRuntime {
+    /// Ask the provider about an access token an app presented.
+    ///
+    /// Authenticated with yomu's own confidential credentials, so no new
+    /// secret is introduced and the provider only answers a client it
+    /// already knows.
+    pub async fn introspect(&self, access_token: &str) -> Result<Introspection, String> {
+        let discovery = self.discovery().await?;
+        let endpoint = discovery
+            .introspection_endpoint
+            .clone()
+            .ok_or("this provider publishes no introspection endpoint")?;
+        self.http
+            .post(endpoint)
+            .form(&[
+                ("token", access_token),
+                ("client_id", &self.client_id),
+                ("client_secret", &self.client_secret),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("introspection: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("introspection: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("introspection response: {e}"))
+    }
+
     /// `None` when `[auth]` has no issuer — single-account mode.
     pub fn from_config(config: &AuthConfig) -> anyhow::Result<Option<Self>> {
         let Some(issuer) = &config.issuer else {
@@ -184,5 +264,51 @@ impl OidcRuntime {
             .json()
             .await
             .map_err(|e| format!("userinfo response: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The audience check is the reason this endpoint is introspection
+    /// and not userinfo. Without it, an access token minted for any other
+    /// application on the same provider could be traded for a yomu
+    /// session.
+    #[test]
+    fn only_an_active_token_for_our_client_is_accepted() {
+        let ours = "yomu-app";
+        let active = |client: &str| Introspection {
+            active: true,
+            client_id: Some(client.into()),
+            sub: Some("user-1".into()),
+            preferred_username: Some("tibo".into()),
+            name: None,
+        };
+
+        assert_eq!(active(ours).identity(ours).unwrap().sub, "user-1");
+        assert_eq!(
+            active("some-other-app").identity(ours),
+            Err(IntrospectionError::WrongClient)
+        );
+
+        let mut inactive = active(ours);
+        inactive.active = false;
+        assert_eq!(inactive.identity(ours), Err(IntrospectionError::Inactive));
+
+        // A token nobody is attached to is not an identity, whatever the
+        // provider says about it being active.
+        let mut anonymous = active(ours);
+        anonymous.sub = None;
+        assert_eq!(anonymous.identity(ours), Err(IntrospectionError::Inactive));
+
+        // A provider that omits client_id entirely must not pass the
+        // check by default.
+        let mut unattributed = active(ours);
+        unattributed.client_id = None;
+        assert_eq!(
+            unattributed.identity(ours),
+            Err(IntrospectionError::WrongClient)
+        );
     }
 }
