@@ -204,7 +204,9 @@ async fn api_not_found() -> ApiError {
 /// call is a redirect to an origin that sends no CORS header, which a
 /// webview reports as a plain network error. Without one endpoint that
 /// always answers, an app cannot tell "not signed in" from "unreachable".
-async fn health(axum::extract::State(state): axum::extract::State<AppState>) -> Json<HealthResponse> {
+async fn health(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),

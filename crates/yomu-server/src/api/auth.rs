@@ -9,9 +9,7 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use yomu_domain::{
-    AuthMode, ExchangeRequest, MediaTokenResponse, MeResponse, SessionResponse,
-};
+use yomu_domain::{AuthMode, ExchangeRequest, MeResponse, MediaTokenResponse, SessionResponse};
 
 use super::ApiError;
 use crate::auth::{

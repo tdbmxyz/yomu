@@ -479,11 +479,16 @@ mod tests {
     fn a_client_reports_the_session_it_was_built_with() {
         assert_eq!(YomuClient::new(base()).token(), None);
         assert_eq!(
-            YomuClient::new(base()).with_token(Some("s-1".into())).token(),
+            YomuClient::new(base())
+                .with_token(Some("s-1".into()))
+                .token(),
             Some("s-1")
         );
         assert_eq!(
-            YomuClient::new(base()).with_token(Some("s-1".into())).with_token(None).token(),
+            YomuClient::new(base())
+                .with_token(Some("s-1".into()))
+                .with_token(None)
+                .token(),
             None
         );
     }
