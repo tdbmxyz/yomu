@@ -12,29 +12,19 @@ pub fn Library() -> impl IntoView {
     // Last-known-good fallbacks: without a service worker (Tauri shell)
     // the library stays browsable while the server is unreachable.
     let conn = crate::use_connectivity();
-    let library = crate::cache::keep_alive(
-        crate::cache::use_library_cache(),
-        (),
-        refresh,
-        conn,
-        {
+    let library = crate::cache::keep_alive(crate::cache::use_library_cache(), (), refresh, conn, {
+        let client = client.clone();
+        move || {
             let client = client.clone();
-            move || {
-                let client = client.clone();
-                async move {
-                    offline::cached(conn, "library", || client.library())
-                        .await
-                        .map(|(value, _)| value)
-                }
+            async move {
+                offline::cached(conn, "library", || client.library())
+                    .await
+                    .map(|(value, _)| value)
             }
-        },
-    );
-    let categories = crate::cache::keep_alive(
-        crate::cache::use_categories_cache(),
-        (),
-        refresh,
-        conn,
-        {
+        }
+    });
+    let categories =
+        crate::cache::keep_alive(crate::cache::use_categories_cache(), (), refresh, conn, {
             let client = client.clone();
             move || {
                 let client = client.clone();
@@ -44,8 +34,7 @@ pub fn Library() -> impl IntoView {
                         .map(|(value, _)| value)
                 }
             }
-        },
-    );
+        });
     // Shells have no service worker to cache covers: whenever the library
     // loads with the server reachable, quietly pull any cover not yet in
     // device storage, so the grid keeps its covers offline.

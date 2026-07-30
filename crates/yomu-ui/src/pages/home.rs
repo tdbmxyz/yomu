@@ -15,23 +15,17 @@ pub fn Home() -> impl IntoView {
     // tabs work offline in the shell.
     let conn = crate::use_connectivity();
     let refresh = RwSignal::new(0u32);
-    let library = crate::cache::keep_alive(
-        crate::cache::use_library_cache(),
-        (),
-        refresh,
-        conn,
-        {
+    let library = crate::cache::keep_alive(crate::cache::use_library_cache(), (), refresh, conn, {
+        let client = client.clone();
+        move || {
             let client = client.clone();
-            move || {
-                let client = client.clone();
-                async move {
-                    offline::cached(conn, "library", || client.library())
-                        .await
-                        .map(|(value, _)| value)
-                }
+            async move {
+                offline::cached(conn, "library", || client.library())
+                    .await
+                    .map(|(value, _)| value)
             }
-        },
-    );
+        }
+    });
     // The shells land here: store any missing library covers for offline
     // (see cover::sweep_device_covers; the Library page does the same).
     {

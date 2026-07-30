@@ -61,12 +61,8 @@ pub fn MangaPage() -> impl IntoView {
     // Category select data, owned here rather than by MangaDetail, which a
     // `refresh` bump recreates. Which categories the updater checks is
     // configured on the library page.
-    let categories = crate::cache::keep_alive(
-        crate::cache::use_categories_cache(),
-        (),
-        refresh,
-        conn,
-        {
+    let categories =
+        crate::cache::keep_alive(crate::cache::use_categories_cache(), (), refresh, conn, {
             let client = client.clone();
             move || {
                 let client = client.clone();
@@ -76,8 +72,7 @@ pub fn MangaPage() -> impl IntoView {
                         .map(|(value, _)| value)
                 }
             }
-        },
-    );
+        });
 
     // Coming back from the reader must land where the list was left, not
     // at the top. The browser can't restore the position itself: the page
