@@ -94,6 +94,10 @@ pub struct AppState {
     /// Signing key for the image-route tokens, generated per process
     /// (see media_token.rs).
     pub media_key: Arc<crate::media_token::Key>,
+    /// Shared secret a trusted reverse proxy stamps, read once at boot
+    /// from `auth.proxy_secret_file`. `None` disables the proxy identity
+    /// path (see proxy_identity.rs).
+    pub proxy_secret: Option<Arc<str>>,
     /// Serves the watched books dir (local-file publications).
     pub streamer: Arc<crate::streamer::Streamer>,
 }
@@ -109,6 +113,8 @@ pub struct ActiveDownload {
 
 impl AppState {
     pub fn new(config: Config, db: Db, sources: Registry, oidc: Option<OidcRuntime>) -> Self {
+        let proxy_secret =
+            crate::proxy_identity::load_secret(config.auth.proxy_secret_file.as_deref());
         let streamer = Arc::new(crate::streamer::Streamer::new(config.books.dir.clone()));
         Self {
             config: Arc::new(config),
@@ -120,6 +126,7 @@ impl AppState {
             oidc: oidc.map(Arc::new),
             catalog_inflight: Arc::new(crate::catalog::Inflight::default()),
             media_key: Arc::new(crate::media_token::Key::generate()),
+            proxy_secret: proxy_secret.map(Arc::from),
             streamer,
         }
     }

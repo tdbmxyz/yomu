@@ -40,10 +40,6 @@ pub struct Discovery {
     authorization_endpoint: Url,
     token_endpoint: Url,
     userinfo_endpoint: Url,
-    /// RFC 7662. authentik publishes it; a provider that does not cannot
-    /// offer app sign-in, and `introspect` says so rather than guessing.
-    #[serde(default)]
-    introspection_endpoint: Option<Url>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,81 +57,58 @@ pub struct UserInfo {
     pub name: Option<String>,
 }
 
-/// RFC 7662 response, plus the profile claims authentik includes.
-#[derive(Debug, Deserialize)]
-pub struct Introspection {
-    pub active: bool,
-    #[serde(default)]
-    pub client_id: Option<String>,
-    #[serde(default)]
-    pub sub: Option<String>,
-    #[serde(default)]
-    pub preferred_username: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
-/// Why a presented token is not one yomu will act on. Kept apart because
-/// they need different words on screen: one means sign in again, the
-/// other means this token was never for us.
-#[derive(Debug, PartialEq, Eq)]
-pub enum IntrospectionError {
-    /// Expired, revoked, or not a token at all.
-    Inactive,
-    /// Valid — for a different application on the same provider.
-    WrongClient,
-}
-
-impl Introspection {
-    /// The identity this token speaks for, if it is ours to accept.
-    ///
-    /// The client check is the reason introspection is used at all: a
-    /// userinfo call answers "who is this" but not "who was this issued
-    /// to", so without it any access token from any application on the
-    /// same provider could be traded for a yomu session.
-    pub fn identity(&self, app_client_id: &str) -> Result<UserInfo, IntrospectionError> {
-        if !self.active {
-            return Err(IntrospectionError::Inactive);
-        }
-        if self.client_id.as_deref() != Some(app_client_id) {
-            return Err(IntrospectionError::WrongClient);
-        }
-        let sub = self.sub.clone().ok_or(IntrospectionError::Inactive)?;
-        Ok(UserInfo {
-            sub,
-            preferred_username: self.preferred_username.clone(),
-            name: self.name.clone(),
-        })
-    }
-}
-
 impl OidcRuntime {
-    /// Ask the provider about an access token an app presented.
+    /// Finish a sign-in an *app* began: the shell ran the PKCE dance in
+    /// the system browser and hands over the authorization code.
     ///
-    /// Authenticated with yomu's own confidential credentials, so no new
-    /// secret is introduced and the provider only answers a client it
-    /// already knows.
-    pub async fn introspect(&self, access_token: &str) -> Result<Introspection, String> {
+    /// The exchange happens here, as `app_client_id`, which is what makes
+    /// the audience safe by construction: a code issued to any other
+    /// application on this provider fails at the token endpoint, so there
+    /// is no check to forget. `redirect_uri` is yomu's own constant, not
+    /// a value the caller supplies — taking it from the request would let
+    /// a caller steer the exchange.
+    pub async fn redeem_app_code(
+        &self,
+        app_client_id: &str,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<UserInfo, String> {
         let discovery = self.discovery().await?;
-        let endpoint = discovery
-            .introspection_endpoint
-            .clone()
-            .ok_or("this provider publishes no introspection endpoint")?;
-        self.http
-            .post(endpoint)
+        let token: TokenResponse = self
+            .http
+            .post(discovery.token_endpoint.clone())
             .form(&[
-                ("token", access_token),
-                ("client_id", &self.client_id),
-                ("client_secret", &self.client_secret),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("client_id", app_client_id),
+                ("code_verifier", verifier),
             ])
             .send()
             .await
-            .map_err(|e| format!("introspection: {e}"))?
+            .map_err(|e| format!("token exchange: {e}"))?
             .error_for_status()
-            .map_err(|e| format!("introspection: {e}"))?
+            .map_err(|e| format!("token exchange: {e}"))?
             .json()
             .await
-            .map_err(|e| format!("introspection response: {e}"))
+            .map_err(|e| format!("token exchange response: {e}"))?;
+        self.userinfo(&token.access_token).await
+    }
+
+    async fn userinfo(&self, access_token: &str) -> Result<UserInfo, String> {
+        let discovery = self.discovery().await?;
+        self.http
+            .get(discovery.userinfo_endpoint.clone())
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("userinfo: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("userinfo: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("userinfo response: {e}"))
     }
 
     /// `None` when `[auth]` has no issuer — single-account mode.
@@ -143,9 +116,13 @@ impl OidcRuntime {
         let Some(issuer) = &config.issuer else {
             return Ok(None);
         };
-        if config.client_id.is_empty() || config.client_secret.is_empty() {
-            anyhow::bail!("[auth] issuer is set but client_id/client_secret are empty");
+        if config.client_id.is_empty() {
+            anyhow::bail!("[auth] issuer is set but client_id is empty");
         }
+        // No secret is the *public client* case, and the one to prefer:
+        // `nix/module.nix` renders settings into the world-readable nix
+        // store, so a secret configured there is published to every user
+        // on the host. PKCE is what binds the code either way.
         Ok(Some(Self {
             issuer: issuer.clone(),
             client_id: config.client_id.clone(),
@@ -233,17 +210,21 @@ impl OidcRuntime {
         };
 
         let discovery = self.discovery().await?;
+        // A public client sends no secret; PKCE is what binds the code.
+        let mut form = vec![
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", self.client_id.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ];
+        if !self.client_secret.is_empty() {
+            form.push(("client_secret", self.client_secret.as_str()));
+        }
         let token: TokenResponse = self
             .http
             .post(discovery.token_endpoint.clone())
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("client_id", &self.client_id),
-                ("client_secret", &self.client_secret),
-                ("code_verifier", &verifier),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|e| format!("token exchange: {e}"))?
@@ -264,51 +245,5 @@ impl OidcRuntime {
             .json()
             .await
             .map_err(|e| format!("userinfo response: {e}"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The audience check is the reason this endpoint is introspection
-    /// and not userinfo. Without it, an access token minted for any other
-    /// application on the same provider could be traded for a yomu
-    /// session.
-    #[test]
-    fn only_an_active_token_for_our_client_is_accepted() {
-        let ours = "yomu-app";
-        let active = |client: &str| Introspection {
-            active: true,
-            client_id: Some(client.into()),
-            sub: Some("user-1".into()),
-            preferred_username: Some("tibo".into()),
-            name: None,
-        };
-
-        assert_eq!(active(ours).identity(ours).unwrap().sub, "user-1");
-        assert_eq!(
-            active("some-other-app").identity(ours),
-            Err(IntrospectionError::WrongClient)
-        );
-
-        let mut inactive = active(ours);
-        inactive.active = false;
-        assert_eq!(inactive.identity(ours), Err(IntrospectionError::Inactive));
-
-        // A token nobody is attached to is not an identity, whatever the
-        // provider says about it being active.
-        let mut anonymous = active(ours);
-        anonymous.sub = None;
-        assert_eq!(anonymous.identity(ours), Err(IntrospectionError::Inactive));
-
-        // A provider that omits client_id entirely must not pass the
-        // check by default.
-        let mut unattributed = active(ours);
-        unattributed.client_id = None;
-        assert_eq!(
-            unattributed.identity(ours),
-            Err(IntrospectionError::WrongClient)
-        );
     }
 }

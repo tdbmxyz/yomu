@@ -92,49 +92,91 @@ configured.
 
 ## 2. The app's sign-in
 
-The shell obtains an authentik access token, then trades it once:
+The shell runs the PKCE dance in the system browser, and hands yomu the
+**authorization code** — not a token:
 
 ```
-POST /api/v1/auth/exchange   { "access_token": "..." }
-  → introspect at authentik (RFC 7662) with yomu's confidential creds
-  → require active == true
-  → require client_id == [auth].app_client_id
+POST /api/v1/auth/exchange   { "code": "...", "verifier": "..." }
+  → exchange at authentik as client_id = [auth].app_client_id,
+    redirect_uri = the app's registered scheme
+  → read userinfo
   → upsert user by sub
   → mint a yomu session
   ← 200 { "token": "...", "expires_at": "..." }
 ```
 
-Three properties this buys:
+This replaces an earlier design in which the app exchanged the code
+itself and posted the access token for introspection. Handing over the
+code is better on every axis that matters here:
 
-- **No JWT verification anywhere.** No JWKS fetch, no algorithm
-  negotiation. The playbook's §9 trap — a provider signing HS256 and
-  publishing an empty `jwks/` — cannot apply.
-- **The audience is checked.** Introspection returns which client the
-  token was issued to. Without that check, an access token minted for
-  *any other application on the same authentik* could be traded for a
-  yomu session. A userinfo call cannot detect this; introspection can.
-- **No refresh dance.** The app then holds a 90-day opaque yomu session
-  and presents it as `Authorization: Bearer`. `offline_access` is not
-  needed on the provider, and the playbook's §8 — an access token
-  expiring while offline signing the user out — largely evaporates.
-  When the session does expire, the app runs the browser flow again.
+- **The audience is guaranteed by construction.** yomu performs the
+  exchange with its own configured client id, so a code minted for any
+  other application on the same provider simply fails at the token
+  endpoint. Nothing has to be checked, so nothing can be forgotten.
+- **No introspection**, and therefore no dependence on whether the
+  provider will describe a token issued to a different client — a
+  question whose answer varies by IdP and would have been discovered at
+  rollout.
+- **No JWT verification either.** No JWKS, no algorithm negotiation; the
+  playbook's §9 trap cannot apply.
+- **The app never holds an IdP token at all.** No token storage, no
+  refresh, no `offline_access`. The shell keeps a verifier and a state
+  value for the length of one sign-in, and a yomu session afterwards.
+  Most of the playbook's §5 and all of its §8 refresh handling
+  disappear.
+
+The redirect URI yomu presents at the token endpoint is its own constant,
+not a value the caller supplies: taking it from the request would let a
+caller steer the exchange.
+
+**A public client needs no secret**, which is what makes this safe to
+configure: `nix/module.nix` renders `settings` into the world-readable
+nix store, so a `client_secret` there would be published to every user on
+the host. `client_secret` therefore becomes optional — when it is empty,
+yomu authenticates at the token endpoint with PKCE alone, which is what a
+public client does. One provider then serves both paths, with two
+redirect URIs registered:
+
+```
+https://<yomu host>/api/v1/auth/callback   the browser flow
+xyz.tdbm.yomu://auth/callback              the app
+```
 
 New config in `[auth]`:
 
 ```toml
-app_client_id = "..."   # the public provider the shell uses; when empty,
+app_client_id = "..."   # the public client the shell uses; empty means
                         # /auth/exchange answers 404 and only the browser
-                        # flow exists
+                        # flow exists. Usually the same value as client_id.
 ```
 
-`OidcRuntime::Discovery` gains `introspection_endpoint`. Introspection is
-authenticated with the existing `client_id`/`client_secret`, so no new
-secret is introduced.
+**Failure modes stay distinct**, because each needs different words on
+screen: a rejected code → 401 (sign in again); the provider unreachable
+→ 502 (nothing you can do).
 
-**Failure modes are distinct**, because "I could not sign you in" and "the
-IdP is down" need different user-facing text: inactive token → 401;
-wrong `client_id` → 403 (this token is not for yomu); introspection
-unreachable → 502.
+## 2b. The browser path trusts the proxy
+
+With forward-auth in front, the browser is already authenticated before
+yomu sees the request. Rather than sign in a second time, yomu reads the
+identity the outpost stamped — `X-authentik-uid` / `-username` / `-name` —
+and upserts the user from it.
+
+That trust is conditional, and the condition is the whole design:
+
+- yomu accepts those headers **only** when the request also carries a
+  shared secret header that traefik stamps and that a client cannot
+  forge. `authResponseHeaders` strips client-sent `X-authentik-*` copies
+  on the proxied route, but a request arriving on the direct LAN route
+  never passes through the outpost at all.
+- The secret is read from **a file path** (`proxy_secret_file`), not from
+  `settings`: the path is fine in the nix store, the contents are not.
+  An unreadable or empty file disables the header path entirely rather
+  than failing open.
+- With no `[auth]`, the headers are ignored — single-account mode has
+  nothing to distinguish.
+
+The app is unaffected: it presents a bearer and never goes through the
+outpost (§9, the bypass router).
 
 ## 3. Images, which cannot carry a header
 
@@ -282,12 +324,11 @@ independent; clients and config are not.
 ## 9. Rollout
 
 1. **Server** (§1–§4). Inert until `[auth]` is configured; deploy first.
-2. **authentik**: a second provider — OAuth2/OIDC, client type
-   **Public**, PKCE **required (S256)**, redirect URI exactly
-   `xyz.tdbm.yomu://auth/callback`, scopes `openid profile`. Note its
-   client id.
-3. **zeus**: `[auth]` gets `issuer`, `client_id`/`client_secret` (the
-   existing confidential provider) and the new `app_client_id`.
+2. **authentik**: one OAuth2/OIDC provider, client type **Public**, PKCE
+   **required (S256)**, scopes `openid profile`, with **both** redirect
+   URIs registered — the yomu callback and `xyz.tdbm.yomu://auth/callback`.
+3. **zeus**: `[auth]` gets `issuer`, `client_id`, `app_client_id` (the
+   same public client) and `proxy_secret_file`. No secret in `settings`.
 4. **traefik**: a bearer-bypass router
    (`HeaderRegexp("Authorization", "^Bearer ")`) plus unauthenticated
    `/api/v1/health`, mirroring chaos's. **Never before step 1 ships** —

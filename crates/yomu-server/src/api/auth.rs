@@ -16,8 +16,14 @@ use crate::auth::{
     CurrentUser, DEFAULT_SESSION_DAYS, OptionalUser, SESSION_COOKIE, new_token, request_token,
     token_hash,
 };
-use crate::oidc::{IntrospectionError, OidcRuntime};
+use crate::oidc::OidcRuntime;
 use crate::state::AppState;
+
+/// Where the provider sends an app sign-in back to. Registered on the
+/// authentik provider and matched in five places (see the spec); yomu
+/// presents its own copy at the token endpoint rather than echoing what
+/// the caller sent, which would let a caller steer the exchange.
+const APP_REDIRECT_URI: &str = "xyz.tdbm.yomu://auth/callback";
 
 pub async fn me(
     State(state): State<AppState>,
@@ -106,21 +112,22 @@ pub async fn exchange(
         return Err(ApiError::NotFound);
     }
     let oidc = require_oidc(&state)?;
-    // Unreachable or refusing us: not the caller's fault, and needs
-    // different words on screen than "sign in again".
-    let introspection = oidc
-        .introspect(&req.access_token)
+    // The exchange happens here rather than in the app, so the audience
+    // is right by construction: a code minted for another application on
+    // this provider cannot be redeemed with yomu's client id.
+    let claims = oidc
+        .redeem_app_code(
+            &state.config.auth.app_client_id,
+            &req.code,
+            &req.verifier,
+            APP_REDIRECT_URI,
+        )
         .await
+        // The provider rejected the code, or is unreachable. Both come
+        // back as 502 with the provider's own words rather than a bare
+        // "sign in again" — this is the endpoint whose failures a user
+        // can do nothing about, and the shell shows the text verbatim.
         .map_err(ApiError::UpstreamFailed)?;
-
-    let claims = introspection
-        .identity(&state.config.auth.app_client_id)
-        .map_err(|err| match err {
-            IntrospectionError::Inactive => ApiError::Unauthorized,
-            IntrospectionError::WrongClient => {
-                ApiError::Forbidden("this token was not issued for yomu".into())
-            }
-        })?;
 
     let username = claims.preferred_username.as_deref().unwrap_or(&claims.sub);
     let display_name = claims.name.as_deref().unwrap_or(username);

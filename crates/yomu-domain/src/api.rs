@@ -30,11 +30,15 @@ pub struct AuthAdvertisement {
     pub client_id: String,
 }
 
-/// What an app posts to trade an identity-provider access token for a
-/// yomu session.
+/// What an app posts to turn a finished browser sign-in into a yomu
+/// session. The code, not a token: yomu redeems it itself, so the code
+/// can only have been issued to yomu's own app client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExchangeRequest {
-    pub access_token: String,
+    /// The authorization code the provider handed the app.
+    pub code: String,
+    /// The PKCE verifier the app generated for this sign-in.
+    pub verifier: String,
 }
 
 /// A yomu session, for a client that holds it as a bearer token.

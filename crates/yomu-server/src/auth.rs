@@ -95,8 +95,28 @@ async fn resolve(parts: &Parts, state: &AppState) -> Option<User> {
     if !state.config.auth.oidc_enabled() {
         return state.db.user_by_id(SHARED_USER).await.ok();
     }
-    let token = request_token(&parts.headers)?;
-    state.db.user_by_session(&token_hash(&token)).await.ok()
+    if let Some(token) = request_token(&parts.headers)
+        && let Ok(user) = state.db.user_by_session(&token_hash(&token)).await
+    {
+        return Some(user);
+    }
+    // No session, but a trusted proxy may already have signed this
+    // browser in. Only believed when the request carries the shared
+    // secret (see proxy_identity): the identity headers alone prove
+    // nothing, since a request on the direct LAN route never passes
+    // through the outpost that would overwrite them.
+    let proxy = crate::proxy_identity::identify(state.proxy_secret.as_deref(), |name| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    })?;
+    state
+        .db
+        .upsert_oidc_user(&proxy.sub, &proxy.username, &proxy.display_name)
+        .await
+        .ok()
 }
 
 /// Default-deny for everything under `/api/v1`.

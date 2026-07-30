@@ -362,6 +362,70 @@ mod tests {
         }
     }
 
+    /// The identity headers a forward-auth proxy stamps are believed only
+    /// alongside the shared secret. Without it — which is every request
+    /// arriving on the direct LAN route, where nothing overwrites what a
+    /// client sent — they are just headers, and prove nothing.
+    #[tokio::test]
+    async fn forged_proxy_headers_do_not_sign_anyone_in() {
+        let dir = std::env::temp_dir().join(format!("yomu-proxyapi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret_file = dir.join("secret");
+        std::fs::write(&secret_file, "s3cret\n").unwrap();
+
+        let mut config = Config::default();
+        config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
+        config.auth.client_id = "yomu".into();
+        config.auth.proxy_secret_file = Some(secret_file);
+        let db = Db::in_memory().await.unwrap();
+        let state = AppState::new(config, db, Registry::default(), None);
+
+        let call = |headers: Vec<(&'static str, &'static str)>| {
+            let router = super::router(state.clone());
+            async move {
+                let mut req = Request::builder().method("GET").uri("/api/v1/library");
+                for (name, value) in headers {
+                    req = req.header(name, value);
+                }
+                router
+                    .oneshot(req.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        // Identity without the secret: ignored.
+        assert_eq!(
+            call(vec![
+                ("x-authentik-uid", "uid-1"),
+                ("x-authentik-username", "tibo"),
+            ])
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Wrong secret: ignored.
+        assert_eq!(
+            call(vec![
+                ("x-yomu-proxy-secret", "wrong"),
+                ("x-authentik-username", "tibo"),
+            ])
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Correctly stamped: signed in, and the library answers.
+        assert_eq!(
+            call(vec![
+                ("x-yomu-proxy-secret", "s3cret"),
+                ("x-authentik-uid", "uid-1"),
+                ("x-authentik-username", "tibo"),
+            ])
+            .await,
+            StatusCode::OK
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A server with no app sign-in advertises none, so an app pointed at
     /// it never shows a sign-in button. And the 1.x fields stay exactly
     /// where they were: an old client parses this response as before.
@@ -415,7 +479,7 @@ mod tests {
             .method("POST")
             .uri("/api/v1/auth/exchange")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"access_token":"x"}"#))
+            .body(Body::from(r#"{"code":"c","verifier":"v"}"#))
             .unwrap();
         let status = super::router(state).oneshot(req).await.unwrap().status();
         assert_eq!(status, StatusCode::NOT_FOUND);

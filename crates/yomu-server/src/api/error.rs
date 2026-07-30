@@ -13,10 +13,6 @@ pub enum ApiError {
     NotFound,
     /// No (valid) session on a per-user endpoint in OIDC mode.
     Unauthorized,
-    /// Authenticated, but this credential is not one yomu will act on —
-    /// distinct from `Unauthorized` because "sign in again" is the wrong
-    /// advice for it.
-    Forbidden(String),
     Unprocessable(String),
     /// The upstream scan site failed or changed layout.
     UpstreamFailed(String),
@@ -77,7 +73,6 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
-            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             ApiError::UpstreamFailed(msg) => (StatusCode::BAD_GATEWAY, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),

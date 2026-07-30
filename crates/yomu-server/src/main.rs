@@ -7,6 +7,7 @@ mod downloader;
 mod media_token;
 mod notifier;
 mod oidc;
+mod proxy_identity;
 mod state;
 mod streamer;
 mod sync;
