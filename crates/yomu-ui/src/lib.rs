@@ -2,6 +2,7 @@
 //! shell). Platform specifics are injected via [`AppConfig`], same seam as
 //! chaos.
 
+mod cache;
 mod chapter_actions;
 mod cover;
 mod format;
@@ -10,6 +11,7 @@ pub mod offline;
 mod pager;
 mod pages;
 mod pull;
+mod refresh;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -179,6 +181,12 @@ pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(device_marks);
     let pull_queue: PullQueue = RwSignal::new(offline::load_pull_queue());
     provide_context(pull_queue);
+    // Page data that outlives the page component, so returning to a list
+    // is free (see cache.rs). Library and Home share one, since they read
+    // the same library() list.
+    provide_context(cache::LibraryCache::default());
+    provide_context(cache::CategoriesCache::default());
+    provide_context(cache::DetailCache::default());
     // Write-through: persist any change so the queue survives restarts.
     Effect::new(move |_| {
         pull_queue.with(|q| offline::save_pull_queue(q));
@@ -189,14 +197,18 @@ pub fn App(config: AppConfig) -> impl IntoView {
     // marks recorded while it wasn't. Covers startup (the boot gate flips
     // to Online) and every later recovery, badge retries included.
     let flush_client = YomuClient::new(config.api_base.clone());
+    let flush_library = cache::use_library_cache();
+    let flush_detail = cache::use_detail_cache();
     Effect::new(move |_| {
         if conn.get() != Connectivity::Online {
             return;
         }
         let client = flush_client.clone();
         spawn_local(async move {
-            offline::flush_outbox(&client).await;
-            offline::flush_marks(&client).await;
+            // The caches travel in: inside this task a context read has no
+            // reactive owner and would silently return None.
+            offline::flush_outbox(&client, flush_library, flush_detail).await;
+            offline::flush_marks(&client, flush_library, flush_detail).await;
         });
     });
     // The OS says a network came back: one free probe.

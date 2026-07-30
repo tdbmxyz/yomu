@@ -96,6 +96,7 @@ fn DownloadsView(
             }
             let client = client.clone();
             let refetch = refetch.clone();
+            let detail_cache = crate::cache::use_detail_cache();
             spawn_local(async move {
                 let result = if retry {
                     client.retry_downloads(&ids).await
@@ -105,6 +106,9 @@ fn DownloadsView(
                 if let Err(err) = result {
                     leptos::logging::warn!("download action: {err}");
                 }
+                // The chapter list caches its rows, and their download
+                // buttons are what this just changed.
+                detail_cache.mark_stale();
                 refetch();
             });
         }

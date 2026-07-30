@@ -84,11 +84,21 @@ pub fn outbox_push(event: ProgressEvent) {
 /// harmless). A 4xx answer means the server understood and refused: those
 /// events can never succeed, so they are dropped too rather than poisoning
 /// every future flush.
-pub async fn flush_outbox(client: &yomu_client::YomuClient) {
+///
+/// The caches are passed in rather than looked up, for the same reason as
+/// [`flush_marks`]: this runs from a detached task in `App`.
+pub async fn flush_outbox(
+    client: &yomu_client::YomuClient,
+    library: crate::cache::LibraryCache,
+    detail: crate::cache::DetailCache,
+) {
     let events = outbox();
     if events.is_empty() {
         return;
     }
+    // Positions the server has not seen become read marks on arrival
+    // (auto_mark_read), so every cached unread count is now suspect.
+    crate::cache::mark_publication_stale(library, detail);
     let pushed: Vec<Uuid> = events.iter().map(|e| e.id).collect();
     let remove_pushed = || {
         let remaining: Vec<ProgressEvent> = outbox()
@@ -681,7 +691,14 @@ pub fn queue_marks(ids: &[Uuid], read: bool) {
 
 /// Replay queued read marks; entries survive failed flushes. The mark
 /// endpoint is a set operation, so replays are idempotent.
-pub async fn flush_marks(client: &yomu_client::YomuClient) {
+///
+/// The caches are passed in rather than looked up: this runs from a
+/// detached task in `App`, where `use_context` has no reactive owner.
+pub async fn flush_marks(
+    client: &yomu_client::YomuClient,
+    library: crate::cache::LibraryCache,
+    detail: crate::cache::DetailCache,
+) {
     let marks = pending_marks();
     if marks.is_empty() {
         return;
@@ -702,6 +719,8 @@ pub async fn flush_marks(client: &yomu_client::YomuClient) {
             marks.remove(id);
         }
         write_json(MARKS_KEY, &marks);
+        // The server now disagrees with every cached unread count.
+        crate::cache::mark_publication_stale(library, detail);
         leptos::logging::log!("synced {} offline read mark(s)", flushed.len());
     }
 }

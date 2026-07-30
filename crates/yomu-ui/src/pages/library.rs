@@ -12,11 +12,9 @@ pub fn Library() -> impl IntoView {
     // Last-known-good fallbacks: without a service worker (Tauri shell)
     // the library stays browsable while the server is unreachable.
     let conn = crate::use_connectivity();
-    let library = LocalResource::new({
+    let library = crate::cache::keep_alive(crate::cache::use_library_cache(), (), refresh, conn, {
         let client = client.clone();
         move || {
-            refresh.track();
-            conn.track();
             let client = client.clone();
             async move {
                 offline::cached(conn, "library", || client.library())
@@ -25,26 +23,25 @@ pub fn Library() -> impl IntoView {
             }
         }
     });
-    let categories = LocalResource::new({
-        let client = client.clone();
-        move || {
-            refresh.track();
-            conn.track();
+    let categories =
+        crate::cache::keep_alive(crate::cache::use_categories_cache(), (), refresh, conn, {
             let client = client.clone();
-            async move {
-                offline::cached(conn, "categories", || client.categories())
-                    .await
-                    .map(|(value, _)| value)
+            move || {
+                let client = client.clone();
+                async move {
+                    offline::cached(conn, "categories", || client.categories())
+                        .await
+                        .map(|(value, _)| value)
+                }
             }
-        }
-    });
+        });
     // Shells have no service worker to cache covers: whenever the library
     // loads with the server reachable, quietly pull any cover not yet in
     // device storage, so the grid keeps its covers offline.
     {
         let sweep_client = client.clone();
         Effect::new(move |_| {
-            if let Some(Ok(entries)) = library.get() {
+            if let Some(entries) = library.value.get() {
                 let ids = entries.iter().map(|entry| entry.publication.id).collect();
                 crate::cover::sweep_device_covers(conn, &sweep_client, ids);
             }
@@ -58,7 +55,7 @@ pub fn Library() -> impl IntoView {
         if seeded == Some(true) {
             return true;
         }
-        let Some(Ok(list)) = categories.get() else {
+        let Some(list) = categories.value.get() else {
             return false;
         };
         let known: Vec<String> = list.iter().map(|c| c.id.clone()).collect();
@@ -69,7 +66,7 @@ pub fn Library() -> impl IntoView {
     // A cached kind that no longer has content falls back to Comics rather
     // than showing a confusing empty library.
     Effect::new(move |_| {
-        if let Some(Ok(entries)) = library.get() {
+        if let Some(entries) = library.value.get() {
             let kind = selected_kind.get_untracked();
             if kind != yomu_domain::Kind::Comics
                 && !entries.iter().any(|e| e.publication.kind == kind)
@@ -78,33 +75,58 @@ pub fn Library() -> impl IntoView {
             }
         }
     });
+    crate::cache::remember_scroll("yomu-scroll:library".to_string(), move || {
+        library.value.get().is_some()
+    });
+    let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
+    // Any settled outcome ends the spinner — a refresh that fails must not
+    // leave it turning.
+    Effect::new(move |_| {
+        let _ = (library.value.get(), library.error.get());
+        pull.refreshing.set(false);
+    });
     // In-library filters, applied client-side over the loaded list.
     let search = RwSignal::new(String::new());
     let active_genre = RwSignal::new(None::<String>);
 
     view! {
         <section>
+            <div
+                class="pull-refresh"
+                class:armed=move || pull.armed.get()
+                class:spinning=move || pull.refreshing.get()
+                style:height=move || format!("{}px", pull.distance.get())
+            >
+                <span class="pull-refresh-dot"></span>
+            </div>
             {move || {
-                let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
+                let entries = library.value.get().unwrap_or_default();
                 view! { <KindSwitcher entries selected_kind/> }
             }}
             {move || {
-                categories
-                    .get()
-                    .and_then(|r| r.ok())
-                    .map(|list| {
-                        let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
+                categories.value.get().map(|list| {
+                        let entries = library.value.get().unwrap_or_default();
                         view! { <CategoryTabs list entries selected refresh/> }
                     })
             }}
             {move || {
-                let entries = library.get().and_then(|r| r.ok()).unwrap_or_default();
+                let entries = library.value.get().unwrap_or_default();
                 (!entries.is_empty())
                     .then(|| view! { <LibraryFilters entries search active_genre/> })
             }}
-            {move || match library.get() {
+            // A failed refresh is shown beside the grid, never instead of
+            // it: emptying a list being read is worse than a stale one.
+            {move || {
+                library
+                    .error
+                    .get()
+                    .map(|err| {
+                        view! { <p class="error">"Could not reach yomu server: " {err}</p> }
+                    })
+            }}
+            {move || match library.value.get() {
                 None => view! { <p class="muted">"Loading library…"</p> }.into_any(),
-                Some(Ok(list)) if list.is_empty() => {
+                Some(list) if list.is_empty() => {
                     view! {
                         <p class="muted">
                             "Nothing here yet — use " <a href="/search">"Search"</a>
@@ -114,7 +136,7 @@ pub fn Library() -> impl IntoView {
                     }
                         .into_any()
                 }
-                Some(Ok(list)) => {
+                Some(list) => {
                     let needle = search.get().trim().to_lowercase();
                     let genre = active_genre.get();
                     let filtered: Vec<_> = list
@@ -221,10 +243,6 @@ pub fn Library() -> impl IntoView {
                                 .collect_view()}
                         </div>
                     }
-                        .into_any()
-                }
-                Some(Err(err)) => {
-                    view! { <p class="error">"Could not reach yomu server: " {err.to_string()}</p> }
                         .into_any()
                 }
             }}
@@ -403,9 +421,15 @@ fn CategoryTabs(
                     update_enabled: !category.update_enabled,
                 };
                 let id = category.id.clone();
+                let categories_cache = crate::cache::use_categories_cache();
+                let library_cache = crate::cache::use_library_cache();
                 spawn_local(async move {
                     match client.update_category(&id, &req).await {
-                        Ok(_) => refresh.update(|n| *n += 1),
+                        Ok(_) => {
+                            categories_cache.mark_stale();
+                            library_cache.mark_stale();
+                            refresh.update(|n| *n += 1);
+                        }
                         Err(err) => leptos::logging::warn!("category update: {err}"),
                     }
                 });

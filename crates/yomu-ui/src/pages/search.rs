@@ -185,12 +185,19 @@ fn SummaryCard(
             source_key: hit.key.clone(),
             auto_download,
         };
+        // Captured before the task: a context read after an await returns
+        // None, and the new title would never reach the library list.
+        let library_cache = crate::cache::use_library_cache();
+        let detail_cache = crate::cache::use_detail_cache();
         spawn_local(async move {
             match client.add_publication(&req).await {
-                Ok(publication) => status.set(Some(format!(
-                    "Added \"{}\" to the library",
-                    publication.title
-                ))),
+                Ok(publication) => {
+                    crate::cache::mark_publication_stale(library_cache, detail_cache);
+                    status.set(Some(format!(
+                        "Added \"{}\" to the library",
+                        publication.title
+                    )));
+                }
                 Err(err) => status.set(Some(format!("Add failed: {err}"))),
             }
         });
