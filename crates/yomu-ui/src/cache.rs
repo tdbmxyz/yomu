@@ -115,11 +115,21 @@ pub fn came_online(online: bool, was_online: bool, first_run: bool) -> bool {
 
 /// What a page renders from: the payload, and an error that never
 /// replaces a payload already on screen.
-#[derive(Clone, Copy)]
 pub struct Kept<V: Send + Sync + 'static> {
     pub value: RwSignal<Option<V>>,
     pub error: RwSignal<Option<String>>,
 }
+
+// Hand-written, like `Keyed`'s: a derived `Copy` would add a `V: Copy`
+// bound, and none of the payloads (a Vec, a response struct) are Copy —
+// the signals inside are, whatever they carry. Without this a page cannot
+// use the value in more than one closure.
+impl<V: Send + Sync + 'static> Clone for Kept<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<V: Send + Sync + 'static> Copy for Kept<V> {}
 
 /// Wire a cache to a page: seed from the cache, fetch only on a trigger,
 /// and keep both in step.

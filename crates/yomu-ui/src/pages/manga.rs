@@ -47,11 +47,9 @@ pub fn MangaPage() -> impl IntoView {
     let server_progress: ServerProgress = RwSignal::new(std::collections::HashMap::new());
     let client = use_client();
     let conn = crate::use_connectivity();
-    let detail = LocalResource::new({
+    let detail = crate::cache::keep_alive(crate::cache::use_detail_cache(), id, refresh, conn, {
         let client = client.clone();
         move || {
-            refresh.track();
-            conn.track();
             let client = client.clone();
             async move {
                 // The flag marks the detail as served-from-cache (server
@@ -60,24 +58,26 @@ pub fn MangaPage() -> impl IntoView {
             }
         }
     });
-    // Category select data, owned here rather than by MangaDetail: a
-    // `refresh` bump recreates MangaDetail, and a resource created there
-    // would yield None until its refetch lands — the select would
-    // unmount for a beat every bump (visible flicker while downloads
-    // animate). Which categories the updater checks is configured on
-    // the library page.
-    let categories = LocalResource::new({
-        let client = client.clone();
-        move || {
-            conn.track();
+    // Category select data, owned here rather than by MangaDetail, which a
+    // `refresh` bump recreates. Which categories the updater checks is
+    // configured on the library page.
+    let categories = crate::cache::keep_alive(
+        crate::cache::use_categories_cache(),
+        (),
+        refresh,
+        conn,
+        {
             let client = client.clone();
-            async move {
-                offline::cached(conn, "categories", || client.categories())
-                    .await
-                    .map(|(value, _)| value)
+            move || {
+                let client = client.clone();
+                async move {
+                    offline::cached(conn, "categories", || client.categories())
+                        .await
+                        .map(|(value, _)| value)
+                }
             }
-        }
-    });
+        },
+    );
 
     // Coming back from the reader must land where the list was left, not
     // at the top. The browser can't restore the position itself: the page
@@ -99,7 +99,7 @@ pub fn MangaPage() -> impl IntoView {
     }
     let restored = StoredValue::new(false);
     Effect::new(move |_| {
-        if detail.get().and_then(|r| r.ok()).is_none() || restored.get_value() {
+        if detail.value.get().is_none() || restored.get_value() {
             return;
         }
         restored.set_value(true);
@@ -122,7 +122,7 @@ pub fn MangaPage() -> impl IntoView {
     // pending tick can't fire `refresh` on a disposed signal after navigation.
     let poll = StoredValue::new(None::<TimeoutHandle>);
     Effect::new(move |_| {
-        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|(d, _)| {
+        let busy = detail.value.get().is_some_and(|(d, _)| {
             d.units.iter().any(|c| {
                 matches!(
                     c.download,
@@ -174,12 +174,14 @@ pub fn MangaPage() -> impl IntoView {
     // page and app restarts — nothing to do here.
 
     view! {
-        {move || match detail.get() {
+        // A failed refresh is shown beside the chapter list, never instead
+        // of it.
+        {move || detail.error.get().map(|err| view! { <p class="error">{err}</p> })}
+        {move || match detail.value.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-            Some(Ok((detail, offline))) => {
+            Some((detail, offline)) => {
                 view! { <MangaDetail detail offline refresh status selected anchor server_progress categories/> }.into_any()
             }
-            Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
         {move || status.get().map(|s| view! { <p class="status">{s}</p> })}
     }
@@ -199,7 +201,7 @@ fn MangaDetail(
     server_progress: ServerProgress,
     /// Owned by MangaPage so refresh-driven remounts of this component
     /// re-render the select instantly from the already-loaded value.
-    categories: LocalResource<Result<Vec<Category>, yomu_client::ClientError>>,
+    categories: crate::cache::Kept<Vec<Category>>,
 ) -> impl IntoView {
     let client = use_client();
     let publication = detail.publication.clone();
@@ -367,8 +369,8 @@ fn MangaDetail(
                             let current = current_category.clone();
                             let on_change = set_category.clone();
                             categories
+                                .value
                                 .get()
-                                .and_then(|r| r.ok())
                                 .map(|list: Vec<Category>| {
                                     view! {
                                         <select
