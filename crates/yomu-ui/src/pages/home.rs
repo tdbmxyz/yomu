@@ -14,10 +14,10 @@ pub fn Home() -> impl IntoView {
     // Same resource + last-known-good cache as the Library page, so both
     // tabs work offline in the shell.
     let conn = crate::use_connectivity();
-    let library = LocalResource::new({
+    let refresh = RwSignal::new(0u32);
+    let library = crate::cache::keep_alive(crate::cache::use_library_cache(), (), refresh, conn, {
         let client = client.clone();
         move || {
-            conn.track();
             let client = client.clone();
             async move {
                 offline::cached(conn, "library", || client.library())
@@ -31,22 +31,47 @@ pub fn Home() -> impl IntoView {
     {
         let sweep_client = client.clone();
         Effect::new(move |_| {
-            if let Some(Ok(entries)) = library.get() {
+            if let Some(entries) = library.value.get() {
                 let ids = entries.iter().map(|entry| entry.publication.id).collect();
                 crate::cover::sweep_device_covers(conn, &sweep_client, ids);
             }
         });
     }
 
+    crate::cache::remember_scroll("yomu-scroll:home".to_string(), move || {
+        library.value.get().is_some()
+    });
+    let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
+    // Any settled outcome ends the spinner — a refresh that fails must not
+    // leave it turning.
+    Effect::new(move |_| {
+        let _ = (library.value.get(), library.error.get());
+        pull.refreshing.set(false);
+    });
+
     view! {
         <section class="home">
-            {move || match library.get() {
+            <div
+                class="pull-refresh"
+                class:armed=move || pull.armed.get()
+                class:spinning=move || pull.refreshing.get()
+                style:height=move || format!("{}px", pull.distance.get())
+            >
+                <span class="pull-refresh-dot"></span>
+            </div>
+            // A failed refresh is shown beside the shelves, never instead
+            // of them.
+            {move || {
+                library
+                    .error
+                    .get()
+                    .map(|err| {
+                        view! { <p class="error">"Could not reach yomu server: " {err}</p> }
+                    })
+            }}
+            {move || match library.value.get() {
                 None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-                Some(Err(err)) => {
-                    view! { <p class="error">"Could not reach yomu server: " {err.to_string()}</p> }
-                        .into_any()
-                }
-                Some(Ok(list)) if list.is_empty() => {
+                Some(list) if list.is_empty() => {
                     view! {
                         <p class="muted gate-msg">
                             "Nothing tracked yet — use " <a href="/search">"Search"</a>
@@ -55,7 +80,7 @@ pub fn Home() -> impl IntoView {
                     }
                         .into_any()
                 }
-                Some(Ok(list)) => {
+                Some(list) => {
                     // Finished titles (nothing unread) drop off — there is
                     // nothing to continue; they return when a new chapter lands.
                     let mut resume: Vec<PublicationWithLocator> = list
@@ -177,7 +202,7 @@ fn ShelfCard(
     let id = entry.publication.id;
     let href = match href_chapter {
         Some((chapter, page)) => format!("/read/{id}/{chapter}?page={page}"),
-        None => format!("/manga/{id}"),
+        None => format!("/publications/{id}"),
     };
     view! {
         <a class="shelf-card" href=href>

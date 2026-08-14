@@ -9,14 +9,21 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use yomu_domain::{AuthMode, MeResponse};
+use yomu_domain::{AuthMode, ExchangeRequest, MeResponse, MediaTokenResponse, SessionResponse};
 
 use super::ApiError;
 use crate::auth::{
-    DEFAULT_SESSION_DAYS, OptionalUser, SESSION_COOKIE, new_token, request_token, token_hash,
+    CurrentUser, DEFAULT_SESSION_DAYS, OptionalUser, SESSION_COOKIE, new_token, request_token,
+    token_hash,
 };
 use crate::oidc::OidcRuntime;
 use crate::state::AppState;
+
+/// Where the provider sends an app sign-in back to. Registered on the
+/// authentik provider and matched in five places (see the spec); yomu
+/// presents its own copy at the token endpoint rather than echoing what
+/// the caller sent, which would let a caller steer the exchange.
+const APP_REDIRECT_URI: &str = "xyz.tdbm.yomu://auth/callback";
 
 pub async fn me(
     State(state): State<AppState>,
@@ -89,6 +96,73 @@ pub async fn callback(
         Redirect::temporary("/"),
     )
         .into_response())
+}
+
+/// Trade an identity-provider access token for a yomu session.
+///
+/// The app holds the result as a bearer for the session's whole life, so
+/// there is no refresh dance on the client: when it expires, the app
+/// signs in again. Nothing downstream knows the session came from here
+/// rather than from the browser flow.
+pub async fn exchange(
+    State(state): State<AppState>,
+    Json(req): Json<ExchangeRequest>,
+) -> Result<Json<SessionResponse>, ApiError> {
+    if !state.config.auth.app_sign_in_enabled() {
+        return Err(ApiError::NotFound);
+    }
+    let oidc = require_oidc(&state)?;
+    // The exchange happens here rather than in the app, so the audience
+    // is right by construction: a code minted for another application on
+    // this provider cannot be redeemed with yomu's client id.
+    let claims = oidc
+        .redeem_app_code(
+            &state.config.auth.app_client_id,
+            &req.code,
+            &req.verifier,
+            APP_REDIRECT_URI,
+        )
+        .await
+        // The provider rejected the code, or is unreachable. Both come
+        // back as 502 with the provider's own words rather than a bare
+        // "sign in again" — this is the endpoint whose failures a user
+        // can do nothing about, and the shell shows the text verbatim.
+        .map_err(ApiError::UpstreamFailed)?;
+
+    let username = claims.preferred_username.as_deref().unwrap_or(&claims.sub);
+    let display_name = claims.name.as_deref().unwrap_or(username);
+    let user = state
+        .db
+        .upsert_oidc_user(&claims.sub, username, display_name)
+        .await?;
+
+    let days = match state.config.auth.session_days {
+        0 => DEFAULT_SESSION_DAYS,
+        days => days,
+    } as i64;
+    let expires_at = Utc::now() + Duration::days(days);
+    let token = new_token();
+    state
+        .db
+        .create_session(&token_hash(&token), user.id, expires_at)
+        .await?;
+    tracing::info!(username = user.username, "app sign-in");
+    Ok(Json(SessionResponse { token, expires_at }))
+}
+
+/// A short-lived credential for the two routes an `<img>` loads.
+///
+/// Itself authenticated: the token delegates a session the caller
+/// already holds, for requests that cannot carry one.
+pub async fn media_token(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> Json<MediaTokenResponse> {
+    const TTL_SECS: u64 = 60 * 60;
+    Json(MediaTokenResponse {
+        token: state.media_key.mint(user.id, TTL_SECS),
+        expires_at: Utc::now() + Duration::seconds(TTL_SECS as i64),
+    })
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {

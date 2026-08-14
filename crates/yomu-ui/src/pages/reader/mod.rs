@@ -52,7 +52,7 @@ pub fn Reader() -> impl IntoView {
 
 #[component]
 fn ReaderInner() -> impl IntoView {
-    let (Some(manga_id), Some(chapter_id)) = (param_uuid("manga"), param_uuid("chapter")) else {
+    let (Some(manga_id), Some(chapter_id)) = (param_uuid("publication"), param_uuid("unit")) else {
         return view! { <NotFound/> }.into_any();
     };
 
@@ -130,9 +130,31 @@ fn ReaderInner() -> impl IntoView {
 
     // Report progress; offline failures append to the outbox so the journal
     // merge reconciles once we're back.
+    // Read during setup, not inside the task below: a context lookup after
+    // an await has no reactive owner and silently yields None, so the patch
+    // would simply never happen. `Keyed` is `Copy`, so capturing is free.
+    let library_cache = crate::cache::use_library_cache();
+    let detail_cache = crate::cache::use_detail_cache();
     let report = {
         let client = client.clone();
         move |unit: uuid::Uuid, p: u32| {
+            // The lists cache their payload across navigation, so a
+            // position they never hear about is a stale locator on the
+            // shelf. Built client-side rather than from the response, so
+            // it is right even when the write fails into the outbox.
+            let locator = yomu_domain::Locator {
+                unit_id: unit,
+                locations: yomu_domain::Locations::Page { page: p },
+                at: Utc::now(),
+            };
+            let unit_title = detail.get().and_then(|r| r.ok()).and_then(|d| {
+                d.units
+                    .iter()
+                    .find(|c| c.id == unit)
+                    .map(|c| c.title.clone())
+            });
+            crate::cache::patch_locator(library_cache, manga_id, &locator, unit_title);
+            crate::cache::patch_detail_locator(detail_cache, manga_id, &locator);
             let client = client.clone();
             spawn_local(async move {
                 let req = SetLocatorRequest {
@@ -459,7 +481,7 @@ fn ReaderInner() -> impl IntoView {
                 ></div>
             </div>
             <div class="reader-chrome reader-top">
-                <a href=format!("/manga/{manga_id}")>"← back"</a>
+                <a href=format!("/publications/{manga_id}")>"← back"</a>
                 <span class="reader-title">{chapter_title}</span>
             </div>
 
@@ -482,7 +504,7 @@ fn ReaderInner() -> impl IntoView {
                                     "couldn't be reached (" {err.to_string()} ")."
                                 </p>
                                 <p class="reader-unavailable-actions">
-                                    <a class="button" href=format!("/manga/{manga_id}")>
+                                    <a class="button" href=format!("/publications/{manga_id}")>
                                         "Back to the chapter list"
                                     </a>
                                     <a class="button primary" href="/more">

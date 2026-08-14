@@ -47,11 +47,9 @@ pub fn MangaPage() -> impl IntoView {
     let server_progress: ServerProgress = RwSignal::new(std::collections::HashMap::new());
     let client = use_client();
     let conn = crate::use_connectivity();
-    let detail = LocalResource::new({
+    let detail = crate::cache::keep_alive(crate::cache::use_detail_cache(), id, refresh, conn, {
         let client = client.clone();
         move || {
-            refresh.track();
-            conn.track();
             let client = client.clone();
             async move {
                 // The flag marks the detail as served-from-cache (server
@@ -60,58 +58,27 @@ pub fn MangaPage() -> impl IntoView {
             }
         }
     });
-    // Category select data, owned here rather than by MangaDetail: a
-    // `refresh` bump recreates MangaDetail, and a resource created there
-    // would yield None until its refetch lands — the select would
-    // unmount for a beat every bump (visible flicker while downloads
-    // animate). Which categories the updater checks is configured on
-    // the library page.
-    let categories = LocalResource::new({
-        let client = client.clone();
-        move || {
-            conn.track();
+    // Category select data, owned here rather than by MangaDetail, which a
+    // `refresh` bump recreates. Which categories the updater checks is
+    // configured on the library page.
+    let categories =
+        crate::cache::keep_alive(crate::cache::use_categories_cache(), (), refresh, conn, {
             let client = client.clone();
-            async move {
-                offline::cached(conn, "categories", || client.categories())
-                    .await
-                    .map(|(value, _)| value)
+            move || {
+                let client = client.clone();
+                async move {
+                    offline::cached(conn, "categories", || client.categories())
+                        .await
+                        .map(|(value, _)| value)
+                }
             }
-        }
-    });
+        });
 
     // Coming back from the reader must land where the list was left, not
     // at the top. The browser can't restore the position itself: the page
-    // is empty until the detail fetch resolves. The position is recorded
-    // from scroll events as they happen — not in on_cleanup, which runs
-    // after navigation has already reset the scroll to 0 (that reset's own
-    // scroll event fires asynchronously, past the listener's removal, so
-    // it can't clobber the recording).
-    let scroll_key = format!("yomu-scroll:manga:{id}");
-    {
-        let key = scroll_key.clone();
-        let save_handle = window_event_listener(leptos::ev::scroll, move |_| {
-            if let Some(storage) = window().session_storage().ok().flatten() {
-                let y = window().scroll_y().unwrap_or(0.0);
-                let _ = storage.set_item(&key, &y.to_string());
-            }
-        });
-        on_cleanup(move || save_handle.remove());
-    }
-    let restored = StoredValue::new(false);
-    Effect::new(move |_| {
-        if detail.get().and_then(|r| r.ok()).is_none() || restored.get_value() {
-            return;
-        }
-        restored.set_value(true);
-        let key = scroll_key.clone();
-        request_animation_frame(move || {
-            if let Some(storage) = window().session_storage().ok().flatten()
-                && let Ok(Some(saved)) = storage.get_item(&key)
-                && let Ok(y) = saved.parse::<f64>()
-            {
-                window().scroll_to_with_x_and_y(0.0, y);
-            }
-        });
+    // is empty until the detail resolves.
+    crate::cache::remember_scroll(format!("yomu-scroll:manga:{id}"), move || {
+        detail.value.get().is_some()
     });
 
     // While a download is queued or running, keep refetching so the chapter
@@ -122,7 +89,7 @@ pub fn MangaPage() -> impl IntoView {
     // pending tick can't fire `refresh` on a disposed signal after navigation.
     let poll = StoredValue::new(None::<TimeoutHandle>);
     Effect::new(move |_| {
-        let busy = detail.get().and_then(|r| r.ok()).is_some_and(|(d, _)| {
+        let busy = detail.value.get().is_some_and(|(d, _)| {
             d.units.iter().any(|c| {
                 matches!(
                     c.download,
@@ -173,13 +140,31 @@ pub fn MangaPage() -> impl IntoView {
     // background driver (see crate::pull), so it survives leaving this
     // page and app restarts — nothing to do here.
 
+    let pull = crate::refresh::use_pull_to_refresh(move || refresh.update(|n| *n += 1));
+    // Any settled outcome ends the spinner — a refresh that fails must not
+    // leave it turning.
+    Effect::new(move |_| {
+        let _ = (detail.value.get(), detail.error.get());
+        pull.refreshing.set(false);
+    });
+
     view! {
-        {move || match detail.get() {
+        <div
+            class="pull-refresh"
+            class:armed=move || pull.armed.get()
+            class:spinning=move || pull.refreshing.get()
+            style:height=move || format!("{}px", pull.distance.get())
+        >
+            <span class="pull-refresh-dot"></span>
+        </div>
+        // A failed refresh is shown beside the chapter list, never instead
+        // of it.
+        {move || detail.error.get().map(|err| view! { <p class="error">{err}</p> })}
+        {move || match detail.value.get() {
             None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-            Some(Ok((detail, offline))) => {
+            Some((detail, offline)) => {
                 view! { <MangaDetail detail offline refresh status selected anchor server_progress categories/> }.into_any()
             }
-            Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
         }}
         {move || status.get().map(|s| view! { <p class="status">{s}</p> })}
     }
@@ -199,9 +184,15 @@ fn MangaDetail(
     server_progress: ServerProgress,
     /// Owned by MangaPage so refresh-driven remounts of this component
     /// re-render the select instantly from the already-loaded value.
-    categories: LocalResource<Result<Vec<Category>, yomu_client::ClientError>>,
+    categories: crate::cache::Kept<Vec<Category>>,
 ) -> impl IntoView {
     let client = use_client();
+    // Captured here, not inside the handlers' spawned tasks: a context
+    // read after an await silently returns None. The page's own `refresh`
+    // already refetches this detail, but nothing tells the library list —
+    // and it shows unread counts and categories that these actions change.
+    let library_cache = crate::cache::use_library_cache();
+    let detail_cache = crate::cache::use_detail_cache();
     let publication = detail.publication.clone();
     let id = publication.id;
     // LocalFile publications: their content *is* the server copy, so no
@@ -241,6 +232,7 @@ fn MangaDetail(
                             0 => "No new chapters".into(),
                             n => format!("{n} new chapter(s)"),
                         }));
+                        crate::cache::mark_publication_stale(library_cache, detail_cache);
                         refresh.update(|n| *n += 1);
                     }
                     Err(err) => status.set(Some(format!("Refresh failed: {err}"))),
@@ -260,7 +252,10 @@ fn MangaDetail(
                     category: None,
                 };
                 match client.update_publication(id, &req).await {
-                    Ok(_) => refresh.update(|n| *n += 1),
+                    Ok(_) => {
+                        crate::cache::mark_publication_stale(library_cache, detail_cache);
+                        refresh.update(|n| *n += 1);
+                    }
                     Err(err) => status.set(Some(format!("Update failed: {err}"))),
                 }
             });
@@ -279,7 +274,10 @@ fn MangaDetail(
                     category: Some(value),
                 };
                 match client.update_publication(id, &req).await {
-                    Ok(_) => refresh.update(|n| *n += 1),
+                    Ok(_) => {
+                        crate::cache::mark_publication_stale(library_cache, detail_cache);
+                        refresh.update(|n| *n += 1);
+                    }
                     Err(err) => status.set(Some(format!("Update failed: {err}"))),
                 }
             });
@@ -293,6 +291,11 @@ fn MangaDetail(
             spawn_local(async move {
                 match client.delete_publication(id).await {
                     Ok(()) => {
+                        // The row is gone, so this clears rather than
+                        // flags: showing it until a refetch lands would be
+                        // worse than a spinner.
+                        library_cache.clear();
+                        detail_cache.clear();
                         let _ = window().location().set_href("/");
                     }
                     Err(err) => status.set(Some(format!("Delete failed: {err}"))),
@@ -367,8 +370,8 @@ fn MangaDetail(
                             let current = current_category.clone();
                             let on_change = set_category.clone();
                             categories
+                                .value
                                 .get()
-                                .and_then(|r| r.ok())
                                 .map(|list: Vec<Category>| {
                                     view! {
                                         <select
@@ -555,6 +558,10 @@ fn ChapterList(
             .collect::<std::collections::HashMap<Uuid, String>>(),
     );
     let publication_title = StoredValue::new(publication_title);
+    // Captured during setup; the handlers below read them after an await,
+    // where a context lookup silently returns None.
+    let library_cache = crate::cache::use_library_cache();
+    let detail_cache = crate::cache::use_detail_cache();
     let local_downloads = crate::use_local_downloads();
     let device_marks = crate::use_device_marks();
     let pull_queue = crate::use_pull_queue();
@@ -647,6 +654,9 @@ fn ChapterList(
                 offline::queue_marks(&mark_ids, read);
                 status.set(Some("Marked offline — will sync when back online".into()));
             }
+            // Unread counts on the library grid and the home shelves are
+            // exactly what this changed.
+            crate::cache::mark_publication_stale(library_cache, detail_cache);
             refresh.update(|n| *n += 1);
         });
     };

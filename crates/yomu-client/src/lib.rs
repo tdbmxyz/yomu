@@ -6,10 +6,11 @@ use uuid::Uuid;
 use yomu_domain::{
     AddPublicationRequest, ApiErrorBody, Backup, BrowseSort, BulkUnitsResponse, Category,
     DownloadUnitsRequest, DownloadsResponse, EventsResponse, FingerprintsResponse, HealthResponse,
-    Locator, MangaSummary, MarkUnitsRequest, MeResponse, PagesResponse, Publication,
-    PublicationDetailResponse, PublicationWithLocator, PushEventsRequest, PushEventsResponse,
-    ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo,
-    SourceSearchResults, UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
+    Locator, MangaSummary, MarkUnitsRequest, MeResponse, MediaTokenResponse, PagesResponse,
+    Publication, PublicationDetailResponse, PublicationWithLocator, PushEventsRequest,
+    PushEventsResponse, ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary,
+    SetLocatorRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
+    UpdatePublicationRequest, UpdatesResponse,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -43,6 +44,18 @@ const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub struct YomuClient {
     base: Url,
     http: reqwest::Client,
+    /// yomu session, presented as a bearer. `None` in single-account
+    /// mode and before sign-in.
+    ///
+    /// Held per client instance rather than shared, which is why callers
+    /// must build a client at call time in long-lived tasks: one cloned
+    /// before sign-in stays anonymous forever, and behind a proxy that
+    /// failure arrives as a transport error rather than a 401 — which
+    /// reads as "go offline", so signing in appears to do nothing.
+    token: Option<String>,
+    /// Short-lived credential appended to the two image URLs, which an
+    /// `<img>` loads without any header of ours.
+    media_token: Option<String>,
 }
 
 impl YomuClient {
@@ -57,11 +70,40 @@ impl YomuClient {
         Self {
             base,
             http: reqwest::Client::new(),
+            token: None,
+            media_token: None,
         }
+    }
+
+    /// The session this client presents. Chainable so a call site can
+    /// build one from the current token in a single expression.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// The credential appended to image URLs (see [`Self::cover_url`]).
+    pub fn with_media_token(mut self, token: Option<String>) -> Self {
+        self.media_token = token;
+        self
+    }
+
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
     }
 
     pub fn base(&self) -> &Url {
         &self.base
+    }
+
+    /// Append `?mt=` when we hold one. Only the two routes an `<img>`
+    /// loads need this; everything else sends a header.
+    fn signed_media_url(&self, url: Option<Url>) -> Option<Url> {
+        let mut url = url?;
+        if let Some(token) = &self.media_token {
+            url.query_pairs_mut().append_pair("mt", token);
+        }
+        Some(url)
     }
 
     pub async fn health(&self) -> Result<HealthResponse> {
@@ -85,6 +127,11 @@ impl YomuClient {
     pub async fn logout(&self) -> Result<()> {
         let req = self.http.post(self.url("api/v1/auth/logout")?);
         self.send_no_content(req).await
+    }
+
+    /// Mint the short-lived credential used by cover/page image URLs.
+    pub async fn media_token(&self) -> Result<MediaTokenResponse> {
+        self.get("api/v1/auth/media-token").await
     }
 
     // ---- sources ----
@@ -136,7 +183,7 @@ impl YomuClient {
     }
 
     pub async fn publication(&self, id: Uuid) -> Result<PublicationDetailResponse> {
-        self.get(&format!("api/v1/manga/{id}")).await
+        self.get(&format!("api/v1/publications/{id}")).await
     }
 
     pub async fn update_publication(
@@ -146,26 +193,32 @@ impl YomuClient {
     ) -> Result<Publication> {
         let req = self
             .http
-            .put(self.url(&format!("api/v1/manga/{id}"))?)
+            .put(self.url(&format!("api/v1/publications/{id}"))?)
             .json(req);
         self.send(req).await
     }
 
     pub async fn delete_publication(&self, id: Uuid) -> Result<()> {
-        let req = self.http.delete(self.url(&format!("api/v1/manga/{id}"))?);
+        let req = self
+            .http
+            .delete(self.url(&format!("api/v1/publications/{id}"))?);
         self.send_no_content(req).await
     }
 
     pub async fn refresh_publication(&self, id: Uuid) -> Result<RefreshResponse> {
         let req = self
             .http
-            .post(self.url(&format!("api/v1/manga/{id}/refresh"))?);
+            .post(self.url(&format!("api/v1/publications/{id}/refresh"))?);
         self.send(req).await
     }
 
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
-        self.base.join(&format!("api/v1/manga/{id}/cover")).ok()
+        self.signed_media_url(
+            self.base
+                .join(&format!("api/v1/publications/{id}/cover"))
+                .ok(),
+        )
     }
 
     // ---- updates feed ----
@@ -219,7 +272,8 @@ impl YomuClient {
     /// whose stored chapters were orphaned by a source re-key can match its
     /// own directories against these and recover them.
     pub async fn fingerprints(&self, id: Uuid) -> Result<FingerprintsResponse> {
-        self.get(&format!("api/v1/manga/{id}/fingerprints")).await
+        self.get(&format!("api/v1/publications/{id}/fingerprints"))
+            .await
     }
 
     /// Trigger a streamer rescan of the server's books folder.
@@ -247,19 +301,19 @@ impl YomuClient {
     pub async fn download_unit(&self, id: Uuid) -> Result<ReadingUnit> {
         let req = self
             .http
-            .post(self.url(&format!("api/v1/chapters/{id}/download"))?);
+            .post(self.url(&format!("api/v1/units/{id}/download"))?);
         self.send(req).await
     }
 
     /// Queue several units; the server's single download worker drains
     /// them with the source's politeness delay.
     pub async fn download_units(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
-        let req =
-            self.http
-                .post(self.url("api/v1/chapters/download")?)
-                .json(&DownloadUnitsRequest {
-                    unit_ids: ids.to_vec(),
-                });
+        let req = self
+            .http
+            .post(self.url("api/v1/units/download")?)
+            .json(&DownloadUnitsRequest {
+                unit_ids: ids.to_vec(),
+            });
         self.send(req).await
     }
 
@@ -267,7 +321,7 @@ impl YomuClient {
     pub async fn remove_downloads(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req = self
             .http
-            .post(self.url("api/v1/chapters/remove-downloads")?)
+            .post(self.url("api/v1/units/remove-downloads")?)
             .json(&DownloadUnitsRequest {
                 unit_ids: ids.to_vec(),
             });
@@ -277,7 +331,7 @@ impl YomuClient {
     pub async fn mark_units(&self, ids: &[Uuid], read: bool) -> Result<BulkUnitsResponse> {
         let req = self
             .http
-            .post(self.url("api/v1/chapters/mark")?)
+            .post(self.url("api/v1/units/mark")?)
             .json(&MarkUnitsRequest {
                 unit_ids: ids.to_vec(),
                 read,
@@ -286,15 +340,17 @@ impl YomuClient {
     }
 
     pub async fn unit_pages(&self, id: Uuid) -> Result<PagesResponse> {
-        self.get(&format!("api/v1/chapters/{id}/pages")).await
+        self.get(&format!("api/v1/units/{id}/pages")).await
     }
 
     /// Image URL of one page (for `<img src>`); served from disk or proxied
     /// live by the server.
     pub fn page_url(&self, unit_id: Uuid, page: u32) -> Option<Url> {
-        self.base
-            .join(&format!("api/v1/chapters/{unit_id}/pages/{page}"))
-            .ok()
+        self.signed_media_url(
+            self.base
+                .join(&format!("api/v1/units/{unit_id}/pages/{page}"))
+                .ok(),
+        )
     }
 
     /// Fetch a page image and discard the body — used to warm caches
@@ -315,7 +371,7 @@ impl YomuClient {
     ) -> Result<Locator> {
         let req = self
             .http
-            .put(self.url(&format!("api/v1/manga/{publication_id}/position"))?)
+            .put(self.url(&format!("api/v1/publications/{publication_id}/position"))?)
             .json(req);
         self.send(req).await
     }
@@ -368,6 +424,12 @@ impl YomuClient {
     }
 
     async fn check_status(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        // Every request funnels through here, so the session is attached
+        // in exactly one place.
+        let req = match &self.token {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        };
         let mut request = req
             .build()
             .map_err(|e| ClientError::Transport(e.to_string()))?;
@@ -393,5 +455,68 @@ impl YomuClient {
             });
         }
         Ok(resp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Url {
+        "http://localhost:4700/".parse().unwrap()
+    }
+
+    /// An `<img>` sends no header of ours, so these two URLs — and only
+    /// these two — carry the credential in the query instead.
+    #[test]
+    fn image_urls_carry_a_media_token_only_when_one_is_held() {
+        let id = Uuid::from_u128(1);
+
+        let plain = YomuClient::new(base());
+        assert_eq!(plain.cover_url(id).unwrap().query(), None);
+        assert_eq!(plain.page_url(id, 3).unwrap().query(), None);
+
+        let signed = YomuClient::new(base()).with_media_token(Some("mt-1".into()));
+        assert_eq!(signed.cover_url(id).unwrap().query(), Some("mt=mt-1"));
+        assert_eq!(signed.page_url(id, 3).unwrap().query(), Some("mt=mt-1"));
+        // The path is untouched; only the query gains anything.
+        assert_eq!(
+            signed.page_url(id, 3).unwrap().path(),
+            format!("/api/v1/units/{id}/pages/3")
+        );
+    }
+
+    /// The session is per client instance, which is what forces call
+    /// sites to build one at call time rather than clone one at startup.
+    #[test]
+    fn a_client_reports_the_session_it_was_built_with() {
+        assert_eq!(YomuClient::new(base()).token(), None);
+        assert_eq!(
+            YomuClient::new(base())
+                .with_token(Some("s-1".into()))
+                .token(),
+            Some("s-1")
+        );
+        assert_eq!(
+            YomuClient::new(base())
+                .with_token(Some("s-1".into()))
+                .with_token(None)
+                .token(),
+            None
+        );
+    }
+
+    /// A base with a subpath keeps it: the media signing must not drop
+    /// the deployment prefix while adding the query.
+    #[test]
+    fn a_subpath_deployment_keeps_its_prefix() {
+        let client = YomuClient::new("http://host/yomu".parse().unwrap())
+            .with_media_token(Some("mt-1".into()));
+        let url = client.cover_url(Uuid::from_u128(1)).unwrap();
+        assert!(
+            url.path().starts_with("/yomu/api/v1/publications/"),
+            "{url}"
+        );
+        assert_eq!(url.query(), Some("mt=mt-1"));
     }
 }

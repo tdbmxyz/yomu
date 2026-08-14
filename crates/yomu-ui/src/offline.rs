@@ -84,11 +84,21 @@ pub fn outbox_push(event: ProgressEvent) {
 /// harmless). A 4xx answer means the server understood and refused: those
 /// events can never succeed, so they are dropped too rather than poisoning
 /// every future flush.
-pub async fn flush_outbox(client: &yomu_client::YomuClient) {
+///
+/// The caches are passed in rather than looked up, for the same reason as
+/// [`flush_marks`]: this runs from a detached task in `App`.
+pub async fn flush_outbox(
+    client: &yomu_client::YomuClient,
+    library: crate::cache::LibraryCache,
+    detail: crate::cache::DetailCache,
+) {
     let events = outbox();
     if events.is_empty() {
         return;
     }
+    // Positions the server has not seen become read marks on arrival
+    // (auto_mark_read), so every cached unread count is now suspect.
+    crate::cache::mark_publication_stale(library, detail);
     let pushed: Vec<Uuid> = events.iter().map(|e| e.id).collect();
     let remove_pushed = || {
         let remaining: Vec<ProgressEvent> = outbox()
@@ -218,7 +228,10 @@ pub async fn save_chapter_with_progress(
         }
         if shell {
             let args = js_sys::Object::new();
-            let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
+            let url = client
+                .page_url(chapter_id, n)
+                .ok_or_else(|| format!("invalid page URL for {chapter_id}"))?;
+            let _ = js_sys::Reflect::set(&args, &"url".into(), &url.to_string().into());
             let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
             let _ = js_sys::Reflect::set(&args, &"page".into(), &(n as f64).into());
             shell_invoke("device_save_page", args)
@@ -449,7 +462,10 @@ pub async fn shell_save_cover(
     manga_id: Uuid,
 ) -> Result<(), String> {
     let args = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
+    let url = client
+        .cover_url(manga_id)
+        .ok_or_else(|| format!("invalid cover URL for {manga_id}"))?;
+    let _ = js_sys::Reflect::set(&args, &"url".into(), &url.to_string().into());
     let _ = js_sys::Reflect::set(&args, &"manga".into(), &manga_id.to_string().into());
     shell_invoke("device_save_cover", args).await?;
     Ok(())
@@ -681,7 +697,14 @@ pub fn queue_marks(ids: &[Uuid], read: bool) {
 
 /// Replay queued read marks; entries survive failed flushes. The mark
 /// endpoint is a set operation, so replays are idempotent.
-pub async fn flush_marks(client: &yomu_client::YomuClient) {
+///
+/// The caches are passed in rather than looked up: this runs from a
+/// detached task in `App`, where `use_context` has no reactive owner.
+pub async fn flush_marks(
+    client: &yomu_client::YomuClient,
+    library: crate::cache::LibraryCache,
+    detail: crate::cache::DetailCache,
+) {
     let marks = pending_marks();
     if marks.is_empty() {
         return;
@@ -702,6 +725,8 @@ pub async fn flush_marks(client: &yomu_client::YomuClient) {
             marks.remove(id);
         }
         write_json(MARKS_KEY, &marks);
+        // The server now disagrees with every cached unread count.
+        crate::cache::mark_publication_stale(library, detail);
         leptos::logging::log!("synced {} offline read mark(s)", flushed.len());
     }
 }
@@ -746,6 +771,22 @@ pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
                 .flatten()
         })
         .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// Drop responses tied to the signed-in identity. A reload clears the
+/// in-memory caches; these are the persistent copies that must not cross from
+/// one account to another.
+pub(crate) fn clear_user_cache() {
+    let Some(storage) = storage() else {
+        return;
+    };
+    let keys: Vec<String> = (0..storage.length().unwrap_or(0))
+        .filter_map(|n| storage.key(n).ok().flatten())
+        .filter(|key| key.starts_with(CACHE_KEY_PREFIX))
+        .collect();
+    for key in keys {
+        let _ = storage.remove_item(&key);
+    }
 }
 
 /// Connectivity-aware last-known-good read; the one data path every page

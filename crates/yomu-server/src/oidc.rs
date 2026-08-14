@@ -48,7 +48,7 @@ struct TokenResponse {
 }
 
 /// Claims yomu cares about, via the userinfo endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct UserInfo {
     pub sub: String,
     #[serde(default)]
@@ -58,14 +58,71 @@ pub struct UserInfo {
 }
 
 impl OidcRuntime {
+    /// Finish a sign-in an *app* began: the shell ran the PKCE dance in
+    /// the system browser and hands over the authorization code.
+    ///
+    /// The exchange happens here, as `app_client_id`, which is what makes
+    /// the audience safe by construction: a code issued to any other
+    /// application on this provider fails at the token endpoint, so there
+    /// is no check to forget. `redirect_uri` is yomu's own constant, not
+    /// a value the caller supplies — taking it from the request would let
+    /// a caller steer the exchange.
+    pub async fn redeem_app_code(
+        &self,
+        app_client_id: &str,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<UserInfo, String> {
+        let discovery = self.discovery().await?;
+        let token: TokenResponse = self
+            .http
+            .post(discovery.token_endpoint.clone())
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("client_id", app_client_id),
+                ("code_verifier", verifier),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("token exchange: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("token exchange: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("token exchange response: {e}"))?;
+        self.userinfo(&token.access_token).await
+    }
+
+    async fn userinfo(&self, access_token: &str) -> Result<UserInfo, String> {
+        let discovery = self.discovery().await?;
+        self.http
+            .get(discovery.userinfo_endpoint.clone())
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("userinfo: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("userinfo: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("userinfo response: {e}"))
+    }
+
     /// `None` when `[auth]` has no issuer — single-account mode.
     pub fn from_config(config: &AuthConfig) -> anyhow::Result<Option<Self>> {
         let Some(issuer) = &config.issuer else {
             return Ok(None);
         };
-        if config.client_id.is_empty() || config.client_secret.is_empty() {
-            anyhow::bail!("[auth] issuer is set but client_id/client_secret are empty");
+        if config.client_id.is_empty() {
+            anyhow::bail!("[auth] issuer is set but client_id is empty");
         }
+        // No secret is the *public client* case, and the one to prefer:
+        // `nix/module.nix` renders settings into the world-readable nix
+        // store, so a secret configured there is published to every user
+        // on the host. PKCE is what binds the code either way.
         Ok(Some(Self {
             issuer: issuer.clone(),
             client_id: config.client_id.clone(),
@@ -153,17 +210,21 @@ impl OidcRuntime {
         };
 
         let discovery = self.discovery().await?;
+        // A public client sends no secret; PKCE is what binds the code.
+        let mut form = vec![
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", self.client_id.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ];
+        if !self.client_secret.is_empty() {
+            form.push(("client_secret", self.client_secret.as_str()));
+        }
         let token: TokenResponse = self
             .http
             .post(discovery.token_endpoint.clone())
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("client_id", &self.client_id),
-                ("client_secret", &self.client_secret),
-                ("code_verifier", &verifier),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|e| format!("token exchange: {e}"))?

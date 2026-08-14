@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: core APIs + OS notifications",
+  "description": "Main window: core APIs, authentication storage/deep links, and OS notifications",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "store:default",
+    "deep-link:default"
+  ]
 }
