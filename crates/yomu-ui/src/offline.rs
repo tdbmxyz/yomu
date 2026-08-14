@@ -228,7 +228,10 @@ pub async fn save_chapter_with_progress(
         }
         if shell {
             let args = js_sys::Object::new();
-            let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
+            let url = client
+                .page_url(chapter_id, n)
+                .ok_or_else(|| format!("invalid page URL for {chapter_id}"))?;
+            let _ = js_sys::Reflect::set(&args, &"url".into(), &url.to_string().into());
             let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
             let _ = js_sys::Reflect::set(&args, &"page".into(), &(n as f64).into());
             shell_invoke("device_save_page", args)
@@ -459,7 +462,10 @@ pub async fn shell_save_cover(
     manga_id: Uuid,
 ) -> Result<(), String> {
     let args = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&args, &"base".into(), &client.base().to_string().into());
+    let url = client
+        .cover_url(manga_id)
+        .ok_or_else(|| format!("invalid cover URL for {manga_id}"))?;
+    let _ = js_sys::Reflect::set(&args, &"url".into(), &url.to_string().into());
     let _ = js_sys::Reflect::set(&args, &"manga".into(), &manga_id.to_string().into());
     shell_invoke("device_save_cover", args).await?;
     Ok(())
@@ -765,6 +771,22 @@ pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
                 .flatten()
         })
         .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// Drop responses tied to the signed-in identity. A reload clears the
+/// in-memory caches; these are the persistent copies that must not cross from
+/// one account to another.
+pub(crate) fn clear_user_cache() {
+    let Some(storage) = storage() else {
+        return;
+    };
+    let keys: Vec<String> = (0..storage.length().unwrap_or(0))
+        .filter_map(|n| storage.key(n).ok().flatten())
+        .filter(|key| key.starts_with(CACHE_KEY_PREFIX))
+        .collect();
+    for key in keys {
+        let _ = storage.remove_item(&key);
+    }
 }
 
 /// Connectivity-aware last-known-good read; the one data path every page

@@ -22,7 +22,13 @@ const POLL_MINUTES: u32 = 15;
 pub fn start(conn: RwSignal<Connectivity>, client: YomuClient) {
     // Tell the Android background worker where the server is (and keep
     // it scheduled); a no-op everywhere else.
-    bridge_call("configureUpdates", &[client.base().as_str().into()]);
+    bridge_call(
+        "configureUpdates",
+        &[
+            client.base().as_str().into(),
+            client.token().unwrap_or("").into(),
+        ],
+    );
 
     let booted = StoredValue::new(false);
     let poll_client = client.clone();

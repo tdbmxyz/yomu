@@ -13,6 +13,8 @@
 //! directory; the reader loads them back through the `yomudev` custom
 //! protocol (base URL injected as `window.YOMU_DEVICE_BASE`).
 
+pub mod auth;
+
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
@@ -32,6 +34,56 @@ fn dirs_config() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+}
+
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only http(s) links open externally".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = url;
+        Err("use the Android URL bridge".into())
+    }
+}
+
+fn handle_auth_callback<R: tauri::Runtime>(app: &tauri::AppHandle<R>, raw: &str) {
+    let app = app.clone();
+    let raw = raw.to_string();
+    tauri::async_runtime::spawn(async move {
+        let Some((code, state)) = auth::parse_callback(&raw) else {
+            return;
+        };
+        if let Err(err) = auth::finish(&app, &code, &state).await {
+            eprintln!("yomu: sign-in callback failed: {err}");
+        }
+    });
 }
 
 // ---- device chapter storage ----
@@ -94,15 +146,12 @@ fn device_begin_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), St
 async fn device_save_page(
     app: tauri::AppHandle,
     http: State<'_, Http>,
-    base: String,
+    url: String,
     chapter: String,
     page: u32,
 ) -> Result<(), String> {
     checked_id(&chapter)?;
-    let base = url::Url::parse(&base).map_err(|e| e.to_string())?;
-    let url = base
-        .join(&format!("api/v1/chapters/{chapter}/pages/{page}"))
-        .map_err(|e| e.to_string())?;
+    let url = url::Url::parse(&url).map_err(|e| e.to_string())?;
     let resp = http.0.get(url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("page {page}: HTTP {}", resp.status()));
@@ -147,17 +196,14 @@ fn covers_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 async fn device_save_cover(
     app: tauri::AppHandle,
     http: State<'_, Http>,
-    base: String,
+    url: String,
     manga: String,
 ) -> Result<(), String> {
     checked_id(&manga)?;
     if device_cover_file(&app, &manga).is_some() {
         return Ok(());
     }
-    let base = url::Url::parse(&base).map_err(|e| e.to_string())?;
-    let url = base
-        .join(&format!("api/v1/manga/{manga}/cover"))
-        .map_err(|e| e.to_string())?;
+    let url = url::Url::parse(&url).map_err(|e| e.to_string())?;
     let resp = http.0.get(url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("cover: HTTP {}", resp.status()));
@@ -309,10 +355,24 @@ pub fn run() {
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        for arg in argv {
+            handle_auth_callback(app, &arg);
+        }
+    }));
+
+    builder
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(Http(reqwest::Client::new()))
         .invoke_handler(tauri::generate_handler![
+            open_external,
+            auth::auth_start,
+            auth::auth_status,
+            auth::auth_sign_out,
             device_begin_chapter,
             device_save_page,
             device_finish_chapter,
@@ -373,6 +433,25 @@ pub fn run() {
                     window.initialization_script(format!("window.YOMU_API_BASE = '{escaped}';"));
             }
             window.build()?;
+
+            use tauri_plugin_deep_link::DeepLinkExt;
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    handle_auth_callback(&handle, url.as_str());
+                }
+            });
+            match app.deep_link().get_current() {
+                Ok(Some(urls)) => {
+                    for url in urls {
+                        handle_auth_callback(app.handle(), url.as_str());
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    auth::record_status(app.handle(), &format!("deep link unavailable: {err}"))
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

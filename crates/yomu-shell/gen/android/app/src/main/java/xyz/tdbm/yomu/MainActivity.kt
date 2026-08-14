@@ -1,5 +1,7 @@
 package xyz.tdbm.yomu
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -66,10 +68,26 @@ class MainActivity : TauriActivity() {
     // share one cursor.
     // JS-interface calls arrive on a worker thread, hence runOnUiThread.
     inner class ImmersiveBridge {
+        // OIDC and ordinary external links belong in the system browser, not
+        // in the app WebView (whose cookie jar cannot satisfy forward-auth).
         @JavascriptInterface
-        fun configureUpdates(base: String) {
+        fun openUrl(url: String) {
+            runOnUiThread {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (_: Exception) {
+                    // No system handler: the UI's auth status remains visible.
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun configureUpdates(base: String, token: String) {
             val prefs = getSharedPreferences(UpdatesWorker.PREFS, MODE_PRIVATE)
-            prefs.edit().putString(UpdatesWorker.KEY_BASE, base).apply()
+            prefs.edit()
+                .putString(UpdatesWorker.KEY_BASE, base)
+                .putString(UpdatesWorker.KEY_TOKEN, token)
+                .apply()
             if (prefs.getString(UpdatesWorker.KEY_SEEN, null).isNullOrEmpty()) {
                 // First run: announce from now, not the feed's backlog.
                 prefs.edit().putString(UpdatesWorker.KEY_SEEN, UpdatesWorker.nowRfc3339()).apply()

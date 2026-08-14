@@ -9,13 +9,13 @@ it is a bug that shipped, reached a real phone, and took a round trip with the
 user to diagnose. They are not hypothetical, and four of the six are Leptos or
 Android behaviours that would recur identically in yomu.
 
-**yomu's position (measured 2026-07-30):** the server half already exists —
-`yomu-server/src/oidc.rs`, `auth.rs` with opaque sessions (sha256 at rest,
-`Authorization: Bearer` for native clients or an HttpOnly cookie for browsers),
-a shared-account fallback when `[auth]` is absent, and a CORS layer with an
-explicit `allowed_origins`. What is missing is everything the app does:
-obtaining a token at all, the gate, and the offline/session rules. So sections
-1, 4 and 9 are largely done for you; 2, 3, 5, 6, 7, 8 are the work.
+**yomu's position:** the server half lives in `yomu-server/src/oidc.rs` and
+`auth.rs`; the native half lives in `yomu-shell/src/auth.rs` and
+`yomu-ui/src/auth.rs`. Yomu exchanges an authorization code + PKCE verifier
+for its own opaque session (sha256 at rest), which native clients present as a
+bearer while browsers use forward-auth/HttpOnly cookies. The implementation
+follows the traps and rollout rules below; keep this document as the checklist
+when changing it.
 
 ---
 
@@ -257,10 +257,10 @@ you can roll back by deleting two routers.
 
 ## For yomu specifically
 
-- **The server model is already chosen** (§1: exchange for a yomu session), so
-  skip JWKS/refresh entirely. What's needed is the endpoint that converts a
-  completed OIDC login into a session token the *app* can hold, plus the shell
-  work in §5–§6 to obtain it.
+- **The server model is already chosen and implemented** (§1: exchange an
+  authorization code + PKCE verifier for a yomu session), so there is no
+  JWKS/refresh dance in the app. The shell stores the resulting opaque session
+  and mirrors it into the WebView for `YomuClient`.
 - **`allowed_origins` already exists** in the CORS layer — add the shell
   origins (`tauri://localhost`, `http://tauri.localhost`) there rather than
   reaching for a permissive layer.
