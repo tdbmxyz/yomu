@@ -199,7 +199,7 @@ pub fn Library() -> impl IntoView {
                                             class="manga-card"
                                             class:missing=entry.publication.missing_since.is_some()
                                             class:unsupported=(entry.publication.unsupported_count > 0)
-                                            href=format!("/manga/{}", entry.publication.id)
+                                            href=format!("/publications/{}", entry.publication.id)
                                         >
                                             <span class="cover-wrap">
                                                 <crate::cover::Cover manga_id=entry.publication.id/>

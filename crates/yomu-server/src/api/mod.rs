@@ -44,33 +44,36 @@ pub fn router(state: AppState) -> Router {
         .route("/categories", get(categories::list))
         .route("/categories/{id}", axum::routing::put(categories::update))
         .route(
-            "/manga/{id}",
+            "/publications/{id}",
             get(library::detail)
                 .put(library::update)
                 .delete(library::delete),
         )
-        .route("/manga/{id}/refresh", axum::routing::post(library::refresh))
-        .route("/manga/{id}/cover", get(library::cover))
-        .route("/manga/{id}/fingerprints", get(fingerprints::list))
         .route(
-            "/manga/{id}/position",
+            "/publications/{id}/refresh",
+            axum::routing::post(library::refresh),
+        )
+        .route("/publications/{id}/cover", get(library::cover))
+        .route("/publications/{id}/fingerprints", get(fingerprints::list))
+        .route(
+            "/publications/{id}/position",
             axum::routing::put(progress::set_position),
         )
         .route(
-            "/chapters/{id}/download",
+            "/units/{id}/download",
             axum::routing::post(chapters::download),
         )
         .route(
-            "/chapters/download",
+            "/units/download",
             axum::routing::post(chapters::download_many),
         )
         .route(
-            "/chapters/remove-downloads",
+            "/units/remove-downloads",
             axum::routing::post(chapters::remove_downloads),
         )
-        .route("/chapters/mark", axum::routing::post(chapters::mark))
-        .route("/chapters/{id}/pages", get(chapters::pages))
-        .route("/chapters/{id}/pages/{n}", get(chapters::page_image))
+        .route("/units/mark", axum::routing::post(chapters::mark))
+        .route("/units/{id}/pages", get(chapters::pages))
+        .route("/units/{id}/pages/{n}", get(chapters::page_image))
         .route(
             "/progress/events",
             get(progress::events).post(progress::push_events),
@@ -290,19 +293,19 @@ mod tests {
             ("POST", "/api/v1/library/rescan".into()),
             ("GET", "/api/v1/categories".into()),
             ("PUT", "/api/v1/categories/reading".into()),
-            ("GET", format!("/api/v1/manga/{ID}")),
-            ("PUT", format!("/api/v1/manga/{ID}")),
-            ("DELETE", format!("/api/v1/manga/{ID}")),
-            ("POST", format!("/api/v1/manga/{ID}/refresh")),
-            ("GET", format!("/api/v1/manga/{ID}/cover")),
-            ("GET", format!("/api/v1/manga/{ID}/fingerprints")),
-            ("PUT", format!("/api/v1/manga/{ID}/position")),
-            ("GET", format!("/api/v1/chapters/{ID}/pages")),
-            ("GET", format!("/api/v1/chapters/{ID}/pages/0")),
-            ("POST", format!("/api/v1/chapters/{ID}/download")),
-            ("POST", "/api/v1/chapters/download".into()),
-            ("POST", "/api/v1/chapters/remove-downloads".into()),
-            ("POST", "/api/v1/chapters/mark".into()),
+            ("GET", format!("/api/v1/publications/{ID}")),
+            ("PUT", format!("/api/v1/publications/{ID}")),
+            ("DELETE", format!("/api/v1/publications/{ID}")),
+            ("POST", format!("/api/v1/publications/{ID}/refresh")),
+            ("GET", format!("/api/v1/publications/{ID}/cover")),
+            ("GET", format!("/api/v1/publications/{ID}/fingerprints")),
+            ("PUT", format!("/api/v1/publications/{ID}/position")),
+            ("GET", format!("/api/v1/units/{ID}/pages")),
+            ("GET", format!("/api/v1/units/{ID}/pages/0")),
+            ("POST", format!("/api/v1/units/{ID}/download")),
+            ("POST", "/api/v1/units/download".into()),
+            ("POST", "/api/v1/units/remove-downloads".into()),
+            ("POST", "/api/v1/units/mark".into()),
             ("GET", "/api/v1/sources".into()),
             ("GET", "/api/v1/sources/x/search".into()),
             ("GET", "/api/v1/sources/x/browse".into()),
@@ -337,7 +340,7 @@ mod tests {
         const ID: &str = "00000000-0000-0000-0000-000000000001";
         for query in ["mt=", "mt=nonsense", "mt=a.b.c"] {
             assert_eq!(
-                status_of("GET", &format!("/api/v1/manga/{ID}/cover?{query}")).await,
+                status_of("GET", &format!("/api/v1/publications/{ID}/cover?{query}")).await,
                 StatusCode::UNAUTHORIZED,
                 "cover opened with {query}"
             );
@@ -493,11 +496,11 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            status_of("POST", "/api/v1/chapters/download").await,
+            status_of("POST", "/api/v1/units/download").await,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            status_of("POST", "/api/v1/chapters/remove-downloads").await,
+            status_of("POST", "/api/v1/units/remove-downloads").await,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
@@ -1032,7 +1035,7 @@ mod tests {
             // A uuid's groups are 8/4/4/4/12 hex and the classifier now
             // accepts runs from 8 up, so this reads as an asset. Harmless:
             // it is not a file, so the shell answers it.
-            "/manga/019f4921-3946-7c20-9a67-d84d46072fe6",
+            "/publications/019f4921-3946-7c20-9a67-d84d46072fe6",
             "/library",
         ] {
             assert_eq!(
@@ -1316,7 +1319,10 @@ mod tests {
         }
 
         let req = Request::builder()
-            .uri(format!("/api/v1/manga/{}/fingerprints", publication.id))
+            .uri(format!(
+                "/api/v1/publications/{}/fingerprints",
+                publication.id
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = super::router(state).oneshot(req).await.unwrap();
@@ -1355,14 +1361,14 @@ mod tests {
     /// A publication that does not exist is not a publication with nothing
     /// downloaded. Answering both with an empty list has a recovery client
     /// report zero matches for a library entry that is simply gone, so this
-    /// 404s like `GET /manga/{id}` next door.
+    /// 404s like `GET /publications/{id}` next door.
     #[tokio::test]
     async fn fingerprints_404_for_an_unknown_publication() {
         let db = Db::in_memory().await.unwrap();
         let state = AppState::new(Config::default(), db, Registry::default(), None);
         let req = Request::builder()
             .uri(format!(
-                "/api/v1/manga/{}/fingerprints",
+                "/api/v1/publications/{}/fingerprints",
                 uuid::Uuid::now_v7()
             ))
             .body(Body::empty())
@@ -1390,8 +1396,12 @@ mod tests {
 
         for uri in [
             // A route a later version adds, called against this one.
-            "/api/v1/manga/019f4921-3946-7c20-9a67-d84d46072fe6/fingerprints/extra",
+            "/api/v1/publications/019f4921-3946-7c20-9a67-d84d46072fe6/fingerprints/extra",
             "/api/v1/not-a-route",
+            // The 1.x conceptual names were deliberately removed in 2.x;
+            // they are not aliases that can silently live forever.
+            "/api/v1/manga/019f4921-3946-7c20-9a67-d84d46072fe6",
+            "/api/v1/chapters/019f4921-3946-7c20-9a67-d84d46072fe6/pages",
             // A version prefix that does not exist at all.
             "/api/v2/health",
             "/api/health",

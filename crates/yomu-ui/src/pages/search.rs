@@ -239,7 +239,7 @@ fn SummaryCard(
             <span class="browse-actions">
                 {match in_library {
                     Some(id) => view! {
-                        <a class="button" href=format!("/manga/{id}")>"open"</a>
+                        <a class="button" href=format!("/publications/{id}")>"open"</a>
                     }
                         .into_any(),
                     None => view! {

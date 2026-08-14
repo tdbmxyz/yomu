@@ -331,7 +331,7 @@ pub(super) fn paged_stage(
                         <span>"No more chapters this way"</span>
                         <a
                             class="button"
-                            href=format!("/manga/{manga_id}")
+                            href=format!("/publications/{manga_id}")
                         >
                             "Back to the chapter list"
                         </a>

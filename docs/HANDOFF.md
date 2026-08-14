@@ -33,7 +33,7 @@ amended: sync paging is by server `seq`, not event id).
   mid-download, per-source politeness delay (kept even after transport
   errors). Live reading proxies pages without storing; the page-URL cache
   has a 30-min TTL + bound and re-resolves once on image failure (expiring
-  CDN URLs). One endpoint serves both (`/chapters/{id}/pages/{n}`);
+  CDN URLs). One endpoint serves both (`/units/{id}/pages/{n}`);
   downloaded-but-missing directories fall back to the live path.
 - **Updates**: periodic re-check (default 6h, min 60s) + manual refresh; new
   chapters of auto-download manga are queued automatically. Duplicate

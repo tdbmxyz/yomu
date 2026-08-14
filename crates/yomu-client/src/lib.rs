@@ -183,7 +183,7 @@ impl YomuClient {
     }
 
     pub async fn publication(&self, id: Uuid) -> Result<PublicationDetailResponse> {
-        self.get(&format!("api/v1/manga/{id}")).await
+        self.get(&format!("api/v1/publications/{id}")).await
     }
 
     pub async fn update_publication(
@@ -193,26 +193,32 @@ impl YomuClient {
     ) -> Result<Publication> {
         let req = self
             .http
-            .put(self.url(&format!("api/v1/manga/{id}"))?)
+            .put(self.url(&format!("api/v1/publications/{id}"))?)
             .json(req);
         self.send(req).await
     }
 
     pub async fn delete_publication(&self, id: Uuid) -> Result<()> {
-        let req = self.http.delete(self.url(&format!("api/v1/manga/{id}"))?);
+        let req = self
+            .http
+            .delete(self.url(&format!("api/v1/publications/{id}"))?);
         self.send_no_content(req).await
     }
 
     pub async fn refresh_publication(&self, id: Uuid) -> Result<RefreshResponse> {
         let req = self
             .http
-            .post(self.url(&format!("api/v1/manga/{id}/refresh"))?);
+            .post(self.url(&format!("api/v1/publications/{id}/refresh"))?);
         self.send(req).await
     }
 
     /// Server-cached cover image URL (for `<img src>`).
     pub fn cover_url(&self, id: Uuid) -> Option<Url> {
-        self.signed_media_url(self.base.join(&format!("api/v1/manga/{id}/cover")).ok())
+        self.signed_media_url(
+            self.base
+                .join(&format!("api/v1/publications/{id}/cover"))
+                .ok(),
+        )
     }
 
     // ---- updates feed ----
@@ -266,7 +272,8 @@ impl YomuClient {
     /// whose stored chapters were orphaned by a source re-key can match its
     /// own directories against these and recover them.
     pub async fn fingerprints(&self, id: Uuid) -> Result<FingerprintsResponse> {
-        self.get(&format!("api/v1/manga/{id}/fingerprints")).await
+        self.get(&format!("api/v1/publications/{id}/fingerprints"))
+            .await
     }
 
     /// Trigger a streamer rescan of the server's books folder.
@@ -294,19 +301,19 @@ impl YomuClient {
     pub async fn download_unit(&self, id: Uuid) -> Result<ReadingUnit> {
         let req = self
             .http
-            .post(self.url(&format!("api/v1/chapters/{id}/download"))?);
+            .post(self.url(&format!("api/v1/units/{id}/download"))?);
         self.send(req).await
     }
 
     /// Queue several units; the server's single download worker drains
     /// them with the source's politeness delay.
     pub async fn download_units(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
-        let req =
-            self.http
-                .post(self.url("api/v1/chapters/download")?)
-                .json(&DownloadUnitsRequest {
-                    unit_ids: ids.to_vec(),
-                });
+        let req = self
+            .http
+            .post(self.url("api/v1/units/download")?)
+            .json(&DownloadUnitsRequest {
+                unit_ids: ids.to_vec(),
+            });
         self.send(req).await
     }
 
@@ -314,7 +321,7 @@ impl YomuClient {
     pub async fn remove_downloads(&self, ids: &[Uuid]) -> Result<BulkUnitsResponse> {
         let req = self
             .http
-            .post(self.url("api/v1/chapters/remove-downloads")?)
+            .post(self.url("api/v1/units/remove-downloads")?)
             .json(&DownloadUnitsRequest {
                 unit_ids: ids.to_vec(),
             });
@@ -324,7 +331,7 @@ impl YomuClient {
     pub async fn mark_units(&self, ids: &[Uuid], read: bool) -> Result<BulkUnitsResponse> {
         let req = self
             .http
-            .post(self.url("api/v1/chapters/mark")?)
+            .post(self.url("api/v1/units/mark")?)
             .json(&MarkUnitsRequest {
                 unit_ids: ids.to_vec(),
                 read,
@@ -333,7 +340,7 @@ impl YomuClient {
     }
 
     pub async fn unit_pages(&self, id: Uuid) -> Result<PagesResponse> {
-        self.get(&format!("api/v1/chapters/{id}/pages")).await
+        self.get(&format!("api/v1/units/{id}/pages")).await
     }
 
     /// Image URL of one page (for `<img src>`); served from disk or proxied
@@ -341,7 +348,7 @@ impl YomuClient {
     pub fn page_url(&self, unit_id: Uuid, page: u32) -> Option<Url> {
         self.signed_media_url(
             self.base
-                .join(&format!("api/v1/chapters/{unit_id}/pages/{page}"))
+                .join(&format!("api/v1/units/{unit_id}/pages/{page}"))
                 .ok(),
         )
     }
@@ -364,7 +371,7 @@ impl YomuClient {
     ) -> Result<Locator> {
         let req = self
             .http
-            .put(self.url(&format!("api/v1/manga/{publication_id}/position"))?)
+            .put(self.url(&format!("api/v1/publications/{publication_id}/position"))?)
             .json(req);
         self.send(req).await
     }
@@ -475,7 +482,7 @@ mod tests {
         // The path is untouched; only the query gains anything.
         assert_eq!(
             signed.page_url(id, 3).unwrap().path(),
-            format!("/api/v1/chapters/{id}/pages/3")
+            format!("/api/v1/units/{id}/pages/3")
         );
     }
 
@@ -506,7 +513,10 @@ mod tests {
         let client = YomuClient::new("http://host/yomu".parse().unwrap())
             .with_media_token(Some("mt-1".into()));
         let url = client.cover_url(Uuid::from_u128(1)).unwrap();
-        assert!(url.path().starts_with("/yomu/api/v1/manga/"), "{url}");
+        assert!(
+            url.path().starts_with("/yomu/api/v1/publications/"),
+            "{url}"
+        );
         assert_eq!(url.query(), Some("mt=mt-1"));
     }
 }

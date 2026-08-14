@@ -165,7 +165,7 @@ mod tests {
     fn non_assets_may_look_fingerprinted_and_it_does_not_matter() {
         assert!(fingerprinted("/sources/deadbeefdeadbeef"));
         assert!(fingerprinted(
-            "/api/v1/manga/019f4921-3946-7c20-9a67-d84d46072fe6"
+            "/api/v1/publications/019f4921-3946-7c20-9a67-d84d46072fe6"
         ));
     }
 

@@ -52,7 +52,7 @@ pub fn Reader() -> impl IntoView {
 
 #[component]
 fn ReaderInner() -> impl IntoView {
-    let (Some(manga_id), Some(chapter_id)) = (param_uuid("manga"), param_uuid("chapter")) else {
+    let (Some(manga_id), Some(chapter_id)) = (param_uuid("publication"), param_uuid("unit")) else {
         return view! { <NotFound/> }.into_any();
     };
 
@@ -481,7 +481,7 @@ fn ReaderInner() -> impl IntoView {
                 ></div>
             </div>
             <div class="reader-chrome reader-top">
-                <a href=format!("/manga/{manga_id}")>"← back"</a>
+                <a href=format!("/publications/{manga_id}")>"← back"</a>
                 <span class="reader-title">{chapter_title}</span>
             </div>
 
@@ -504,7 +504,7 @@ fn ReaderInner() -> impl IntoView {
                                     "couldn't be reached (" {err.to_string()} ")."
                                 </p>
                                 <p class="reader-unavailable-actions">
-                                    <a class="button" href=format!("/manga/{manga_id}")>
+                                    <a class="button" href=format!("/publications/{manga_id}")>
                                         "Back to the chapter list"
                                     </a>
                                     <a class="button primary" href="/more">

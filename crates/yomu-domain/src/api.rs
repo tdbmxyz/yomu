@@ -185,7 +185,7 @@ pub struct SourceSearchResults {
     pub error: Option<String>,
 }
 
-/// Queue several units for server download (`POST /chapters/download`).
+/// Queue several units for server download (`POST /units/download`).
 /// The download worker drains them one by one with the source's politeness
 /// delay, so a large batch is slow by design, not hammering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,7 +195,7 @@ pub struct DownloadUnitsRequest {
 }
 
 /// Mark units read or unread for the current user
-/// (`POST /chapters/mark`).
+/// (`POST /units/mark`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkUnitsRequest {
     #[serde(rename = "chapter_ids")]
@@ -274,7 +274,7 @@ pub struct PagesResponse {
 
 /// One downloaded unit as content, not as an id: what a client compares a
 /// directory it can no longer name against. Additive to the frozen 1.x wire —
-/// it travels one route, `GET /manga/{id}/fingerprints`.
+/// it travels one route, `GET /publications/{id}/fingerprints`.
 ///
 /// Both ends of the chapter are hashed, not just the first page. Chapters of
 /// the same length routinely share a first page — a series' credits page, a
