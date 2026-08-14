@@ -148,18 +148,18 @@ files" action in More, next to Backup).
   publication is created and the missing one stays flagged.
 
 **Serving pages.** Comics keep the existing
-`GET /chapters/{id}/pages` + `/pages/{n}` endpoints. For LocalFile
+`GET /units/{id}/pages` + `/pages/{n}` endpoints. For LocalFile
 units the handler resolves images from disk through the streamer instead
 of proxying a scraper source; response shape identical. Device-download
 (Tauri offline save) works unchanged since it consumes those endpoints.
 
-**Covers.** `GET /manga/{id}/cover` currently falls back to
+**Covers.** `GET /publications/{id}/cover` currently falls back to
 `source.image(cover_url)` through the source registry when the cover
 isn't cached. For LocalFile publications that fallback resolves through
 the streamer (cover file or first page from disk) instead — the
 registry no longer knows "local".
 
-**Per-publication refresh.** `POST /manga/{id}/refresh` (the Refresh
+**Per-publication refresh.** `POST /publications/{id}/refresh` (the Refresh
 button on the publication page) calls `refresh_manga` through the
 source registry today. For LocalFile origin it instead runs a targeted
 streamer rescan of that publication's path and returns the new-unit
@@ -219,15 +219,15 @@ Progress journal data is untouched; UUIDs never change.
   about text).
 - **Reader:** unchanged.
 
-## Compatibility (frozen wire, renamed internals)
+## Compatibility (frozen JSON, canonical routes)
 
-The full rename applies to Rust types, modules, and DB schema. The HTTP
-surface is **frozen at 1.x names** so deployed APKs keep working:
+The full rename applies to Rust types, modules, DB schema, and route paths.
+Because there are no third-party clients, 2.x removes the temporary 1.x route
+names instead of maintaining aliases: `/api/v1/publications/{id}` and
+`/api/v1/units/{id}/pages` are canonical, as are the UI's
+`/publications/:id` and `/read/:publication/:unit` routes.
 
-- Route paths unchanged: `/api/v1/manga/{id}`, `/chapters/{id}/pages`,
-  `/chapters/download`, etc. UI URLs unchanged (`/manga/:id`,
-  `/read/:manga/:chapter`).
-- JSON field names unchanged via explicit `#[serde(rename)]`:
+- JSON field names remain unchanged via explicit `#[serde(rename)]`:
   `manga_id`, `chapter_id`, `chapters`, … on both serialization and
   deserialization. New fields (`kind`, `origin`, `missing_since`) are
   additive; old clients ignore them.

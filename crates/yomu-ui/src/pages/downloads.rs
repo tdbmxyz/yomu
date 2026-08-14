@@ -438,7 +438,7 @@ fn WaitingRow(it: crate::PullItem, pull: crate::PullQueue) -> impl IntoView {
     view! {
         <li class="download-row">
             <div class="download-row-head">
-                <a class="download-title" href=format!("/manga/{}", it.manga_id)>
+                <a class="download-title" href=format!("/publications/{}", it.manga_id)>
                     <strong>{it.manga_title}</strong>
                     " · " {it.chapter_title}
                 </a>
@@ -475,7 +475,7 @@ fn QueueRow(
     view! {
         <li class="download-row" class:download-unavailable=is_unavailable>
             <div class="download-row-head">
-                <a class="download-title" href=format!("/manga/{}", entry.publication_id)>
+                <a class="download-title" href=format!("/publications/{}", entry.publication_id)>
                     <strong>{entry.publication_title}</strong>
                     " · " {entry.unit_title}
                 </a>
@@ -528,7 +528,7 @@ fn LocalRow(
     view! {
         <li class="download-row" class:dl-failed=d.failed>
             <div class="download-row-head">
-                <a class="download-title" href=format!("/manga/{}", d.manga_id)>
+                <a class="download-title" href=format!("/publications/{}", d.manga_id)>
                     <strong>{d.manga_title}</strong>
                     " · " {d.chapter_title}
                 </a>

@@ -64,7 +64,7 @@ resolves.
 One endpoint serves both modes, so clients don't care:
 
 ```
-GET /api/v1/chapters/{id}/pages/{n}
+GET /api/v1/units/{id}/pages/{n}
     downloaded → file from data_dir/<manga>/<chapter>/000n.ext
                  (directory vanished → falls back to the live path)
     otherwise  → resolved live from the source and proxied (nothing stored;

@@ -302,8 +302,8 @@ pub fn App(config: AppConfig) -> impl IntoView {
                         <Route path=path!("/downloads") view=pages::Downloads/>
                         <Route path=path!("/more") view=pages::More/>
                         <Route path=path!("/about") view=pages::About/>
-                        <Route path=path!("/manga/:id") view=pages::MangaPage/>
-                        <Route path=path!("/read/:manga/:chapter") view=pages::Reader/>
+                        <Route path=path!("/publications/:id") view=pages::MangaPage/>
+                        <Route path=path!("/read/:publication/:unit") view=pages::Reader/>
                     </Routes>
                 </main>
                 // Phone navigation: the topbar collapses to this fixed tab

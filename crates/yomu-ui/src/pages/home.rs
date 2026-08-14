@@ -202,7 +202,7 @@ fn ShelfCard(
     let id = entry.publication.id;
     let href = match href_chapter {
         Some((chapter, page)) => format!("/read/{id}/{chapter}?page={page}"),
-        None => format!("/manga/{id}"),
+        None => format!("/publications/{id}"),
     };
     view! {
         <a class="shelf-card" href=href>

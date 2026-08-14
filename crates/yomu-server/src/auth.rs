@@ -80,11 +80,11 @@ pub fn is_public(path: &str) -> bool {
 pub fn takes_media_token(path: &str) -> bool {
     let mut segments = path.split('/').skip(1);
     match (segments.next(), segments.next(), segments.next()) {
-        // /manga/{id}/cover
-        (Some("manga"), Some(_), Some("cover")) => segments.next().is_none(),
-        // /chapters/{id}/pages/{n} — but not the page list, which is JSON
+        // /publications/{id}/cover
+        (Some("publications"), Some(_), Some("cover")) => segments.next().is_none(),
+        // /units/{id}/pages/{n} — but not the page list, which is JSON
         // the client fetches with a header.
-        (Some("chapters"), Some(_), Some("pages")) => {
+        (Some("units"), Some(_), Some("pages")) => {
             segments.next().is_some_and(|n| !n.is_empty()) && segments.next().is_none()
         }
         _ => false,
@@ -242,8 +242,8 @@ mod tests {
         assert!(is_public("/auth/logout"));
 
         assert!(!is_public("/library"));
-        assert!(!is_public("/manga/0199-abc"));
-        assert!(!is_public("/chapters/0199-abc/pages/3"));
+        assert!(!is_public("/publications/0199-abc"));
+        assert!(!is_public("/units/0199-abc/pages/3"));
         assert!(!is_public("/sources"));
         assert!(!is_public("/auth/media-token"));
     }
@@ -262,13 +262,13 @@ mod tests {
     /// token*, which is a different thing, decided elsewhere.
     #[test]
     fn image_routes_take_a_media_token_but_are_not_public() {
-        assert!(!is_public("/manga/0199-abc/cover"));
-        assert!(takes_media_token("/manga/0199-abc/cover"));
-        assert!(takes_media_token("/chapters/0199-abc/pages/12"));
+        assert!(!is_public("/publications/0199-abc/cover"));
+        assert!(takes_media_token("/publications/0199-abc/cover"));
+        assert!(takes_media_token("/units/0199-abc/pages/12"));
         // The page *list* is JSON, fetched by the client with a header.
-        assert!(!takes_media_token("/chapters/0199-abc/pages"));
+        assert!(!takes_media_token("/units/0199-abc/pages"));
         assert!(!takes_media_token("/library"));
-        assert!(!takes_media_token("/manga/0199-abc"));
+        assert!(!takes_media_token("/publications/0199-abc"));
     }
 
     #[test]

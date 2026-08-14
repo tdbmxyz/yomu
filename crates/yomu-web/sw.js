@@ -12,7 +12,7 @@
 //
 // Bump CACHE when the caching logic changes, or when a fixed-name asset
 // (favicon/app icons) changes so the old cache-first copy is purged.
-const CACHE = "yomu-v5";
+const CACHE = "yomu-v6";
 const SHELL = "/";
 
 // Hashed assets referenced by a shell document (href/src/import of
@@ -74,8 +74,8 @@ self.addEventListener("activate", (event) => {
 });
 
 const isImage = (url) =>
-  /\/api\/v1\/chapters\/[^/]+\/pages\/\d+$/.test(url.pathname) ||
-  /\/api\/v1\/manga\/[^/]+\/cover$/.test(url.pathname);
+  /\/api\/v1\/units\/[^/]+\/pages\/\d+$/.test(url.pathname) ||
+  /\/api\/v1\/publications\/[^/]+\/cover$/.test(url.pathname);
 
 async function cacheFirst(request) {
   const cached = await caches.match(request);
