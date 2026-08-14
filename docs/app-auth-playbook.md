@@ -246,7 +246,10 @@ then its `jwks_uri`. A `{}` key set is the trap above.
 ## 10. Rollout order
 
 1. Server: identity + auth on every route. Inert for existing clients.
-2. Proxy: the bearer-bypass router and the unauthenticated health route.
+2. Proxy: the bearer-bypass router, unauthenticated health route, and a
+   narrowly matched bypass for the two image paths carrying `?mt=`. An `<img>`
+   cannot send the bearer header; without that third router, forward-auth
+   redirects every signed cover/page before yomu can validate its media token.
 3. App.
 
 Never 2 before 1 — that window leaves the API open. Keep the browser path on
