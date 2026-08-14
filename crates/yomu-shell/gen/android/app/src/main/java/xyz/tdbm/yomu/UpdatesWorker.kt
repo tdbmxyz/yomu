@@ -27,6 +27,8 @@ class UpdatesWorker(context: Context, params: WorkerParameters) : Worker(context
     override fun doWork(): Result {
         val prefs = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val base = prefs.getString(KEY_BASE, null) ?: return Result.success()
+        val token = prefs.getString(KEY_TOKEN, null)
+            ?.takeIf { it.isNotEmpty() } ?: return Result.success()
         var seen = prefs.getString(KEY_SEEN, null)
         if (seen.isNullOrEmpty()) {
             // First run: start announcing from now, not the backlog.
@@ -35,7 +37,10 @@ class UpdatesWorker(context: Context, params: WorkerParameters) : Worker(context
         }
 
         val body = try {
-            fetch(base.trimEnd('/') + "/api/v1/updates?since=" + URLEncoder.encode(seen, "UTF-8"))
+            fetch(
+                base.trimEnd('/') + "/api/v1/updates?since=" + URLEncoder.encode(seen, "UTF-8"),
+                token
+            )
         } catch (e: Exception) {
             return Result.retry()
         }
@@ -55,8 +60,9 @@ class UpdatesWorker(context: Context, params: WorkerParameters) : Worker(context
         return Result.success()
     }
 
-    private fun fetch(url: String): String {
+    private fun fetch(url: String, token: String): String {
         val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("Authorization", "Bearer $token")
         conn.connectTimeout = 10_000
         conn.readTimeout = 10_000
         try {
@@ -104,6 +110,7 @@ class UpdatesWorker(context: Context, params: WorkerParameters) : Worker(context
     companion object {
         const val PREFS = "yomu-updates"
         const val KEY_BASE = "base"
+        const val KEY_TOKEN = "token"
         const val KEY_SEEN = "seen"
         const val CHANNEL = "new_chapters"
 

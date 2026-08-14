@@ -2,6 +2,7 @@
 //! shell). Platform specifics are injected via [`AppConfig`], same seam as
 //! chaos.
 
+mod auth;
 mod cache;
 mod chapter_actions;
 mod cover;
@@ -15,6 +16,7 @@ mod refresh;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use leptos::wasm_bindgen::JsCast;
 use leptos_router::components::{A, Route, Router, Routes};
 use leptos_router::path;
 use url::Url;
@@ -27,7 +29,13 @@ pub struct AppConfig {
 
 pub fn use_client() -> YomuClient {
     let config = use_context::<AppConfig>().expect("AppConfig provided by the shell");
-    YomuClient::new(config.api_base)
+    client_for(&config)
+}
+
+fn client_for(config: &AppConfig) -> YomuClient {
+    YomuClient::new(config.api_base.clone())
+        .with_token(auth::session_token())
+        .with_media_token(auth::media_token())
 }
 
 /// App-wide connectivity to the configured server. `Offline` puts every
@@ -171,6 +179,10 @@ pub fn use_pull_queue() -> PullQueue {
 #[component]
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(config.clone());
+    provide_context(auth::AuthContext {
+        advertisement: RwSignal::new(None),
+        status: RwSignal::new(None),
+    });
     let conn = RwSignal::new(Connectivity::Checking);
     provide_context(conn);
     let probe = Probe::new(conn);
@@ -315,6 +327,8 @@ enum GateState {
     /// Server answered, or answered in the past (then `Connectivity` is
     /// `Offline` and the badge shows): render normally.
     Ready,
+    /// A native shell reached an OIDC-enabled server but holds no session.
+    NeedsSignIn,
     /// Server unreachable and never reached from this address: genuine
     /// first-run or a wrong address — show the connect form.
     Unreachable,
@@ -337,6 +351,7 @@ enum GateState {
 fn ServerGate(children: ChildrenFn) -> impl IntoView {
     let gate = RwSignal::new(GateState::Checking);
     let conn = use_connectivity();
+    let auth = use_context::<auth::AuthContext>().expect("auth context provided by App");
     let client = use_client();
     let base = client.base().to_string();
     // Same watchdog as `Probe`, for the same reason: a boot probe that never
@@ -361,10 +376,30 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
     }
     spawn_local(async move {
         match client.health().await {
-            Ok(_) => {
+            Ok(health) => {
                 offline::mark_server_seen(&base);
-                conn.set(Connectivity::Online);
-                gate.set(GateState::Ready);
+                auth.advertisement.set(health.auth.clone());
+                if offline::shell_available() && health.auth.is_some() {
+                    let held_before = auth::session_token().is_some();
+                    if auth::sync_status(auth.status, &base).await {
+                        // Clients and background drivers created during App
+                        // setup captured the old token. A reload makes the
+                        // newly mirrored session universal and avoids a mix
+                        // of authenticated and anonymous requests.
+                        if !held_before {
+                            auth::reload();
+                            return;
+                        }
+                        conn.set(Connectivity::Online);
+                        gate.set(GateState::Ready);
+                    } else {
+                        conn.set(Connectivity::Offline);
+                        gate.set(GateState::NeedsSignIn);
+                    }
+                } else {
+                    conn.set(Connectivity::Online);
+                    gate.set(GateState::Ready);
+                }
             }
             Err(_) if offline::server_seen(&base) => {
                 conn.set(Connectivity::Offline);
@@ -381,6 +416,7 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
         {move || match gate.get() {
             GateState::Checking => view! { <p class="muted gate-msg">"Connecting…"</p> }.into_any(),
             GateState::Ready => children().into_any(),
+            GateState::NeedsSignIn => view! { <NativeSignIn/> }.into_any(),
             GateState::Unreachable => {
                 view! {
                     <section class="server-gate">
@@ -457,6 +493,87 @@ fn OfflineBadge() -> impl IntoView {
     }
 }
 
+/// Native-app sign-in gate. The browser performs authentication; the shell
+/// receives the custom-scheme callback and stores the resulting yomu session.
+#[component]
+fn NativeSignIn() -> impl IntoView {
+    let auth = use_context::<auth::AuthContext>().expect("auth context provided by App");
+    let base = use_client().base().to_string();
+    let error = RwSignal::new(None::<String>);
+
+    // Android suspends timers while the system browser is in front; returning
+    // to the WebView is the dependable signal that the callback may be done.
+    let visibility_base = base.clone();
+    if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+        let on_visible = leptos::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
+            if !offline::document_hidden() {
+                check_native_auth(auth, visibility_base.clone());
+            }
+        });
+        use leptos::wasm_bindgen::JsCast;
+        let _ = document.add_event_listener_with_callback(
+            "visibilitychange",
+            on_visible.as_ref().unchecked_ref(),
+        );
+        on_visible.forget();
+    }
+    // Backstop for a callback delivered while Android was relaunching the
+    // process: there may be no visibility transition after the exchange
+    // finishes because the new WebView was visible from its first frame.
+    if let Some(window) = web_sys::window() {
+        let poll_base = base.clone();
+        let poll = leptos::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
+            check_native_auth(auth, poll_base.clone());
+        });
+        let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+            poll.as_ref().unchecked_ref(),
+            1500,
+        );
+        poll.forget();
+    }
+
+    let sign_in_base = base.clone();
+    let sign_in = move |_| {
+        let Some(advertisement) = auth.advertisement.get_untracked() else {
+            error.set(Some("The server did not provide sign-in details.".into()));
+            return;
+        };
+        let base = sign_in_base.clone();
+        spawn_local(async move {
+            error.set(None);
+            if let Err(err) = auth::start_sign_in(&base, &advertisement, auth.status).await {
+                error.set(Some(err));
+            }
+        });
+    };
+
+    view! {
+        <section class="server-gate">
+            <h2>"Sign in to yomu"</h2>
+            <p class="muted">
+                "This server requires Authentik. Sign in using your system browser, then return here."
+            </p>
+            <div class="gate-form">
+                <button class="primary" on:click=sign_in>"Sign in"</button>
+                <button on:click={
+                    let base = base.clone();
+                    move |_| check_native_auth(auth, base.clone())
+                }>"Check sign-in"</button>
+            </div>
+            {move || error.get().map(|message| view! { <p class="error">{message}</p> })}
+            {move || auth.status.get().map(|message| view! { <p class="muted">{message}</p> })}
+        </section>
+    }
+}
+
+fn check_native_auth(auth: auth::AuthContext, base: String) {
+    spawn_local(async move {
+        if auth::sync_status(auth.status, &base).await {
+            auth::reload();
+        }
+    });
+}
+
 /// Server address form: stores the `yomu-api-base` override the API-base
 /// resolution honors and reloads. Used by the startup gate and by the
 /// More page (so an offline reader has somewhere to point at a server).
@@ -511,7 +628,11 @@ pub(crate) fn Account() -> impl IntoView {
         let client = logout_client.clone();
         spawn_local(async move {
             let _ = client.logout().await;
-            if let Some(window) = web_sys::window() {
+            offline::clear_user_cache();
+            if offline::shell_available() {
+                auth::sign_out().await;
+                auth::reload();
+            } else if let Some(window) = web_sys::window() {
                 let _ = window.location().set_href("/");
             }
         });

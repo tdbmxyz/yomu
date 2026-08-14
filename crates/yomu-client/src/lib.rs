@@ -6,10 +6,11 @@ use uuid::Uuid;
 use yomu_domain::{
     AddPublicationRequest, ApiErrorBody, Backup, BrowseSort, BulkUnitsResponse, Category,
     DownloadUnitsRequest, DownloadsResponse, EventsResponse, FingerprintsResponse, HealthResponse,
-    Locator, MangaSummary, MarkUnitsRequest, MeResponse, PagesResponse, Publication,
-    PublicationDetailResponse, PublicationWithLocator, PushEventsRequest, PushEventsResponse,
-    ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary, SetLocatorRequest, SourceInfo,
-    SourceSearchResults, UpdateCategoryRequest, UpdatePublicationRequest, UpdatesResponse,
+    Locator, MangaSummary, MarkUnitsRequest, MeResponse, MediaTokenResponse, PagesResponse,
+    Publication, PublicationDetailResponse, PublicationWithLocator, PushEventsRequest,
+    PushEventsResponse, ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary,
+    SetLocatorRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
+    UpdatePublicationRequest, UpdatesResponse,
 };
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -126,6 +127,11 @@ impl YomuClient {
     pub async fn logout(&self) -> Result<()> {
         let req = self.http.post(self.url("api/v1/auth/logout")?);
         self.send_no_content(req).await
+    }
+
+    /// Mint the short-lived credential used by cover/page image URLs.
+    pub async fn media_token(&self) -> Result<MediaTokenResponse> {
+        self.get("api/v1/auth/media-token").await
     }
 
     // ---- sources ----
