@@ -77,6 +77,18 @@ apk:
       echo "just apk: $1 — libyomu_shell_lib.so is stripped."
     ' _ "$apk"
 
+# Build the signed APK and attach it to the GitHub release for the current
+# workspace version. The signing keystore stays local and never enters CI.
+release-apk: apk
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(sed -n 's/^version = \"\(.*\)\"/\1/p' Cargo.toml | head -1)"
+    artifact="yomu-${version}.apk"
+    apk="$(ls -t crates/yomu-shell/gen/android/app/build/outputs/apk/*/release/*.apk | head -1)"
+    cp "$apk" "$artifact"
+    gh release upload "v${version}" "$artifact" --clobber
+    rm "$artifact"
+
 fmt:
     cargo fmt --all
 
