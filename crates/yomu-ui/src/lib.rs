@@ -33,9 +33,25 @@ pub fn use_client() -> YomuClient {
 }
 
 fn client_for(config: &AppConfig) -> YomuClient {
-    YomuClient::new(config.api_base.clone())
-        .with_token(auth::session_token())
-        .with_media_token(auth::media_token())
+    client_with_credentials(
+        config.api_base.clone(),
+        auth::session_token(),
+        auth::media_token(),
+    )
+}
+
+/// Build every request client from the credentials currently mirrored into the
+/// WebView. In particular, long-lived background jobs must not use
+/// `YomuClient::new` directly: a native app has no proxy cookie to fall back
+/// to when it flushes progress after reconnecting.
+fn client_with_credentials(
+    base: Url,
+    token: Option<String>,
+    media_token: Option<String>,
+) -> YomuClient {
+    YomuClient::new(base)
+        .with_token(token)
+        .with_media_token(media_token)
 }
 
 /// App-wide connectivity to the configured server. `Offline` puts every
@@ -208,7 +224,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
     // Whenever the server (re)becomes reachable, sync progress and read
     // marks recorded while it wasn't. Covers startup (the boot gate flips
     // to Online) and every later recovery, badge retries included.
-    let flush_client = YomuClient::new(config.api_base.clone());
+    let flush_client = client_for(&config);
     let flush_library = cache::use_library_cache();
     let flush_detail = cache::use_detail_cache();
     Effect::new(move |_| {
@@ -224,7 +240,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
         });
     });
     // The OS says a network came back: one free probe.
-    let probe_client = YomuClient::new(config.api_base.clone());
+    let probe_client = client_for(&config);
     let online_handle = window_event_listener(leptos::ev::online, move |_| {
         if conn.get_untracked() != Connectivity::Online {
             probe.spawn(probe_client.clone());
@@ -242,7 +258,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
     //
     // Bound on the document, where `visibilitychange` is dispatched, rather
     // than relying on it bubbling to the window.
-    let resume_client = YomuClient::new(config.api_base.clone());
+    let resume_client = client_for(&config);
     if let Some(document) = web_sys::window().and_then(|w| w.document()) {
         let on_visible = leptos::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
             if offline::document_hidden() {
@@ -264,14 +280,14 @@ pub fn App(config: AppConfig) -> impl IntoView {
     // the app is alive (see notify.rs; Android also polls app-off via
     // WorkManager).
     if offline::shell_available() {
-        notify::start(conn, YomuClient::new(config.api_base.clone()));
+        notify::start(conn, client_for(&config));
     }
 
     // Drain the device-pull queue app-wide, so "download both" completes
     // even after leaving the manga page (or restarting).
     pull::start(
         conn,
-        YomuClient::new(config.api_base.clone()),
+        client_for(&config),
         pull_queue,
         local_downloads,
         device_marks,
@@ -677,5 +693,28 @@ pub(crate) fn Account() -> impl IntoView {
                 (yomu_domain::AuthMode::Single, _) => None,
             }
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_clients_keep_the_native_session() {
+        let client = client_with_credentials(
+            Url::parse("https://yomu.example.test").unwrap(),
+            Some("native-session".into()),
+            Some("media-token".into()),
+        );
+        assert_eq!(client.token(), Some("native-session"));
+        assert!(
+            client
+                .cover_url(uuid::Uuid::nil())
+                .unwrap()
+                .query()
+                .unwrap()
+                .contains("mt=media-token")
+        );
     }
 }
