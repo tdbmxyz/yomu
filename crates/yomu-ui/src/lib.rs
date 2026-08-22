@@ -304,6 +304,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                     <A href="/sources">"Sources"</A>
                     <A href="/search">"Search"</A>
                     <A href="/downloads">"Downloads"</A>
+                    <A href="/updates">"Updates"</A>
                     <A href="/more">"More"</A>
                     <span class="grow"></span>
                     <Account/>
@@ -316,6 +317,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                         <Route path=path!("/sources") view=pages::Sources/>
                         <Route path=path!("/sources/:source") view=pages::SourceCatalog/>
                         <Route path=path!("/downloads") view=pages::Downloads/>
+                        <Route path=path!("/updates") view=pages::Updates/>
                         <Route path=path!("/more") view=pages::More/>
                         <Route path=path!("/about") view=pages::About/>
                         <Route path=path!("/publications/:id") view=pages::MangaPage/>

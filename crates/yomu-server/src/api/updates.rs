@@ -12,7 +12,9 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct UpdatesQuery {
-    since: chrono::DateTime<chrono::Utc>,
+    /// Notification clients supply their watermark; the UI omits it to list
+    /// the retained recent feed.
+    since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn list(
@@ -20,6 +22,9 @@ pub async fn list(
     OptionalUser(_user): OptionalUser,
     Query(q): Query<UpdatesQuery>,
 ) -> Result<Json<UpdatesResponse>, ApiError> {
-    let updates = state.db.updates_since(q.since, 100).await?;
+    let since = q
+        .since
+        .unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::days(30));
+    let updates = state.db.updates_since(since, 100).await?;
     Ok(Json(UpdatesResponse { updates }))
 }
