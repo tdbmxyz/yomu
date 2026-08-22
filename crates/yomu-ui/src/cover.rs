@@ -46,10 +46,13 @@ pub fn Cover(manga_id: uuid::Uuid, #[prop(optional)] large: bool) -> impl IntoVi
     let conn = use_connectivity();
     let server = use_client().cover_url(manga_id).map(|u| u.to_string());
     let failed = RwSignal::new(false);
-    // A connectivity flip changes the source: give it a fresh attempt.
+    let device_failed = RwSignal::new(false);
+    // A connectivity flip changes the source: give the remote fallback a
+    // fresh attempt; a later navigation will try a newly saved device copy.
     Effect::new(move |_| {
         conn.track();
         failed.set(false);
+        device_failed.set(false);
     });
     let class = if large {
         "manga-cover large"
@@ -62,7 +65,9 @@ pub fn Cover(manga_id: uuid::Uuid, #[prop(optional)] large: bool) -> impl IntoVi
         "manga-cover cover-empty"
     };
     let src = move || -> Option<String> {
-        if conn.get() != Connectivity::Online
+        // Device copies are the shell's real cover cache. Prefer them even
+        // online: otherwise every navigation recreates a remote image fetch.
+        if !device_failed.get()
             && offline::shell_available()
             && let Some(url) = offline::shell_cover_url(manga_id)
         {
@@ -78,7 +83,13 @@ pub fn Cover(manga_id: uuid::Uuid, #[prop(optional)] large: bool) -> impl IntoVi
                     src=url
                     loading="lazy"
                     alt=""
-                    on:error=move |_| failed.set(true)
+                    on:error=move |_| {
+                        if offline::shell_available() && !device_failed.get_untracked() {
+                            device_failed.set(true);
+                        } else {
+                            failed.set(true);
+                        }
+                    }
                 />
             }
                 .into_any(),
