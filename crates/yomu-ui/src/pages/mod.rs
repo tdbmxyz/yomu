@@ -7,6 +7,7 @@ mod more;
 mod reader;
 mod search;
 mod sources;
+mod updates;
 
 pub use about::About;
 pub use downloads::Downloads;
@@ -18,6 +19,7 @@ pub use more::More;
 pub use reader::Reader;
 pub use search::Search;
 pub use sources::{SourceCatalog, Sources};
+pub use updates::Updates;
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;

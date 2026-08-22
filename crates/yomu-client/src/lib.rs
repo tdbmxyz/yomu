@@ -231,6 +231,11 @@ impl YomuClient {
         self.send(self.http.get(url)).await
     }
 
+    /// Recent updater events, newest first (the server retains 30 days).
+    pub async fn recent_updates(&self) -> Result<UpdatesResponse> {
+        self.get("api/v1/updates").await
+    }
+
     // ---- downloads ----
 
     pub async fn downloads(&self) -> Result<DownloadsResponse> {
