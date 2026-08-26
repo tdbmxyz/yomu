@@ -92,7 +92,11 @@ jobs:
         run: nix build .#yomu-server .#yomu-web .#yomu-desktop
 
       - name: cargo clippy (desktop shell)
-        run: nix develop .#tauri -c cargo clippy -p yomu-shell --all-targets -- -D warnings
+        run: |
+          nix build .#yomu-web --out-link result-web
+          rm -rf crates/yomu-web/dist
+          cp -rL result-web crates/yomu-web/dist
+          nix develop .#tauri -c cargo clippy -p yomu-shell --all-targets -- -D warnings
 
   browser-e2e:
     runs-on: ubuntu-latest
@@ -163,7 +167,7 @@ jobs:
       # not just the Rust library. Debug needs no release keystore.
       - name: compile Android shell and Kotlin customization
         run: |
-          nix develop .#android -c bash -c '
+          env -u ANDROID_SDK_ROOT nix develop .#android -c bash -c '
             cd crates/yomu-shell
             cargo tauri android build --debug --apk --target aarch64
           '
