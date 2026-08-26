@@ -1,0 +1,25 @@
+id = "fixture"
+name = "Fixture Source"
+base_url = "http://127.0.0.1:4811"
+min_delay_ms = 0
+
+[search]
+url = "{base}/?s={query}"
+item = ".manga-item"
+title = ".manga-link"
+link = ".manga-link@href"
+cover = "img@src"
+
+[browse.popular]
+url = "{base}/catalog?page={page}"
+
+[manga]
+title = ".entry-title"
+description = ".summary"
+cover = ".cover img@src"
+chapter_item = ".chapter"
+chapter_link = "a@href"
+chapter_order = "newest_first"
+
+[pages]
+image = ".page@data-src"

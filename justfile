@@ -94,3 +94,14 @@ fmt:
 
 test:
     cargo nextest run --workspace --exclude yomu-shell
+
+# Build the real web bundle, then run Chromium against a fixture scraper and
+# OIDC provider. Install browser binaries once with:
+#   npx playwright install chromium
+e2e: build-web
+    npm ci
+    npm run test:e2e
+
+# Supply-chain policy (advisories, licenses, duplicate crates, registries).
+deny:
+    cargo deny --locked check

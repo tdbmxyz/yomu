@@ -1,6 +1,11 @@
 /target
 /crates/yomu-web/dist
 /result
+/result-*
+/node_modules
+/playwright-report
+/test-results
+/e2e/.state
 .direnv/
 *.db
 *.db-*
