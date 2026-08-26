@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, RwLock};
@@ -73,6 +74,23 @@ impl LivePages {
     }
 }
 
+/// Small, dependency-free process metrics exposed in Prometheus text form.
+pub struct Metrics {
+    pub started_at: Instant,
+    pub requests: AtomicU64,
+    pub sessions_cleaned: AtomicU64,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            requests: AtomicU64::new(0),
+            sessions_cleaned: AtomicU64::new(0),
+        }
+    }
+}
+
 /// Shared application state, cheap to clone.
 #[derive(Clone)]
 pub struct AppState {
@@ -100,6 +118,7 @@ pub struct AppState {
     pub proxy_secret: Option<Arc<str>>,
     /// Serves the watched books dir (local-file publications).
     pub streamer: Arc<crate::streamer::Streamer>,
+    pub metrics: Arc<Metrics>,
 }
 
 /// The chapter the download worker is fetching, and how far along.
@@ -130,6 +149,7 @@ impl AppState {
             media_key: Arc::new(crate::media_token::Key::generate()),
             proxy_secret: proxy_secret.map(Arc::from),
             streamer,
+            metrics: Arc::new(Metrics::default()),
         }
     }
 

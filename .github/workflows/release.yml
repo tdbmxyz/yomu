@@ -1,11 +1,9 @@
-# Release build: runs when a semver tag (v*) is pushed on main, builds
-# the web bundle with Nix, and attaches it to a GitHub Release.
+# Release metadata: runs when a semver tag (v*) is pushed on main and creates
+# the matching GitHub Release. Deployments consume the flake directly; builds
+# of the web bundle in CI provided no value and made every release slow.
 #
-# The server and the desktop shell are consumed through the Nix flake
-# (`nix build .#yomu-server` or the NixOS module, `nix run
-# .#yomu-desktop`) instead of prebuilt binaries. The Android APK is
-# signed with a keystore that never leaves the developer machine, so it
-# is built and attached manually.
+# The signed Android APK remains a local build and is attached afterwards by
+# `just release-apk`; its keystore never leaves the developer machine.
 name: release
 
 on:
@@ -22,22 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@v16
-
-      # Restore the Nix store persisted by CI (falling back to the build
-      # job's caches) so release builds don't start from an empty store.
-      - uses: nix-community/cache-nix-action@v6
-        with:
-          primary-key: nix-release-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix') }}
-          restore-prefixes-first-match: |
-            nix-release-${{ runner.os }}-
-            nix-build-${{ runner.os }}-
-          gc-max-store-size-linux: 6G
-          purge: true
-          purge-prefixes: nix-release-${{ runner.os }}-
-          purge-created: 0
-          purge-primary-key: never
-
       - name: Check tag matches workspace version
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -45,58 +27,21 @@ jobs:
           echo "tag=$tag cargo=$cargo_version"
           test "$tag" = "$cargo_version"
 
-      - name: Build web bundle
-        run: |
-          # yomu-web-compressed, not yomu-web: the tarball audience points
-          # static_dir at an unpacked directory, and without the brotli/gzip
-          # siblings they alone would serve everything uncompressed.
-          nix build .#yomu-web-compressed
-          version="${GITHUB_REF_NAME#v}"
-          artifact="yomu-web-${version}.tar.gz"
-          tar -czf "$artifact" -C "$(readlink -f result)" .
-          sha256sum "$artifact" > "$artifact.sha256"
-          echo "WEB_ARTIFACT=$artifact" >> "$GITHUB_ENV"
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            ${{ env.WEB_ARTIFACT }}
-            ${{ env.WEB_ARTIFACT }}.sha256
           body: |
-            ## Server
+            ## Server and desktop
 
-            The backend is built from the Nix flake (a NixOS module is
-            included):
+            Deploy directly from the Nix flake:
 
             ```bash
             nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-server
-            ```
-
-            ## Web frontend
-
-            `yomu-web-*.tar.gz` is the static trunk dist with brotli and
-            gzip siblings alongside each compressible asset (the PNG icons
-            get none — they are already compressed); point the server's
-            `static_dir` at the unpacked directory and it serves the
-            precompressed copy to clients that accept it. This is the
-            flake's `yomu-web-compressed` output, which the NixOS module
-            wires up by default; `yomu-web` is the same dist without the
-            siblings.
-
-            ## Desktop
-
-            The desktop shell is distributed through the flake only —
-            there is no binary download. With nix installed:
-
-            ```bash
             nix run github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop
             ```
 
-            It asks for your server address on first launch.
-
             ## Android
 
-            The APK is signed locally (the release keystore stays off
-            CI); it is attached to the release manually when available.
+            `yomu-*.apk` is a locally signed release APK. It is attached by
+            `just release-apk`; the signing keystore never enters CI.

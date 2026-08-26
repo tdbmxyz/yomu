@@ -12,7 +12,7 @@
 //
 // Bump CACHE when the caching logic changes, or when a fixed-name asset
 // (favicon/app icons) changes so the old cache-first copy is purged.
-const CACHE = "yomu-v6";
+const CACHE = "yomu-v7";
 const SHELL = "/";
 
 // Hashed assets referenced by a shell document (href/src/import of
@@ -140,7 +140,10 @@ self.addEventListener("fetch", (event) => {
     // The health probe is how the app decides online/offline: answering it
     // from the cache would report "online" with the server unreachable
     // (and set off refetch loops against reads that do fail). Network only.
-    if (url.pathname.endsWith("/api/v1/health")) return;
+    if (
+      url.pathname.startsWith("/api/v1/health") ||
+      url.pathname.endsWith("/api/v1/metrics")
+    ) return;
     if (isImage(url)) {
       event.respondWith(cacheFirst(request));
     } else {

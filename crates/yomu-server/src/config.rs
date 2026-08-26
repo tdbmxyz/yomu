@@ -25,6 +25,28 @@ pub struct Config {
     pub auth: AuthConfig,
     pub notify: Option<NotifyConfig>,
     pub catalog: CatalogConfig,
+    /// Readiness thresholds and periodic SQLite housekeeping.
+    pub operations: OperationsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OperationsConfig {
+    /// Readiness fails when the filesystem containing `data_dir` has less
+    /// free space. Zero disables the floor.
+    pub minimum_free_bytes: u64,
+    /// How often expired sessions are removed and a passive WAL checkpoint
+    /// is requested. Clamped to at least 60 seconds; zero disables the task.
+    pub maintenance_interval_secs: u64,
+}
+
+impl Default for OperationsConfig {
+    fn default() -> Self {
+        Self {
+            minimum_free_bytes: 512 * 1024 * 1024,
+            maintenance_interval_secs: 6 * 60 * 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +190,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             notify: None,
             catalog: CatalogConfig::default(),
+            operations: OperationsConfig::default(),
         }
     }
 }
@@ -245,6 +268,8 @@ mod tests {
         assert_eq!(config.db_path, PathBuf::from("yomu.db"));
         assert_eq!(config.updater.interval_secs, 6 * 60 * 60);
         assert_eq!(config.catalog.ttl_secs, 6 * 60 * 60);
+        assert_eq!(config.operations.minimum_free_bytes, 512 * 1024 * 1024);
+        assert_eq!(config.operations.maintenance_interval_secs, 6 * 60 * 60);
     }
 
     #[test]

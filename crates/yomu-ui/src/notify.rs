@@ -167,6 +167,7 @@ fn set_watermark(ts: &str) {
     }
     if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
         let _ = storage.set_item(WATERMARK_KEY, ts);
+        crate::offline::persist_shell_value(WATERMARK_KEY, Some(ts.to_string()));
     }
 }
 

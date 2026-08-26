@@ -86,6 +86,32 @@ fn handle_auth_callback<R: tauri::Runtime>(app: &tauri::AppHandle<R>, raw: &str)
     });
 }
 
+// ---- durable client state ----
+
+#[tauri::command]
+async fn store_snapshot(
+    store: State<'_, yomu_store::Store>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    store.state_snapshot().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn store_put(
+    store: State<'_, yomu_store::Store>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    store
+        .put_state(&key, &value)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn store_remove(store: State<'_, yomu_store::Store>, key: String) -> Result<(), String> {
+    store.remove_state(&key).await.map_err(|e| e.to_string())
+}
+
 // ---- device chapter storage ----
 
 struct Http(reqwest::Client);
@@ -373,6 +399,9 @@ pub fn run() {
             auth::auth_start,
             auth::auth_status,
             auth::auth_sign_out,
+            store_snapshot,
+            store_put,
+            store_remove,
             device_begin_chapter,
             device_save_page,
             device_finish_chapter,
@@ -416,6 +445,10 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let store_path = app.path().app_data_dir()?.join("client-state.db");
+            let store = tauri::async_runtime::block_on(yomu_store::Store::open(&store_path))?;
+            app.manage(store);
+
             let device_base = if cfg!(any(windows, target_os = "android")) {
                 "http://yomudev.localhost/"
             } else {

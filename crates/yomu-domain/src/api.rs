@@ -19,6 +19,29 @@ pub struct HealthResponse {
     pub auth: Option<AuthAdvertisement>,
 }
 
+/// One dependency checked by `/health/readiness`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessCheck {
+    pub ok: bool,
+    /// Human-readable failure detail; absent on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Operational readiness is deliberately separate from liveness: `/health`
+/// only proves the process can answer, while this verifies the writable state
+/// required to serve mutations and downloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub database: ReadinessCheck,
+    pub data_dir: ReadinessCheck,
+    pub books_dir: ReadinessCheck,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_bytes: Option<u64>,
+    pub minimum_free_bytes: u64,
+}
+
 /// Everything a native app needs to start a sign-in, so that nothing
 /// about the identity provider is compiled into the app: it
 /// self-configures from a server address alone.

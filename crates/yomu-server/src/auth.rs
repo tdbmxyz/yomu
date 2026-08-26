@@ -64,6 +64,8 @@ pub fn is_public(path: &str) -> bool {
     matches!(
         path,
         "/health"
+            | "/health/readiness"
+            | "/metrics"
             | "/auth/me"
             | "/auth/login"
             | "/auth/callback"
@@ -227,12 +229,14 @@ mod tests {
         assert_eq!(request_token(&headers).as_deref(), Some("bearer-tok"));
     }
 
-    /// The routes that must answer without a session, and why: health
-    /// tells an app the server is there and how to sign in, /auth carries
-    /// the sign-in itself. Everything else is content.
+    /// The routes that must answer without a session: liveness/readiness and
+    /// metrics serve supervisors, while /auth carries the sign-in itself.
+    /// Everything else is content.
     #[test]
-    fn only_the_sign_in_surface_is_public() {
+    fn only_operations_and_the_sign_in_surface_are_public() {
         assert!(is_public("/health"));
+        assert!(is_public("/health/readiness"));
+        assert!(is_public("/metrics"));
         assert!(is_public("/auth/me"));
         assert!(is_public("/auth/login"));
         assert!(is_public("/auth/callback"));
@@ -254,6 +258,8 @@ mod tests {
     fn public_paths_match_exactly() {
         assert!(!is_public("/health/../library"));
         assert!(!is_public("/healthz"));
+        assert!(!is_public("/health/readiness/library"));
+        assert!(!is_public("/metrics/debug"));
         assert!(!is_public("/auth/me/library"));
         assert!(!is_public(""));
     }

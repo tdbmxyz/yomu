@@ -173,7 +173,10 @@ impl Streamer {
             })
             .collect();
         chapters.sort_by(|a, b| match (a.number, b.number) {
-            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(x), Some(y)) => x
+                .partial_cmp(&y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.title.cmp(&b.title)),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.title.cmp(&b.title),
@@ -565,15 +568,32 @@ fn content_type_of(name: &str) -> &'static str {
     }
 }
 
-/// Chapter number from a directory/archive name: "Chapter 12.5", "ch. 3",
-/// or just the first number ("0042 - The Tower").
+/// Reading-unit number from a directory/archive name. Prefer an explicitly
+/// labelled chapter or volume over an unrelated number in the series title,
+/// then fall back to the first number for names such as "0042 - The Tower".
 fn chapter_number(title: &str) -> Option<f64> {
     static CHAPTER: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)ch(?:apter)?\.?\s*(\d+(?:\.\d+)?)").expect("valid regex")
+        Regex::new(
+            r"(?ix)
+            \bch(?:apter)?\.?
+            \s*[-_:\x23]?\s*(\d+(?:\.\d+)?)\b",
+        )
+        .expect("valid regex")
+    });
+    static VOLUME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?ix)
+            \b(?:vol(?:ume)?|tome|t)\.?
+            \s*[-_:\x23]?\s*(\d+(?:\.\d+)?)\b",
+        )
+        .expect("valid regex")
     });
     static NUMBER: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(\d+(?:\.\d+)?)").expect("valid regex"));
-    let capture = CHAPTER.captures(title).or_else(|| NUMBER.captures(title))?;
+    let capture = CHAPTER
+        .captures(title)
+        .or_else(|| VOLUME.captures(title))
+        .or_else(|| NUMBER.captures(title))?;
     capture.get(1)?.as_str().parse().ok()
 }
 
@@ -599,8 +619,52 @@ mod tests {
     fn chapter_numbers_from_names() {
         assert_eq!(chapter_number("Chapter 12.5"), Some(12.5));
         assert_eq!(chapter_number("ch3"), Some(3.0));
+        assert_eq!(chapter_number("Volume 7"), Some(7.0));
+        assert_eq!(chapter_number("Volume 2 Chapter 15"), Some(15.0));
+        assert_eq!(chapter_number("Tome 4"), Some(4.0));
         assert_eq!(chapter_number("0042 - The Tower"), Some(42.0));
         assert_eq!(chapter_number("Epilogue"), None);
+    }
+
+    #[test]
+    fn labelled_volume_wins_over_number_in_series_title() {
+        assert_eq!(
+            chapter_number("20th Century Boys - Perfect Edition - T11 (URASAWA)"),
+            Some(11.0)
+        );
+        assert_eq!(chapter_number("86 - Eighty-Six Vol. 2"), Some(2.0));
+        assert_eq!(
+            chapter_number("Solo Leveling Chap 0 à 200 - Tome 07"),
+            Some(7.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn numbered_series_title_does_not_scramble_volumes() {
+        let root =
+            std::env::temp_dir().join(format!("yomu-numbered-series-test-{}", std::process::id()));
+        let series = "20th Century Boys Perfect Edition";
+        std::fs::create_dir_all(root.join(series)).unwrap();
+        let units = [11, 7, 9, 10, 8, 6, 1, 5, 2, 3, 4]
+            .map(|volume| format!("20th Century Boys - Perfect Edition - T{volume:02}.cbz"));
+
+        let details = Streamer::new(root.clone())
+            .series_details(series, &units)
+            .await
+            .unwrap();
+        let numbers: Vec<_> = details
+            .chapters
+            .iter()
+            .map(|chapter| chapter.number)
+            .collect();
+        assert_eq!(
+            numbers,
+            (1..=11)
+                .map(|volume| Some(volume as f64))
+                .collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

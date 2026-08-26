@@ -8,6 +8,7 @@ mod downloads;
 mod error;
 mod fingerprints;
 mod library;
+mod operations;
 mod progress;
 mod sources;
 mod static_cache;
@@ -28,6 +29,8 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
+        .route("/health/readiness", get(operations::readiness))
+        .route("/metrics", get(operations::metrics))
         .route("/auth/me", get(auth::me))
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
@@ -155,6 +158,10 @@ pub fn router(state: AppState) -> Router {
 
     app.layer(cors_layer(&state.config.auth.allowed_origins))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            operations::count_request,
+        ))
 }
 
 /// CORS policy. Default (no `allowed_origins`) is permissive: any origin,

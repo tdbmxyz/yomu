@@ -11,6 +11,7 @@ console_error_panic_hook.workspace = true
 js-sys = "0.3"
 leptos.workspace = true
 url.workspace = true
+wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [
     "Window",
     "Document",
