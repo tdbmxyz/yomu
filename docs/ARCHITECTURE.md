@@ -18,9 +18,10 @@ scans them straight into the library (next section).
 - A scan site = one TOML file in `sources_dir` (`selector mini-syntax:
   `css selector[@attr]`, `{base}`/`{query}` templates, per-source rate limit
   and optional Referer). Most scan sites (Madara-style layouts) fit.
-- Broken definitions fail at startup — a typo must not silently drop a
-  source that library entries reference. That includes duplicate source ids
-  and search-URL templates that don't substitute into a valid URL.
+- Broken definitions are skipped individually and reported loudly at startup;
+  one definition written for a newer engine must not crashloop every healthy
+  source. Duplicate ids and invalid URL templates are rejected and included in
+  that broken-definition report.
 - Keys (`manga.source_key`, `chapter.source_key`) are the source's own page
   URLs, opaque to everything else, and validated to stay on the source's
   origin (scheme + host + port — keys are client input).
@@ -88,11 +89,11 @@ event with max `at`, id as tie-break; `yomu_domain::merge_position` is the
 single definition of that rule, and the SQL `ORDER BY at DESC, id DESC
 LIMIT 1` mirrors it (a db test asserts they agree).
 
-Why: the future offline client (phone) keeps reading while disconnected. On
-reconnect it POSTs its journal (`/progress/events`, idempotent by event id;
-events for deleted manga are skipped, not errors) and pulls the server's
-tail (`?since=<seq cursor>` — server arrival order, because event ids are
-device-stamped and a late offline push would slip behind an id cursor).
+The browser PWA and native shells already keep reading while disconnected. On
+reconnect the client POSTs its local journal (`/progress/events`, idempotent by
+event id; events for deleted manga are skipped, not errors) and pulls the
+server's tail (`?since=<seq cursor>` — server arrival order, because event ids
+are device-stamped and a late offline push would slip behind an id cursor).
 Merge is associative and commutative — no conflict resolution UI, no clock
 negotiation beyond last-write-wins at page granularity, which matches the
 product decision (track chapter + page, nothing finer).
@@ -117,15 +118,18 @@ the library UI filters by category and exposes the per-category toggle.
 Two modes, chosen by config. `[auth]` with an OIDC issuer (authentik):
 sign-in via authorization-code + PKCE, claims from the userinfo endpoint,
 users upserted by `sub`, sessions à la chaos (opaque token, sha256 at rest,
-HttpOnly cookie or bearer). No `[auth]`: single-account mode — every
-request is the seeded shared "Everyone" user, no login UI. Reading
-progress is per-user (`progress_events.user_id`); library, downloads and
-categories stay server-wide. Browsing stays public in OIDC mode; only
-progress endpoints demand a session.
+HttpOnly cookie or bearer). No `[auth]`: single-account mode — every request
+is the seeded shared "Everyone" user, no login UI. Reading progress and read
+marks are per-user; library, downloads and categories stay server-wide. In
+OIDC mode content APIs default to requiring identity. Only liveness/readiness,
+metrics, and the sign-in surface are public; image routes may instead carry a
+short-lived media token.
 
-## Deferred by design
+## Client persistence
 
-- **Offline client + store crate** (phase 3): journal and API are ready;
-  the client needs a local SQLite + download-to-device manager.
-- **Webtoon continuous-scroll reader mode**: the reader is paged today;
-  vertical mode is a UI change only, tracking stays per page.
+The browser adapter deliberately uses Web Storage plus the Service Worker
+Cache API: those are the platform's native offline stores. Native shells save
+chapter pages under the app data directory and are evolving metadata, journal,
+and sync state toward the `yomu-store` SQLite crate. Both adapters use the same
+domain journal and HTTP synchronization rules; durable-store work does not
+replace working PWA offline support.

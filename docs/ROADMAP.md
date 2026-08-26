@@ -1,41 +1,56 @@
 # Roadmap
 
-## Phase 0 — Foundations (this repo bootstrap)
+This is a forward-looking roadmap, not a historical checklist. Shipped work is
+summarized first so completed features do not repeatedly appear as unfinished.
+Detailed implementation history lives in `docs/superpowers/` and the changelog.
 
-- [x] Workspace, flake (packages + module skeleton), docs, ADRs
-- [x] Domain model incl. progress journal + merge rule (tested)
-- [x] `Source` trait + selector-driven source + fixture tests
-- [x] Server: library/chapters/progress API, download queue, updater
-- [x] Web UI: library grid, source search/add, manga page, paged reader
-- [x] E2E against a local fixture scan site
+## Shipped in 2.x
 
-## Phase 1 — Daily-driver reader
+- Selector sources with search and browse pagination, source fixture tests, and
+  resilient startup that reports and skips malformed definitions.
+- Unified source and local-file publications, CBZ/directories, rename healing,
+  unsupported-format reporting, and periodic/on-demand rescans.
+- Paged and continuous vertical readers, fit/direction controls, prefetch,
+  progress journal synchronization, manual read/unread marks, unread badges,
+  and update ordering.
+- Server downloads (single/bulk/remove/retry), browser and shell device saves,
+  persistent pull queues, download progress, offline boot, and offline outboxes.
+- OIDC/browser/native-app sign-in, per-user progress/read state, proxy identity,
+  account sign-out, backup/restore, updates and notifications.
+- Tauri desktop and Android shells, Android background notifications and
+  immersive reading, reproducible Nix server/web/desktop packages, a hardened
+  NixOS module, and CI package builds.
 
-- [ ] Webtoon mode (continuous vertical scroll) + reader mode per manga
-- [ ] Page prefetch (next 2–3 pages) in the reader
-- [ ] Mark chapter read / unread manually; read-state display in the list
-- [ ] Library: unread badges, sort by last update/last read
-- [ ] Download management: delete downloaded chapter, download-all button,
-      storage usage per manga
+## Current priorities
 
-## Phase 2 — Sources
+### Reliability and security
 
-- [ ] Native JSON-API source implementations as the first non-selector sources
-- [ ] Per-source health surface (last error, last success) in the UI
-- [ ] Hot-reload of sources.d without restart
-- [ ] Selector spec: pagination for search results, multi-page chapter lists
+- Isolate and purge browser Service Worker data on logout/account changes.
+- Resolve and pin public DNS targets for selector fetches to close DNS-rebinding
+  SSRF, including redirects.
+- Make browser device storage quota-aware with byte reporting and eviction.
+- Add source health diagnostics and atomic `sources.d` hot reload.
 
-## Phase 3 — Offline client
+### Source compatibility
 
-- [ ] `yomu-store` crate: local SQLite (chapter files + journal) behind the
-      same domain types
-- [ ] Download-to-device manager (select manga/chapters, evict policy)
-- [ ] Journal sync: push local events, pull server tail, badge for pending sync
-- [ ] Desktop shell (Tauri, as in chaos); mobile investigation after
+- Add paginated search and multi-page publication chapter listings with loop,
+  duplicate, and page-limit guards.
+- Add the first native JSON/API source to validate authentication, API
+  pagination, unavailable/premium content, and source-specific metadata.
 
-## Phase 4 — Deployment
+### Library and storage
 
-- [ ] Verify `nix build .#yomu-server` / `.#yomu-web` (flake exists, untested
-      in CI terms)
-- [ ] NixOS module eval test + deploy on zeus next to chaos
-- [ ] chaos dashboard tile for yomu (service monitor entry)
+- Add create/rename/reorder/delete controls for user-defined categories.
+- Add publication/global server byte reporting, bulk download/remove, orphan
+  detection, and optional free-space/retention policy.
+- Evolve native-shell durable state into `yomu-store` SQLite while keeping the
+  browser PWA's Web Storage/Service Worker adapter separate.
+
+## Engineering and operations
+
+- Keep the real-browser Playwright suite and AI-assisted pi workflow current as
+  user journeys grow.
+- Continue database backup drills, integrity checks, WAL/session maintenance,
+  readiness thresholds, and useful service metrics.
+- Keep advisories, licenses, dependency automation, Rust pin, NixOS module
+  evaluation, desktop linting, and Android Kotlin compilation green in CI.

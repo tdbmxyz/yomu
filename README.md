@@ -16,7 +16,7 @@ position (chapter + page) following you. Sibling project of
 - **Server-side downloads**: chapters are fetched to the server's disk by a
   queue worker; or read **live** (proxied page by page, nothing stored).
 - **Progress tracking**: current chapter + page, stored as an append-only
-  journal designed for future offline clients that merge on reconnect.
+  journal; offline-capable clients merge queued events on reconnect.
 - **Optional sign-in**: point `[auth]` at an OIDC provider (authentik) for
   per-user reading positions; without it everyone shares one account and
   the same position — zero login friction.
@@ -36,6 +36,7 @@ rationale (ADRs there apply; yomu-specific decisions in `docs/adr/`).
 | `yomu-source` | `Source` trait + selector scan-site impl |
 | `yomu-server` | Axum backend: library, downloader, updater, page serving, streamer (local books dir) |
 | `yomu-client` | Typed API client (native & wasm) |
+| `yomu-store` | SQLite journal, sync cursor, device metadata, and native client state |
 | `yomu-ui` | Leptos pages: library, search, manga, reader |
 | `yomu-web` | Trunk entrypoint |
 | `yomu-shell` | Tauri v2 desktop/Android shell around the same UI |
@@ -47,7 +48,13 @@ $ nix develop
 $ just server            # backend on http://127.0.0.1:4700
 $ just web               # frontend with hot reload on http://127.0.0.1:8081
 $ just check && just test
+$ just e2e               # real Chromium + fixture source/IdP
 ```
+
+Playwright runs the same deterministic journeys in CI. For AI-assisted test
+planning/generation/healing in pi, install `pi-mcp-adapter`; the checked-in
+`.mcp.json` and `.pi/skills/playwright-e2e/` connect pi to Playwright MCP while
+CI remains model- and credential-free.
 
 Desktop shell: `nix develop .#tauri`, then `just shell http://<server>:4700`
 (or set `~/.config/yomu/server`). Android: `just apk` — it enters
@@ -59,7 +66,8 @@ sample; the keystore lives outside the repo).
 
 Add a scan site: copy `crates/yomu-server/sources.d/example.toml.sample` to
 `<sources_dir>/<site>.toml`, adjust the selectors (browser devtools on the
-site), restart the server.
+site), restart the server. Production readiness, metrics, SQLite backup, and
+maintenance guidance is in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
 First checkout: enter the shell, `cargo generate-lockfile`,
 `git add Cargo.lock`, re-enter (wasm-bindgen-cli pinning, as in chaos).
@@ -93,10 +101,10 @@ Git flow, enforced by CI on the long-lived branches:
 - Releases: bump the workspace version in `Cargo.toml` (the only place it
   lives — `tauri.conf.json` carries no version; `just apk` injects it),
   merge `develop` into `main`, tag `vX.Y.Z`. The release workflow checks
-  the tag against `Cargo.toml`, then builds and attaches the web bundle.
-  The Android APK is signed locally and attached by hand. The desktop
-  shell is not published as an artifact — it is run from the flake (see
-  Clients above).
+  the tag against `Cargo.toml` and creates release metadata; deployments
+  consume the tagged Nix flake, so no web bundle is attached. The Android
+  APK is signed locally and attached by hand. The desktop shell is not
+  published as an artifact — it is run from the flake (see Clients above).
 
 ## License
 
