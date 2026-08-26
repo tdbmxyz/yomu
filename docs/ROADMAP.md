@@ -14,7 +14,8 @@ Detailed implementation history lives in `docs/superpowers/` and the changelog.
   progress journal synchronization, manual read/unread marks, unread badges,
   and update ordering.
 - Server downloads (single/bulk/remove/retry), browser and shell device saves,
-  persistent pull queues, download progress, offline boot, and offline outboxes.
+  persistent pull queues, download progress, offline boot/outboxes, and native
+  SQLite state for journals, cursors, downloads, and allowlisted UI state.
 - OIDC/browser/native-app sign-in, per-user progress/read state, proxy identity,
   account sign-out, backup/restore, updates and notifications.
 - Tauri desktop and Android shells, Android background notifications and
@@ -43,8 +44,6 @@ Detailed implementation history lives in `docs/superpowers/` and the changelog.
 - Add create/rename/reorder/delete controls for user-defined categories.
 - Add publication/global server byte reporting, bulk download/remove, orphan
   detection, and optional free-space/retention policy.
-- Evolve native-shell durable state into `yomu-store` SQLite while keeping the
-  browser PWA's Web Storage/Service Worker adapter separate.
 
 ## Engineering and operations
 
