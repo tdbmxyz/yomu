@@ -4,6 +4,7 @@ mod catalog;
 mod config;
 mod db;
 mod downloader;
+mod maintenance;
 mod media_token;
 mod notifier;
 mod oidc;
@@ -24,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::load().context("loading configuration")?;
+    let maintenance_command = std::env::args().nth(1);
 
     let (sources, broken) = Registry::load(&config.sources_dir).map_err(|e| {
         anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display())
@@ -46,6 +48,32 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("opening database {}", config.db_path.display()))?;
 
+    if let Some(command) = maintenance_command {
+        match command.as_str() {
+            "integrity-check" => {
+                let result = db.integrity_check().await?;
+                println!("{result}");
+                anyhow::ensure!(result == "ok", "SQLite integrity check failed: {result}");
+                return Ok(());
+            }
+            "checkpoint" => {
+                db.checkpoint_wal().await?;
+                println!("WAL checkpoint complete");
+                return Ok(());
+            }
+            "cleanup-sessions" => {
+                println!(
+                    "{} expired session(s) removed",
+                    db.cleanup_expired_sessions().await?
+                );
+                return Ok(());
+            }
+            other => anyhow::bail!(
+                "unknown command {other:?}; expected integrity-check, checkpoint, or cleanup-sessions"
+            ),
+        }
+    }
+
     let oidc = oidc::OidcRuntime::from_config(&config.auth).context("configuring [auth]")?;
     match &oidc {
         Some(_) => tracing::info!(
@@ -59,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
     downloader::spawn(state.clone());
     updater::spawn(state.clone());
     streamer::spawn(state.clone());
+    maintenance::spawn(state.clone());
 
     let app = api::router(state.clone());
     let listener = tokio::net::TcpListener::bind(state.config.listen)

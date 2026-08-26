@@ -108,6 +108,7 @@ mod catalog;
 mod categories;
 mod downloads;
 pub use downloads::DownloadFailure;
+mod operations;
 mod progress;
 mod publications;
 mod read_marks;

@@ -5,6 +5,7 @@ members = [
     "crates/yomu-source",
     "crates/yomu-server",
     "crates/yomu-client",
+    "crates/yomu-store",
     "crates/yomu-ui",
     "crates/yomu-web",
     "crates/yomu-shell",
@@ -21,6 +22,7 @@ license = "AGPL-3.0-or-later"
 yomu-domain = { path = "crates/yomu-domain" }
 yomu-source = { path = "crates/yomu-source" }
 yomu-client = { path = "crates/yomu-client" }
+yomu-store = { path = "crates/yomu-store" }
 yomu-ui = { path = "crates/yomu-ui" }
 
 # shared
@@ -45,6 +47,7 @@ axum = "0.8"
 base64 = "0.22"
 bytes = "1"
 hex = "0.4"
+fs2 = "0.4"
 sha2 = "0.10"
 futures = "0.3"
 figment = { version = "0.10", features = ["toml", "env"] }
@@ -63,6 +66,7 @@ leptos = { version = "0.8", features = ["csr"] }
 leptos_router = "0.8"
 console_error_panic_hook = "0.1"
 web-sys = "0.3"
+wasm-bindgen-futures = "0.4"
 
 [profile.release]
 lto = true

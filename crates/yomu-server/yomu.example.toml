@@ -42,3 +42,9 @@ dir = "local"
 # fetch live).
 #[catalog]
 #ttl_secs = 21600
+
+# Readiness disk floor and periodic SQLite housekeeping (expired sessions +
+# passive WAL checkpoint). See docs/OPERATIONS.md.
+#[operations]
+#minimum_free_bytes = 536870912
+#maintenance_interval_secs = 21600

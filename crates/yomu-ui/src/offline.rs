@@ -36,6 +36,89 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
 fn write_json<T: serde::Serialize>(key: &str, value: &T) {
     if let (Some(storage), Ok(raw)) = (storage(), serde_json::to_string(value)) {
         let _ = storage.set_item(key, &raw);
+        persist_shell_value(key, Some(raw));
+    }
+}
+
+fn durable_shell_key(key: &str) -> bool {
+    matches!(
+        key,
+        OUTBOX_KEY | DEVICE_KEY | PULL_QUEUE_KEY | MARKS_KEY | "yomu-updates-seen"
+    ) || key.starts_with(CACHE_KEY_PREFIX)
+}
+
+/// Write through the WebView's synchronous localStorage mirror into the
+/// native shell's yomu-store SQLite database. Plain browsers deliberately do
+/// nothing: Web Storage remains the PWA adapter.
+pub fn persist_shell_value(key: &str, value: Option<String>) {
+    if !durable_shell_key(key) || !shell_available() {
+        return;
+    }
+    let key = key.to_string();
+    leptos::task::spawn_local(async move {
+        let args = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&args, &"key".into(), &key.into());
+        let command = if let Some(value) = value {
+            let _ = js_sys::Reflect::set(&args, &"value".into(), &value.into());
+            "store_put"
+        } else {
+            "store_remove"
+        };
+        if let Err(err) = shell_invoke(command, args).await {
+            leptos::logging::warn!("durable state write failed: {err}");
+        }
+    });
+}
+
+/// Before mounting in a native shell, restore SQLite's durable state into the
+/// synchronous localStorage adapter. On the first upgraded launch an empty DB
+/// imports the legacy values instead, making the migration non-destructive.
+pub async fn restore_shell_store() {
+    if !shell_available() {
+        return;
+    }
+    let Ok(snapshot) = shell_invoke("store_snapshot", js_sys::Object::new()).await else {
+        return;
+    };
+    use leptos::wasm_bindgen::JsCast;
+    let Ok(snapshot) = snapshot.dyn_into::<js_sys::Object>() else {
+        return;
+    };
+    let entries = js_sys::Object::entries(&snapshot);
+    let Some(storage) = storage() else {
+        return;
+    };
+    if entries.length() == 0 {
+        let legacy: Vec<(String, String)> = (0..storage.length().unwrap_or(0))
+            .filter_map(|n| {
+                let key = storage.key(n).ok().flatten()?;
+                if !durable_shell_key(&key) {
+                    return None;
+                }
+                Some((key.clone(), storage.get_item(&key).ok().flatten()?))
+            })
+            .collect();
+        for (key, value) in legacy {
+            let args = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&args, &"key".into(), &key.into());
+            let _ = js_sys::Reflect::set(&args, &"value".into(), &value.into());
+            let _ = shell_invoke("store_put", args).await;
+        }
+        return;
+    }
+
+    let local_keys: Vec<String> = (0..storage.length().unwrap_or(0))
+        .filter_map(|n| storage.key(n).ok().flatten())
+        .filter(|key| durable_shell_key(key))
+        .collect();
+    for key in local_keys {
+        let _ = storage.remove_item(&key);
+    }
+    for entry in entries.iter() {
+        let pair = js_sys::Array::from(&entry);
+        if let (Some(key), Some(value)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
+            let _ = storage.set_item(&key, &value);
+        }
     }
 }
 
@@ -786,6 +869,7 @@ pub(crate) fn clear_user_cache() {
         .collect();
     for key in keys {
         let _ = storage.remove_item(&key);
+        persist_shell_value(&key, None);
     }
 }
 
