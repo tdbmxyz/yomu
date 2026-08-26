@@ -276,6 +276,8 @@
             binaryen
             just
             cargo-nextest
+            cargo-deny
+            nodejs_22
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
       };
@@ -336,6 +338,37 @@
         '';
       };
     };
+
+    # Evaluation-only module smoke test: catches option wiring and systemd
+    # regressions without building a complete NixOS VM/toplevel.
+    checks.${system}.nixos-module-eval = let
+      evaluated = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          (import ./nix/module.nix self)
+          ({pkgs, ...}: {
+            services.yomu = {
+              enable = true;
+              package = pkgs.writeShellScriptBin "yomu-server" "exit 0";
+              webPackage = null;
+              address = "127.0.0.1";
+              port = 4777;
+            };
+          })
+        ];
+      };
+      service = evaluated.config.systemd.services.yomu;
+    in
+      pkgs.runCommand "yomu-nixos-module-eval" {} ''
+        test ${
+          if service.serviceConfig.DynamicUser
+          then "true"
+          else "false"
+        } = true
+        test ${lib.escapeShellArg service.serviceConfig.StateDirectory} = yomu
+        test ${lib.escapeShellArg evaluated.config.services.yomu.settings.listen} = 127.0.0.1:4777
+        touch $out
+      '';
 
     formatter.${system} = pkgs.alejandra;
   };
