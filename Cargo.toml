@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.4.0"
+version = "2.4.1"
 edition = "2024"
 authors = ["Tibo <thibaudbalem@gmail.com>"]
 license = "AGPL-3.0-or-later"
