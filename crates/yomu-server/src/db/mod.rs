@@ -99,7 +99,12 @@ impl Db {
         )
         .execute(&pool)
         .await?;
-        Ok(Self { pool })
+        let db = Self { pool };
+        // Existing deployments may already have their sole OIDC/proxy user;
+        // claim their pre-auth shared history at upgrade startup rather than
+        // waiting for their current session to expire and sign in again.
+        db.claim_shared_history_if_sole_oidc_user().await?;
+        Ok(db)
     }
 }
 
@@ -1718,6 +1723,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_oidc_user_claims_legacy_reading_history_once() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let unit = db.list_units(publication.id).await.unwrap().remove(0);
+        db.mark_read(SHARED, &[unit.id]).await.unwrap();
+        let event = ProgressEvent {
+            id: Uuid::from_u128(10),
+            publication_id: publication.id,
+            unit_id: unit.id,
+            page: 7,
+            device: "legacy".into(),
+            at: Utc::now(),
+        };
+        db.append_event(SHARED, &event).await.unwrap();
+
+        let alice = db
+            .upsert_oidc_user("sub-1", "alice", "Alice")
+            .await
+            .unwrap();
+        assert!(
+            db.read_ids(alice.id, publication.id)
+                .await
+                .unwrap()
+                .contains(&unit.id)
+        );
+        assert_eq!(
+            db.latest_position(alice.id, publication.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .page(),
+            7
+        );
+        let (events, _) = db.events_since(alice.id, None).await.unwrap();
+        assert_eq!(events.len(), 1);
+
+        // Re-login is idempotent, and a later second account does not receive
+        // the former single-account owner's history.
+        db.upsert_oidc_user("sub-1", "alice", "Alice")
+            .await
+            .unwrap();
+        assert_eq!(db.events_since(alice.id, None).await.unwrap().0.len(), 1);
+        let bob = db.upsert_oidc_user("sub-2", "bob", "Bob").await.unwrap();
+        assert!(
+            db.read_ids(bob.id, publication.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.latest_position(bob.id, publication.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The legacy copy remains available if auth is disabled again.
+        assert!(
+            db.read_ids(SHARED, publication.id)
+                .await
+                .unwrap()
+                .contains(&unit.id)
+        );
+    }
+
+    #[tokio::test]
     async fn categories_gate_the_update_sweep() {
         let db = Db::in_memory().await.unwrap();
 
@@ -1761,6 +1834,13 @@ mod tests {
     #[tokio::test]
     async fn read_marks_are_per_user_and_idempotent() {
         let db = Db::in_memory().await.unwrap();
+        // With no legacy history yet, the first OIDC login completes the
+        // one-time claim. Marks added to the shared account afterwards stay
+        // isolated, as they would in an intentionally single-account server.
+        let alice = db
+            .upsert_oidc_user("sub-1", "alice", "Alice")
+            .await
+            .unwrap();
         let publication = db
             .insert_publication(
                 "fixture",
@@ -1783,10 +1863,6 @@ mod tests {
         assert!(read.contains(&ids[0]) && read.contains(&ids[1]));
 
         // Marks are per user.
-        let alice = db
-            .upsert_oidc_user("sub-1", "alice", "Alice")
-            .await
-            .unwrap();
         assert!(
             db.read_ids(alice.id, publication.id)
                 .await
