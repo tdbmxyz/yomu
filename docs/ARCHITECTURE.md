@@ -121,9 +121,12 @@ users upserted by `sub`, sessions à la chaos (opaque token, sha256 at rest,
 HttpOnly cookie or bearer). No `[auth]`: single-account mode — every request
 is the seeded shared "Everyone" user, no login UI. Reading progress and read
 marks are per-user; library, downloads and categories stay server-wide. In
-OIDC mode content APIs default to requiring identity. Only liveness/readiness,
-metrics, and the sign-in surface are public; image routes may instead carry a
-short-lived media token.
+OIDC mode content APIs default to requiring identity. When a former
+single-account installation has exactly one OIDC/proxy account, that account
+claims a one-time copy of the shared progress journal and read marks; this
+keeps an authentication upgrade from making the existing history disappear on
+new devices. Only liveness/readiness, metrics, and the sign-in surface are
+public; image routes may instead carry a short-lived media token.
 
 ## Client persistence
 
