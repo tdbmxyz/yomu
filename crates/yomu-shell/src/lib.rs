@@ -15,10 +15,12 @@
 
 pub mod auth;
 
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 use sha2::{Digest, Sha256};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_fs::FsExt;
 
 fn configured_server() -> Option<String> {
     if let Ok(url) = std::env::var("YOMU_SERVER") {
@@ -110,6 +112,42 @@ async fn store_put(
 #[tauri::command]
 async fn store_remove(store: State<'_, yomu_store::Store>, key: String) -> Result<(), String> {
     store.remove_state(&key).await.map_err(|e| e.to_string())
+}
+
+// ---- portable backup files ----
+
+/// Android WebViews do not implement downloads for JavaScript `blob:` URLs.
+/// Use the platform document picker and filesystem bridge so the user chooses
+/// a real, externally accessible destination. The same command also gives
+/// desktop shells a native save dialog.
+#[tauri::command]
+async fn save_backup_file(app: tauri::AppHandle, json: String) -> Result<bool, String> {
+    let dialog_app = app.clone();
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .add_filter("Yomu backup", &["json"])
+            .set_file_name("yomu-backup.json")
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(path) = path else {
+        return Ok(false);
+    };
+
+    let mut options = tauri_plugin_fs::OpenOptions::new();
+    options.write(true).truncate(true).create(true);
+    let mut file = app
+        .fs()
+        .open(path, options)
+        .map_err(|e| format!("could not open backup destination: {e}"))?;
+    file.write_all(json.as_bytes())
+        .map_err(|e| format!("could not write backup: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("could not finish backup: {e}"))?;
+    Ok(true)
 }
 
 // ---- device chapter storage ----
@@ -393,6 +431,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(Http(reqwest::Client::new()))
         .invoke_handler(tauri::generate_handler![
             open_external,
@@ -402,6 +442,7 @@ pub fn run() {
             store_snapshot,
             store_put,
             store_remove,
+            save_backup_file,
             device_begin_chapter,
             device_save_page,
             device_finish_chapter,
