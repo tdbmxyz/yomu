@@ -1,5 +1,7 @@
-# CI: format, lint, and test on every push/PR to the long-lived
-# branches (Git flow: develop = integration, main = releases).
+# CI validates changes before and immediately after they enter develop.
+# Release PRs reuse the successful checks already attached to develop's exact
+# head commit; running the same four jobs again on the PR and main push added
+# no coverage.
 #
 # yomu-shell is excluded from the cargo jobs: it needs the Linux webview
 # stack and a baked-in web dist, both of which the `packages` job covers
@@ -8,9 +10,10 @@ name: ci
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop]
   pull_request:
-    branches: [main, develop]
+    branches: [develop]
+  workflow_dispatch:
 
 jobs:
   check:
