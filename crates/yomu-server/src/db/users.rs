@@ -79,11 +79,10 @@ impl Db {
         Ok(user)
     }
 
-    /// Copy the pre-authentication shared account's journal and read marks to
-    /// the sole OIDC account. There is no ambiguity while exactly one real
+    /// Transfer the pre-authentication shared account's journal and read marks
+    /// to the sole OIDC account. There is no ambiguity while exactly one real
     /// account exists, and the singleton claim row makes this a one-time
-    /// migration across repeated logins and restarts. The shared copy remains
-    /// available if the server is ever returned to single-account mode.
+    /// migration across repeated logins and restarts.
     pub(super) async fn claim_shared_history_if_sole_oidc_user(&self) -> Result<()> {
         let Some(user_id) = sqlx::query_scalar::<_, String>(
             "SELECT MIN(id) FROM users WHERE subject IS NOT NULL HAVING COUNT(*) = 1",
@@ -143,12 +142,29 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         }
+
+        // This is a transfer, not a merge. Once both datasets are safely on
+        // the authenticated user, clear the old shared journal in the same
+        // transaction so there is never a partially migrated state.
+        sqlx::query(
+            "DELETE FROM progress_events
+             WHERE user_id = '00000000-0000-0000-0000-000000000000'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM read_units
+             WHERE user_id = '00000000-0000-0000-0000-000000000000'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         tracing::info!(
             user_id,
             progress_events = events.len(),
             read_marks = marks,
-            "claimed single-account reading history"
+            "transferred single-account reading history"
         );
         Ok(())
     }

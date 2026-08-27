@@ -123,7 +123,8 @@ is the seeded shared "Everyone" user, no login UI. Reading progress and read
 marks are per-user; library, downloads and categories stay server-wide. In
 OIDC mode content APIs default to requiring identity. When a former
 single-account installation has exactly one OIDC/proxy account, that account
-claims a one-time copy of the shared progress journal and read marks; this
+receives a one-time transfer of the shared progress journal and read marks;
+the old shared state is cleared so there is one authoritative owner. This
 keeps an authentication upgrade from making the existing history disappear on
 new devices. Only liveness/readiness, metrics, and the sign-in surface are
 public; image routes may instead carry a short-lived media token.
