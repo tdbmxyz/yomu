@@ -101,8 +101,8 @@ impl Db {
         .await?;
         let db = Self { pool };
         // Existing deployments may already have their sole OIDC/proxy user;
-        // claim their pre-auth shared history at upgrade startup rather than
-        // waiting for their current session to expire and sign in again.
+        // transfer their pre-auth shared history at upgrade startup rather
+        // than waiting for their current session to expire and sign in again.
         db.claim_shared_history_if_sole_oidc_user().await?;
         Ok(db)
     }
@@ -1723,7 +1723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_oidc_user_claims_legacy_reading_history_once() {
+    async fn first_oidc_user_transfers_legacy_reading_history_once() {
         let db = Db::in_memory().await.unwrap();
         let publication = db
             .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
@@ -1781,13 +1781,14 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // The legacy copy remains available if auth is disabled again.
+        // The transfer clears both kinds of state from the old shared user.
         assert!(
             db.read_ids(SHARED, publication.id)
                 .await
                 .unwrap()
-                .contains(&unit.id)
+                .is_empty()
         );
+        assert!(db.events_since(SHARED, None).await.unwrap().0.is_empty());
     }
 
     #[tokio::test]

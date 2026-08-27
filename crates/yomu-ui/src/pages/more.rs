@@ -7,8 +7,25 @@ use leptos::wasm_bindgen::{JsCast, JsValue};
 use crate::offline::{self, Theme};
 use crate::use_client;
 
-/// Trigger a browser download of `json` as `filename`.
-fn download_json(filename: &str, json: &str) -> Result<(), JsValue> {
+/// Save backup JSON through the native document picker when running in the
+/// shell. Android WebViews accept an `<a download>` click but silently discard
+/// `blob:` URLs, so reporting success from that path would be misleading.
+async fn download_json(filename: &str, json: &str) -> Result<bool, String> {
+    if offline::shell_available() {
+        let args = js_sys::Object::new();
+        js_sys::Reflect::set(&args, &"json".into(), &json.into()).map_err(|e| format!("{e:?}"))?;
+        return offline::shell_invoke("save_backup_file", args)
+            .await
+            .map(|value| value.as_bool().unwrap_or(false));
+    }
+
+    browser_download_json(filename, json)
+        .map(|_| true)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Trigger a regular browser download of `json` as `filename`.
+fn browser_download_json(filename: &str, json: &str) -> Result<(), JsValue> {
     let parts = js_sys::Array::new();
     parts.push(&JsValue::from_str(json));
     let opts = web_sys::BlobPropertyBag::new();
@@ -234,16 +251,14 @@ pub fn More() -> impl IntoView {
             spawn_local(async move {
                 match client.backup().await {
                     Ok(backup) => match serde_json::to_string(&backup) {
-                        Ok(json) => {
-                            if download_json("yomu-backup.json", &json).is_ok() {
-                                backup_status.set(Some(format!(
-                                    "Exported {} titles.",
-                                    backup.publications.len()
-                                )));
-                            } else {
-                                backup_status.set(Some("Could not start the download.".into()));
-                            }
-                        }
+                        Ok(json) => match download_json("yomu-backup.json", &json).await {
+                            Ok(true) => backup_status.set(Some(format!(
+                                "Saved backup with {} titles.",
+                                backup.publications.len()
+                            ))),
+                            Ok(false) => backup_status.set(Some("Export cancelled.".into())),
+                            Err(e) => backup_status.set(Some(format!("Export failed: {e}"))),
+                        },
                         Err(e) => backup_status.set(Some(format!("Export failed: {e}"))),
                     },
                     Err(e) => backup_status.set(Some(format!("Export failed: {e}"))),
