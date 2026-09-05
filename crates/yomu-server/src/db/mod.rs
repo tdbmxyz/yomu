@@ -100,6 +100,10 @@ impl Db {
         .execute(&pool)
         .await?;
         let db = Self { pool };
+        // Older builds could split one Authentik user into proxy and OIDC
+        // rows. Rejoin those exact collision artifacts before deciding whether
+        // a former shared history has one unambiguous owner.
+        db.reconcile_qualified_users().await?;
         // Existing deployments may already have their sole OIDC/proxy user;
         // transfer their pre-auth shared history at upgrade startup rather
         // than waiting for their current session to expire and sign in again.
@@ -1648,8 +1652,9 @@ mod tests {
         let shared = db.user_by_id(SHARED).await.unwrap();
         assert_eq!(shared.username, "everyone");
 
-        // OIDC upsert: created once, refreshed on later logins; a username
-        // collision falls back to a subject-suffixed one.
+        // OIDC upsert: created once and refreshed on later logins. A second
+        // trusted subject with the same provider-unique username aliases the
+        // same user (for Authentik proxy UID versus native OIDC `sub`).
         let alice = db
             .upsert_oidc_user("sub-1", "Alice", "Alice")
             .await
@@ -1661,12 +1666,12 @@ mod tests {
             .unwrap();
         assert_eq!(again.id, alice.id);
         assert_eq!(again.display_name, "Alice Renamed");
-        let clash = db
-            .upsert_oidc_user("sub-2", "alice", "Other Alice")
+        let alias = db
+            .upsert_oidc_user("sub-2", "alice", "Alice via proxy")
             .await
             .unwrap();
-        assert_ne!(clash.id, alice.id);
-        assert_eq!(clash.username, "alice-sub-2");
+        assert_eq!(alias.id, alice.id);
+        assert_eq!(alias.username, "alice");
 
         // Sessions resolve until deleted or expired.
         db.create_session("h1", alice.id, Utc::now() + chrono::Duration::days(1))
@@ -1720,6 +1725,89 @@ mod tests {
         assert_eq!(alice_events.len(), 1);
         let (shared_events, _) = db.events_since(SHARED, None).await.unwrap();
         assert!(shared_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn qualified_identity_duplicates_are_rejoined() {
+        let db = Db::in_memory().await.unwrap();
+        let canonical = db
+            .upsert_oidc_user("oidc-sub", "alice", "Alice")
+            .await
+            .unwrap();
+        let duplicate_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO users (id, subject, username, display_name, created_at)
+             VALUES (?, 'proxy-sub', 'alice-proxy-sub', 'Alice proxy', ?)",
+        )
+        .bind(duplicate_id.to_string())
+        .bind(Utc::now())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_identities (subject, user_id, created_at)
+             VALUES ('proxy-sub', ?, ?)",
+        )
+        .bind(duplicate_id.to_string())
+        .bind(Utc::now())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let publication = db
+            .insert_publication("fixture", &details("m1", &[("c1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let unit = db.list_units(publication.id).await.unwrap().remove(0);
+        db.mark_read(duplicate_id, &[unit.id]).await.unwrap();
+        db.append_event(
+            duplicate_id,
+            &ProgressEvent {
+                id: Uuid::from_u128(99),
+                publication_id: publication.id,
+                unit_id: unit.id,
+                page: 4,
+                device: "proxy".into(),
+                at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        db.create_session(
+            "proxy-session",
+            duplicate_id,
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+        db.reconcile_qualified_users().await.unwrap();
+
+        assert!(matches!(
+            db.user_by_id(duplicate_id).await,
+            Err(DbError::NotFound)
+        ));
+        assert_eq!(
+            db.upsert_oidc_user("proxy-sub", "alice", "Alice")
+                .await
+                .unwrap()
+                .id,
+            canonical.id
+        );
+        assert_eq!(
+            db.user_by_session("proxy-session").await.unwrap().id,
+            canonical.id
+        );
+        assert_eq!(
+            db.events_since(canonical.id, None).await.unwrap().0.len(),
+            1
+        );
+        assert!(
+            db.read_ids(canonical.id, publication.id)
+                .await
+                .unwrap()
+                .contains(&unit.id)
+        );
     }
 
     #[tokio::test]
