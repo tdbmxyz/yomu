@@ -14,69 +14,187 @@ impl Db {
         User::try_from(row)
     }
 
-    /// User for an OIDC subject, created or refreshed from the provider's
-    /// claims. The username falls back to the subject on collision (two
-    /// providers' users sharing a preferred_username).
+    /// User for a trusted identity-provider subject, created or refreshed from
+    /// its claims. Authentik's proxy UID and OIDC `sub` can differ for the same
+    /// person, so subjects are aliases: within the one configured provider, an
+    /// exact normalized username joins another subject to the existing user.
     pub async fn upsert_oidc_user(
         &self,
         subject: &str,
         username: &str,
         display_name: &str,
     ) -> Result<User> {
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE subject = ?")
+        let username = username.trim().to_lowercase();
+        if let Some(id) = self.identity_user_id(subject).await? {
+            return self.refresh_user(id, display_name).await;
+        }
+
+        // Recover cleanly if a process stopped between creating an older user
+        // row and registering its identity alias.
+        if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE subject = ?")
             .bind(subject)
             .fetch_optional(&self.pool)
-            .await?;
-        let user = if let Some(id) = existing {
+            .await?
+        {
             let id = parse_uuid(id)?;
-            sqlx::query("UPDATE users SET display_name = ? WHERE id = ?")
-                .bind(display_name)
-                .bind(id.to_string())
-                .execute(&self.pool)
-                .await?;
-            self.user_by_id(id).await?
-        } else {
-            let id = Uuid::now_v7();
-            let insert = |username: String| {
-                sqlx::query(
-                    "INSERT INTO users (id, subject, username, display_name, created_at)
-                     VALUES (?, ?, ?, ?, ?)",
-                )
-                .bind(id.to_string())
-                .bind(subject.to_string())
-                .bind(username)
-                .bind(display_name.to_string())
-                .bind(Utc::now())
-            };
-            let result = insert(username.trim().to_lowercase())
-                .execute(&self.pool)
-                .await;
-            match result {
-                Ok(_) => self.user_by_id(id).await?,
-                Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
-                    // A unique violation is either a concurrent first-login for
-                    // this same subject (the winner's row exists — return it) or
-                    // a preferred_username collision (retry qualified by subject).
-                    if let Some(existing) =
-                        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE subject = ?")
-                            .bind(subject)
-                            .fetch_optional(&self.pool)
-                            .await?
-                    {
-                        self.user_by_id(parse_uuid(existing)?).await?
-                    } else {
-                        insert(format!("{}-{subject}", username.trim().to_lowercase()))
-                            .execute(&self.pool)
-                            .await?;
-                        self.user_by_id(id).await?
-                    }
-                }
-                Err(e) => return Err(e.into()),
-            }
-        };
+            self.register_identity(subject, id).await?;
+            return self.refresh_user(id, display_name).await;
+        }
 
+        // Authentik usernames are unique within the configured provider. This
+        // is the bridge between its proxy UID and OIDC subject.
+        if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?")
+            .bind(&username)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            let id = parse_uuid(id)?;
+            self.register_identity(subject, id).await?;
+            return self.refresh_user(id, display_name).await;
+        }
+
+        let id = Uuid::now_v7();
+        let result = sqlx::query(
+            "INSERT INTO users (id, subject, username, display_name, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(subject)
+        .bind(&username)
+        .bind(display_name)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => self.register_identity(subject, id).await?,
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                // A concurrent request won either the subject or username
+                // insert. Resolve it through the same trusted alias rules.
+                let winner = if let Some(id) = self.identity_user_id(subject).await? {
+                    id
+                } else if let Some(id) = sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM users WHERE subject = ? OR username = ? LIMIT 1",
+                )
+                .bind(subject)
+                .bind(&username)
+                .fetch_optional(&self.pool)
+                .await?
+                {
+                    parse_uuid(id)?
+                } else {
+                    return Err(DbError::Sqlx(sqlx::Error::Database(db)));
+                };
+                self.register_identity(subject, winner).await?;
+                return self.refresh_user(winner, display_name).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        let user = self.user_by_id(id).await?;
         self.claim_shared_history_if_sole_oidc_user().await?;
         Ok(user)
+    }
+
+    async fn identity_user_id(&self, subject: &str) -> Result<Option<Uuid>> {
+        sqlx::query_scalar::<_, String>("SELECT user_id FROM user_identities WHERE subject = ?")
+            .bind(subject)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(parse_uuid)
+            .transpose()
+    }
+
+    async fn register_identity(&self, subject: &str, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO user_identities (subject, user_id, created_at)
+             VALUES (?, ?, ?) ON CONFLICT(subject) DO NOTHING",
+        )
+        .bind(subject)
+        .bind(user_id.to_string())
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn refresh_user(&self, id: Uuid, display_name: &str) -> Result<User> {
+        sqlx::query("UPDATE users SET display_name = ? WHERE id = ?")
+            .bind(display_name)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        let user = self.user_by_id(id).await?;
+        self.claim_shared_history_if_sole_oidc_user().await?;
+        Ok(user)
+    }
+
+    /// Repair subject-suffixed users created before identity aliases were
+    /// supported. The suffix is an exact record of our old collision fallback,
+    /// so this does not guess based on similar names.
+    pub(super) async fn reconcile_qualified_users(&self) -> Result<()> {
+        let duplicates = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT duplicate.id, canonical.id, duplicate.username, canonical.username
+             FROM users duplicate
+             JOIN users canonical
+               ON duplicate.username = canonical.username || '-' || duplicate.subject
+             WHERE duplicate.subject IS NOT NULL
+               AND canonical.subject IS NOT NULL
+               AND duplicate.id != canonical.id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        for (duplicate_id, canonical_id, duplicate_name, canonical_name) in duplicates {
+            let mut tx = self.pool.begin().await?;
+            let marks = sqlx::query(
+                "INSERT INTO read_units (user_id, unit_id, at)
+                 SELECT ?, unit_id, at FROM read_units WHERE user_id = ?
+                 ON CONFLICT(user_id, unit_id) DO NOTHING",
+            )
+            .bind(&canonical_id)
+            .bind(&duplicate_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            sqlx::query("DELETE FROM read_units WHERE user_id = ?")
+                .bind(&duplicate_id)
+                .execute(&mut *tx)
+                .await?;
+            let events = sqlx::query("UPDATE progress_events SET user_id = ? WHERE user_id = ?")
+                .bind(&canonical_id)
+                .bind(&duplicate_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            sqlx::query("UPDATE sessions SET user_id = ? WHERE user_id = ?")
+                .bind(&canonical_id)
+                .bind(&duplicate_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE user_identities SET user_id = ? WHERE user_id = ?")
+                .bind(&canonical_id)
+                .bind(&duplicate_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE shared_history_claim SET user_id = ? WHERE user_id = ?")
+                .bind(&canonical_id)
+                .bind(&duplicate_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM users WHERE id = ?")
+                .bind(&duplicate_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            tracing::info!(
+                from = duplicate_name,
+                to = canonical_name,
+                progress_events = events,
+                read_marks = marks,
+                "unified identity-provider user aliases"
+            );
+        }
+        Ok(())
     }
 
     /// Transfer the pre-authentication shared account's journal and read marks
