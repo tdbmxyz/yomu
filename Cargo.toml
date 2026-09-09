@@ -38,22 +38,22 @@ async-trait = "0.1"
 percent-encoding = "2"
 regex = "1"
 scraper = "0.27"
-toml = "0.8"
-zip = { version = "4", default-features = false, features = ["deflate"] }
+toml = "1.1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # server
 anyhow = "1"
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 hex = "0.4"
 fs2 = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 futures = "0.3"
 figment = { version = "0.10", features = ["toml", "env"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "derive", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "derive", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "cors"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
