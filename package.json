@@ -8,7 +8,7 @@
     "test:e2e:agents": "playwright init-agents --loop=codex"
   },
   "devDependencies": {
-    "@playwright/mcp": "0.0.79",
-    "@playwright/test": "1.62.1"
+    "@playwright/mcp": "0.0.80",
+    "@playwright/test": "1.63.0"
   }
 }
