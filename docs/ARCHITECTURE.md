@@ -26,7 +26,10 @@ scans them straight into the library (next section).
   URLs, opaque to everything else, and validated to stay on the source's
   origin (scheme + host + port — keys are client input).
 - Parsing is pure (`parse_search`/`parse_manga`/`parse_pages`), unit-tested
-  against fixture HTML; fetching adds throttling on top.
+  against fixture HTML; fetching adds throttling on top. Resolved addresses are
+  validated and passed directly to the connection resolver, including redirects.
+  HTML is capped at 8 MiB and images at 32 MiB. Exact private-host exceptions and
+  the removal of ambient proxy use are documented in OPERATIONS.md.
 
 ### Streamer (local books dir)
 
@@ -91,9 +94,10 @@ LIMIT 1` mirrors it (a db test asserts they agree).
 
 The browser PWA and native shells already keep reading while disconnected. On
 reconnect the client POSTs its local journal (`/progress/events`, idempotent by
-event id; events for deleted manga are skipped, not errors) and pulls the
-server's tail (`?since=<seq cursor>` — server arrival order, because event ids
-are device-stamped and a late offline push would slip behind an id cursor).
+event id; events for deleted manga are skipped, not errors) and refetches current positions.
+The API also exposes an incremental tail (`?since=<seq cursor>` — server arrival
+order, because event ids are device-stamped and a late offline push would slip
+behind an id cursor); the UI does not yet consume that tail.
 Merge is associative and commutative — no conflict resolution UI, no clock
 negotiation beyond last-write-wins at page granularity, which matches the
 product decision (track chapter + page, nothing finer).
@@ -102,7 +106,7 @@ product decision (track chapter + page, nothing finer).
 
 One periodic task (`updater.interval_secs`, default 6h) re-syncs library
 manga: new chapters are inserted (existing ids stable), manga with
-`auto_download` get them queued. The same `sync::refresh_manga` powers the
+`auto_download` get them queued. The same `sync::refresh_publication` powers the
 manual "check now" endpoint, so behavior can't drift.
 
 Every manga belongs to one **category** (`categories` table, seeded
@@ -110,7 +114,8 @@ Reading / Paused / Finished; manga default to `reading`). Each category has
 an `update_enabled` flag and the periodic sweep only checks manga in
 enabled categories — paused/finished series stop hammering their sources.
 Manual per-manga refresh always works regardless of category.
-`GET/PUT /api/v1/categories`, `UpdateMangaRequest.category` to move manga;
+`GET /api/v1/categories`, `PUT /api/v1/categories/{id}`,
+`UpdatePublicationRequest.category` to move manga;
 the library UI filters by category and exposes the per-category toggle.
 
 ## Auth (ADR-0003)
@@ -133,9 +138,32 @@ public; image routes may instead carry a short-lived media token.
 
 ## Client persistence
 
-The browser adapter deliberately uses Web Storage plus the Service Worker
-Cache API: those are the platform's native offline stores. Native shells save
-chapter pages under the app data directory and are evolving metadata, journal,
-and sync state toward the `yomu-store` SQLite crate. Both adapters use the same
-domain journal and HTTP synchronization rules; durable-store work does not
-replace working PWA offline support.
+The browser adapter uses account/server-scoped Web Storage plus Service Worker
+caches. Auth/health responses are network-only. Public shell assets are separate
+from private runtime responses and explicitly saved chapters. A save stages pages
+and commits a complete manifest only after every Cache API write succeeds; runtime
+cache is evictable, explicit saves are not. On account changes private browser
+caches are purged, while outboxes remain with their owner. Late writes are fenced
+by an ownership generation and serialized storage operations.
+
+The pre-WASM `offline-context.js` adapter establishes ownership before the UI reads
+state. Reconnect verifies the current identity before draining bounded outboxes;
+4xx/transport failures do not discard work, and acknowledgements preserve newer
+read/unread changes. Unknown legacy state is retained for explicit recovery rather
+than assigned to an arbitrary OIDC user. See OPERATIONS.md for upgrade precautions. Native shells save
+chapter pages under the app data directory and mirror allowlisted WebView state
+into `yomu-store` SQLite. The store's typed journal/download/cursor APIs are not
+yet connected to the UI; production synchronization pushes outboxes and refetches
+current positions rather than consuming the incremental event-tail API.
+
+Page caches live above the router. Each payload carries its request key; mutations
+mark relevant caches stale, failed refreshes keep the last good view, and returning
+to a page restores scroll without a cold fetch. Pull-to-refresh arms only at the
+top of a list. Reader positioning is programmatic until the reader receives user
+input, so restored positions and image layout changes cannot rewind progress.
+
+Unit IDs survive source URL changes when chapter identity is unambiguous. Local
+file renames and device fingerprint recovery likewise refuse ambiguous matches.
+Unavailable/premium chapters are not ordinary download failures and are excluded
+from automatic retries. Unsupported local formats are reported, not rendered as
+empty readable books. These distinctions protect history and prevent retry loops.

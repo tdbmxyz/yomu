@@ -3,8 +3,8 @@
 //! The router drops and rebuilds a page on every visit, so a
 //! `LocalResource` declared inside one is new each time and fetches from
 //! cold. These caches are provided once in `App`, above the router, so a
-//! return costs nothing. See
-//! `docs/superpowers/specs/2026-07-30-list-keep-alive-design.md`.
+//! return costs nothing. Keys travel with payloads, mutations mark stale,
+//! and failed refreshes retain the last good view. See docs/ARCHITECTURE.md.
 
 use leptos::prelude::*;
 

@@ -4,13 +4,14 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::wasm_bindgen::{JsCast, JsValue};
 
+use super::offline_storage::OfflineStorage;
 use crate::offline::{self, Theme};
 use crate::use_client;
 
 /// Save backup JSON through the native document picker when running in the
 /// shell. Android WebViews accept an `<a download>` click but silently discard
 /// `blob:` URLs, so reporting success from that path would be misleading.
-async fn download_json(filename: &str, json: &str) -> Result<bool, String> {
+pub(super) async fn download_json(filename: &str, json: &str) -> Result<bool, String> {
     if offline::shell_available() {
         let args = js_sys::Object::new();
         js_sys::Reflect::set(&args, &"json".into(), &json.into()).map_err(|e| format!("{e:?}"))?;
@@ -382,6 +383,8 @@ pub fn More() -> impl IntoView {
                 }}
             </p>
             <crate::ConnectForm/>
+
+            <OfflineStorage/>
 
             <h3 class="shelf-title">"Backup"</h3>
             <p class="muted">

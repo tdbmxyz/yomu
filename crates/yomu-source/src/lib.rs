@@ -8,6 +8,7 @@
 //! disk are not a source: the server's streamer serves them directly.
 
 mod dates;
+mod network;
 pub mod registry;
 pub mod selector;
 

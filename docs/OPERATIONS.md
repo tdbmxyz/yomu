@@ -1,5 +1,36 @@
 # Operations and database maintenance
 
+## Upgrade notes: offline ownership and source networking
+
+- No released server migration is rewritten by this hardening change. Historical
+  migrations/restarts are tested; still take a consistent backup before deploying.
+- Reload browser tabs and update native apps together with the web bundle. Do the
+  first client launch online so it can establish the server/account boundary.
+  Close old reader tabs before upgrading the Service Worker; do not clear site data.
+- Existing unscoped client state and legacy browser caches are retained. In OIDC
+  mode they are **not** assigned to whichever account happens to sign in first.
+  Settings → Offline storage can export retained state and, with explicit owner
+  confirmation, import legacy data. Check the account and server before importing.
+  This confirmation is required in shared-account mode too: the current auth mode
+  cannot prove the owner of older unscoped work. A banner flags retained pending
+  history so it does not silently disappear from the user's workflow.
+  The offline-storage export is a technical recovery file, not the library/progress
+  Backup import format. Keep it private: it contains retained reading state.
+- Do not blindly downgrade clients: older clients can replay retained unscoped
+  work. Export retained state first and validate any rollback in isolation; do not
+  clear browser storage or restore a server backup over newer production history.
+- Logout purges that account's browser response/page caches; pending history stays
+  scoped to its owner and resumes on sign-in to the same account. Cache eviction
+  reconciles saved badges rather than claiming missing pages remain available.
+- Selector fetches validate every resolved address, pin the vetted addresses for
+  the connection, check redirects and bound HTML (8 MiB) and images (32 MiB).
+  Ambient HTTP(S)_PROXY settings are no longer used, since they can bypass the
+  resolver. Validate any proxy-dependent deployment in staging before rollout.
+- Private-network sources must explicitly list exact `allowed_private_hosts` in
+  their TOML. Leave this empty for public sites. It permits **only those hosts**
+  (including on redirects), not arbitrary LAN targets. Do not whitelist untrusted
+  names to work around failures. No production definitions are edited automatically.
+
 ## Health endpoints
 
 - `GET /api/v1/health` is liveness and app sign-in discovery. It intentionally
@@ -47,6 +78,21 @@ For a filesystem-level backup:
 A systemd timer, restic/borg job, or ZFS/Btrfs snapshot can automate this. Run it
 as a principal that can read yomu's state; the hardened DynamicUser service
 itself should not receive broad backup-directory access.
+
+## Automated restore drills
+
+`just test-recovery` creates synthetic file-backed historical databases (before
+publication conversion, shared-history transfer, and identity aliases), migrates
+with the real SQLx migrator, takes a live SQLite snapshot, changes the original,
+and reopens the restored copy twice. It verifies history, read marks, downloads,
+sessions, aliases, integrity and foreign keys. It runs in CI and never reads
+an installation's data. This complements—not replaces—periodic operator restore
+drills of encrypted backups, page files, books, config and source definitions.
+
+Before upgrading a daily-use installation, restore a backup generation into an
+isolated scratch instance with updater/notifications disabled and no real source
+traffic. Check representative saved chapters and reading positions. Keep the
+previous binary and untouched backup; never test a downgrade on the live DB.
 
 ## Checks and recovery
 

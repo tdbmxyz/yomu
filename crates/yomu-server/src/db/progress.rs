@@ -49,14 +49,15 @@ impl Db {
                     .bind(event.publication_id.to_string())
                     .fetch_one(&mut *tx)
                     .await?;
-            // The single-event path validates the chapter via get_unit; the
-            // offline batch must too, or a client desync stores a position
-            // pointing at a chapter that resolves to nothing.
-            let chapter_known: bool =
-                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM reading_units WHERE id = ?)")
-                    .bind(event.unit_id.to_string())
-                    .fetch_one(&mut *tx)
-                    .await?;
+            // Match the online endpoint: existence alone is insufficient.
+            // A foreign unit would corrupt this publication's resume pointer.
+            let chapter_known: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM reading_units WHERE id = ? AND publication_id = ?)",
+            )
+            .bind(event.unit_id.to_string())
+            .bind(event.publication_id.to_string())
+            .fetch_one(&mut *tx)
+            .await?;
             if !known || !chapter_known {
                 skipped += 1;
                 continue;

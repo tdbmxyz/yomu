@@ -224,21 +224,12 @@ pub fn App(config: AppConfig) -> impl IntoView {
     // Whenever the server (re)becomes reachable, sync progress and read
     // marks recorded while it wasn't. Covers startup (the boot gate flips
     // to Online) and every later recovery, badge retries included.
-    let flush_client = client_for(&config);
-    let flush_library = cache::use_library_cache();
-    let flush_detail = cache::use_detail_cache();
-    Effect::new(move |_| {
-        if conn.get() != Connectivity::Online {
-            return;
-        }
-        let client = flush_client.clone();
-        spawn_local(async move {
-            // The caches travel in: inside this task a context read has no
-            // reactive owner and would silently return None.
-            offline::flush_outbox(&client, flush_library, flush_detail).await;
-            offline::flush_marks(&client, flush_library, flush_detail).await;
-        });
-    });
+    offline::sync::start(
+        conn,
+        client_for(&config),
+        cache::use_library_cache(),
+        cache::use_detail_cache(),
+    );
     // The OS says a network came back: one free probe.
     let probe_client = client_for(&config);
     let online_handle = window_event_listener(leptos::ev::online, move |_| {
@@ -309,6 +300,11 @@ pub fn App(config: AppConfig) -> impl IntoView {
                     <span class="grow"></span>
                     <Account/>
                 </nav>
+                {offline::context::has_legacy_work().then(|| view! {
+                    <p role="status">"Retained offline reading history needs owner confirmation before it can sync. "
+                        <A href="/more">"Review retained offline history in Settings"</A>
+                    </p>
+                })}
                 <main>
                     <Routes fallback=|| view! { <p class="muted">"Page not found"</p> }>
                         <Route path=path!("/") view=pages::Home/>
@@ -645,8 +641,26 @@ pub(crate) fn Account() -> impl IntoView {
     let sign_out = move |_| {
         let client = logout_client.clone();
         spawn_local(async move {
-            let _ = client.logout().await;
-            offline::clear_user_cache();
+            // Revoke first, before broadcasting a new owner to other tabs.
+            // Never claim a successful browser logout while its cookie is live.
+            match client.logout().await {
+                Ok(())
+                | Err(yomu_client::ClientError::Api {
+                    status: 401 | 403, ..
+                }) => {}
+                Err(error) => {
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.alert_with_message(&format!(
+                            "Could not sign out. Reconnect and retry: {error}"
+                        ));
+                    }
+                    return;
+                }
+            }
+            if let Err(error) = offline::context::logout().await {
+                leptos::logging::error!("Offline sign-out cleanup failed: {error}");
+                return;
+            }
             if offline::shell_available() {
                 auth::sign_out().await;
                 auth::reload();

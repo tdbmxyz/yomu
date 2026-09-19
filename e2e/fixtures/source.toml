@@ -2,6 +2,7 @@ id = "fixture"
 name = "Fixture Source"
 base_url = "http://127.0.0.1:4811"
 min_delay_ms = 0
+allowed_private_hosts = ["127.0.0.1", "localhost"]
 
 [search]
 url = "{base}/?s={query}"

@@ -215,6 +215,9 @@ pub fn is_durable_key(key: &str) -> bool {
             | "yomu-pull-queue"
             | "yomu-updates-seen"
     ) || key.starts_with("yomu-cache:")
+        || key.starts_with("yomu-state:")
+        || key.starts_with("yomu-owner:")
+        || matches!(key, "yomu-active-server" | "yomu-legacy-imported")
 }
 
 fn validate_key(key: &str) -> Result<()> {

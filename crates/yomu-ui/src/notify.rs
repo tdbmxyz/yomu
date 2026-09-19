@@ -157,7 +157,7 @@ fn watermark() -> Option<String> {
     web_sys::window()?
         .local_storage()
         .ok()??
-        .get_item(WATERMARK_KEY)
+        .get_item(&crate::offline::scoped_key(WATERMARK_KEY))
         .ok()?
 }
 
@@ -166,8 +166,9 @@ fn set_watermark(ts: &str) {
         return;
     }
     if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = storage.set_item(WATERMARK_KEY, ts);
-        crate::offline::persist_shell_value(WATERMARK_KEY, Some(ts.to_string()));
+        let key = crate::offline::scoped_key(WATERMARK_KEY);
+        let _ = storage.set_item(&key, ts);
+        crate::offline::persist_shell_value(&key, Some(ts.to_string()));
     }
 }
 

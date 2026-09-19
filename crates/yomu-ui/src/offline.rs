@@ -13,6 +13,10 @@
 //!   Cache API.
 //! - **reader prefs**: paged/vertical mode per manga.
 
+pub mod context;
+pub(crate) mod sync;
+pub use context::initialize;
+
 use uuid::Uuid;
 use yomu_domain::{Locations, Locator, ProgressEvent, PushEventsRequest, merge_position};
 
@@ -26,17 +30,33 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
 }
 
+pub(crate) fn scoped_key(key: &str) -> String {
+    if matches!(
+        key,
+        OUTBOX_KEY | DEVICE_KEY | PULL_QUEUE_KEY | MARKS_KEY | "yomu-updates-seen"
+    ) || key.starts_with(CACHE_KEY_PREFIX)
+    {
+        context::key(key)
+    } else {
+        key.to_string()
+    }
+}
+
 fn read_json<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
+    let key = scoped_key(key);
     storage()
-        .and_then(|s| s.get_item(key).ok().flatten())
+        .and_then(|s| s.get_item(&key).ok().flatten())
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
 }
 
 fn write_json<T: serde::Serialize>(key: &str, value: &T) {
+    let key = scoped_key(key);
     if let (Some(storage), Ok(raw)) = (storage(), serde_json::to_string(value)) {
-        let _ = storage.set_item(key, &raw);
-        persist_shell_value(key, Some(raw));
+        if let Err(error) = storage.set_item(&key, &raw) {
+            leptos::logging::error!("Offline state could not be saved: {error:?}");
+        }
+        persist_shell_value(&key, Some(raw));
     }
 }
 
@@ -45,6 +65,9 @@ fn durable_shell_key(key: &str) -> bool {
         key,
         OUTBOX_KEY | DEVICE_KEY | PULL_QUEUE_KEY | MARKS_KEY | "yomu-updates-seen"
     ) || key.starts_with(CACHE_KEY_PREFIX)
+        || key.starts_with("yomu-state:")
+        || key.starts_with("yomu-owner:")
+        || matches!(key, "yomu-active-server" | "yomu-legacy-imported")
 }
 
 /// Write through the WebView's synchronous localStorage mirror into the
@@ -54,20 +77,7 @@ pub fn persist_shell_value(key: &str, value: Option<String>) {
     if !durable_shell_key(key) || !shell_available() {
         return;
     }
-    let key = key.to_string();
-    leptos::task::spawn_local(async move {
-        let args = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&args, &"key".into(), &key.into());
-        let command = if let Some(value) = value {
-            let _ = js_sys::Reflect::set(&args, &"value".into(), &value.into());
-            "store_put"
-        } else {
-            "store_remove"
-        };
-        if let Err(err) = shell_invoke(command, args).await {
-            leptos::logging::warn!("durable state write failed: {err}");
-        }
-    });
+    context::persist(key, value);
 }
 
 /// Before mounting in a native shell, restore SQLite's durable state into the
@@ -164,9 +174,8 @@ pub fn outbox_push(event: ProgressEvent) {
 /// Push the outbox to the server. On success only the *pushed* events are
 /// removed — new events appended while the request was in flight survive
 /// (events are idempotent by id, so a crash between push and remove is
-/// harmless). A 4xx answer means the server understood and refused: those
-/// events can never succeed, so they are dropped too rather than poisoning
-/// every future flush.
+/// harmless). Requests are bounded; oversized batches shrink on 413. All
+/// other failures preserve the journal for a later retry or operator recovery.
 ///
 /// The caches are passed in rather than looked up, for the same reason as
 /// [`flush_marks`]: this runs from a detached task in `App`.
@@ -174,46 +183,47 @@ pub async fn flush_outbox(
     client: &yomu_client::YomuClient,
     library: crate::cache::LibraryCache,
     detail: crate::cache::DetailCache,
-) {
-    let events = outbox();
-    if events.is_empty() {
-        return;
-    }
-    // Positions the server has not seen become read marks on arrival
-    // (auto_mark_read), so every cached unread count is now suspect.
-    crate::cache::mark_publication_stale(library, detail);
-    let pushed: Vec<Uuid> = events.iter().map(|e| e.id).collect();
-    let remove_pushed = || {
-        let remaining: Vec<ProgressEvent> = outbox()
-            .into_iter()
-            .filter(|e| !pushed.contains(&e.id))
-            .collect();
-        write_json(OUTBOX_KEY, &remaining);
-    };
-    match client.push_events(&PushEventsRequest { events }).await {
-        Ok(outcome) => {
-            remove_pushed();
-            if outcome.skipped > 0 {
-                leptos::logging::warn!(
-                    "server skipped {} stale offline event(s) (manga deleted?)",
-                    outcome.skipped
-                );
+) -> bool {
+    let owner = context::scope();
+    let mut limit = 128;
+    // Bound work per tick too, so a long offline journal cannot monopolize the UI.
+    for _ in 0..8 {
+        if !context::matches(&owner) {
+            return false;
+        }
+        let events: Vec<_> = outbox().into_iter().take(limit).collect();
+        if events.is_empty() {
+            return true;
+        }
+        let pushed: std::collections::HashSet<_> = events.iter().map(|e| e.id).collect();
+        match client.push_events(&PushEventsRequest { events }).await {
+            Ok(outcome) => {
+                if !context::matches(&owner) {
+                    return false;
+                }
+                let remaining: Vec<_> = outbox()
+                    .into_iter()
+                    .filter(|e| !pushed.contains(&e.id))
+                    .collect();
+                write_json(OUTBOX_KEY, &remaining);
+                crate::cache::mark_publication_stale(library, detail);
+                if outcome.skipped > 0 {
+                    leptos::logging::warn!(
+                        "server skipped {} stale offline event(s)",
+                        outcome.skipped
+                    );
+                }
             }
-            leptos::logging::log!("synced {} offline progress event(s)", outcome.accepted);
+            Err(yomu_client::ClientError::Api { status: 413, .. }) if limit > 1 => {
+                limit = (pushed.len() / 2).max(1);
+            }
+            Err(error) => {
+                leptos::logging::warn!("Offline progress retained for retry: {error}");
+                return false;
+            }
         }
-        // 401/403 are NOT poison: signing in will make the same batch
-        // succeed, so those events must stay queued.
-        Err(yomu_client::ClientError::Api { status, message })
-            if (400..500).contains(&status) && status != 401 && status != 403 =>
-        {
-            remove_pushed();
-            leptos::logging::warn!(
-                "server rejected {} offline event(s) ({status}: {message}); dropped",
-                pushed.len()
-            );
-        }
-        Err(err) => leptos::logging::warn!("outbox flush failed (still offline?): {err}"),
     }
+    true
 }
 
 /// Best local knowledge of a manga's position: the (possibly stale) server
@@ -266,10 +276,8 @@ pub fn service_worker_active() -> bool {
 /// Save a chapter to this device page by page, calling `on_page(done,
 /// total)` after each — the caller draws the progress. In the shell,
 /// pages land in the app's data directory (`.partial-` staging, renamed
-/// whole at the end); in the browser the service worker's runtime caching
-/// stores each fetched response, refused when no worker controls the page
-/// (the fetches would succeed but cache nothing, and the chapter would be
-/// marked "on device" while it isn't).
+/// whole at the end). Browser saves use acknowledged worker operations and
+/// publish a complete manifest only after every page is durably cached.
 /// Result of a device save: how many pages, or that the caller cancelled.
 pub enum SaveOutcome {
     Done(u32),
@@ -297,41 +305,59 @@ pub async fn save_chapter_with_progress(
         .await
         .map_err(|e| e.to_string())?;
     let total = meta.page_count;
+    if total == 0 {
+        return Err("The chapter has no pages to save".into());
+    }
     on_page(0, total);
+    let owner = context::scope();
+    if !context::matches(&owner) {
+        return Err("Sign in before saving offline content".into());
+    }
     if shell {
         shell_chapter_command("device_begin_chapter", chapter_id, None).await?;
+    } else {
+        context::worker("save-begin", chapter_id, None, None).await?;
     }
-    for n in 0..total {
-        if should_cancel() {
-            // Drop the partial staging dir so a later save starts clean.
-            if shell {
-                let _ = shell_delete_chapter(chapter_id).await;
+    let result = async {
+        for n in 0..total {
+            if should_cancel() || !context::matches(&owner) {
+                return Ok(SaveOutcome::Cancelled);
             }
+            let url = client.page_url(chapter_id, n).ok_or("invalid page URL")?;
+            if shell {
+                let args = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&args, &"url".into(), &url.to_string().into());
+                let _ =
+                    js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
+                let _ = js_sys::Reflect::set(&args, &"page".into(), &(n as f64).into());
+                shell_invoke("device_save_page", args).await?;
+            } else {
+                context::worker("save-page", chapter_id, Some(n), Some(url.as_str())).await?;
+            }
+            on_page(n + 1, total);
+        }
+        if should_cancel() || !context::matches(&owner) {
             return Ok(SaveOutcome::Cancelled);
         }
         if shell {
-            let args = js_sys::Object::new();
-            let url = client
-                .page_url(chapter_id, n)
-                .ok_or_else(|| format!("invalid page URL for {chapter_id}"))?;
-            let _ = js_sys::Reflect::set(&args, &"url".into(), &url.to_string().into());
-            let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
-            let _ = js_sys::Reflect::set(&args, &"page".into(), &(n as f64).into());
-            shell_invoke("device_save_page", args)
-                .await
-                .map_err(|e| format!("page {n}: {e}"))?;
+            shell_chapter_command("device_finish_chapter", chapter_id, None).await?;
         } else {
-            client
-                .fetch_page(chapter_id, n)
-                .await
-                .map_err(|e| format!("page {n}: {e}"))?;
+            context::worker("save-finish", chapter_id, Some(total), None).await?;
         }
-        on_page(n + 1, total);
+        if !context::matches(&owner) {
+            return Ok(SaveOutcome::Cancelled);
+        }
+        Ok(SaveOutcome::Done(total))
     }
-    if shell {
-        shell_chapter_command("device_finish_chapter", chapter_id, None).await?;
+    .await;
+    if !matches!(result, Ok(SaveOutcome::Done(_))) {
+        if shell {
+            let _ = shell_chapter_command("device_cancel_chapter", chapter_id, None).await;
+        } else if context::matches(&owner) {
+            let _ = context::worker("save-cancel", chapter_id, None, None).await;
+        }
     }
-    Ok(SaveOutcome::Done(total))
+    result
 }
 
 async fn shell_chapter_command(
@@ -367,7 +393,7 @@ pub struct DeviceMark {
 /// Chapters stored on this device, with their page count — enough to open
 /// the reader with the server unreachable.
 pub fn device_chapters() -> std::collections::BTreeMap<Uuid, DeviceMark> {
-    let raw = storage().and_then(|s| s.get_item(DEVICE_KEY).ok().flatten());
+    let raw = storage().and_then(|s| s.get_item(&scoped_key(DEVICE_KEY)).ok().flatten());
     let Some(raw) = raw else {
         return Default::default();
     };
@@ -556,6 +582,11 @@ pub async fn shell_save_cover(
 
 /// Delete a device-saved chapter from the shell's storage.
 pub async fn shell_delete_chapter(chapter_id: Uuid) -> Result<(), String> {
+    if !shell_available() {
+        return context::worker("saved-delete", chapter_id, None, None)
+            .await
+            .map(|_| ());
+    }
     let args = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&args, &"chapter".into(), &chapter_id.to_string().into());
     shell_invoke("device_delete_chapter", args).await?;
@@ -787,30 +818,57 @@ pub async fn flush_marks(
     client: &yomu_client::YomuClient,
     library: crate::cache::LibraryCache,
     detail: crate::cache::DetailCache,
-) {
+) -> bool {
+    let owner = context::scope();
     let marks = pending_marks();
-    if marks.is_empty() {
-        return;
-    }
-    let (read, unread): (Vec<_>, Vec<_>) = marks.iter().partition(|(_, r)| **r);
-    let read: Vec<Uuid> = read.into_iter().map(|(id, _)| *id).collect();
-    let unread: Vec<Uuid> = unread.into_iter().map(|(id, _)| *id).collect();
-    let mut flushed: Vec<Uuid> = Vec::new();
-    if !read.is_empty() && client.mark_units(&read, true).await.is_ok() {
-        flushed.extend(read);
-    }
-    if !unread.is_empty() && client.mark_units(&unread, false).await.is_ok() {
-        flushed.extend(unread);
-    }
-    if !flushed.is_empty() {
-        let mut marks = pending_marks();
-        for id in &flushed {
-            marks.remove(id);
+    for desired in [true, false] {
+        let ids: Vec<_> = marks
+            .iter()
+            .filter(|(_, value)| **value == desired)
+            .map(|(id, _)| *id)
+            .take(128)
+            .collect();
+        if ids.is_empty() {
+            continue;
         }
-        write_json(MARKS_KEY, &marks);
-        // The server now disagrees with every cached unread count.
-        crate::cache::mark_publication_stale(library, detail);
-        leptos::logging::log!("synced {} offline read mark(s)", flushed.len());
+        let mut limit = ids.len();
+        loop {
+            if !context::matches(&owner) {
+                return false;
+            }
+            match client.mark_units(&ids[..limit], desired).await {
+                Ok(_) => {
+                    if !context::matches(&owner) {
+                        return false;
+                    }
+                    let mut current = pending_marks();
+                    acknowledge_marks(&mut current, &ids[..limit], desired);
+                    write_json(MARKS_KEY, &current);
+                    crate::cache::mark_publication_stale(library, detail);
+                    break;
+                }
+                Err(yomu_client::ClientError::Api { status: 413, .. }) if limit > 1 => {
+                    limit = (limit / 2).max(1)
+                }
+                Err(error) => {
+                    leptos::logging::warn!("Offline read marks retained for retry: {error}");
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn acknowledge_marks(
+    current: &mut std::collections::BTreeMap<Uuid, bool>,
+    ids: &[Uuid],
+    sent: bool,
+) {
+    for id in ids {
+        if current.get(id) == Some(&sent) {
+            current.remove(id);
+        }
     }
 }
 
@@ -849,28 +907,11 @@ pub fn cache_put<T: serde::Serialize>(key: &str, value: &T) {
 pub fn cache_get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
     storage()
         .and_then(|s| {
-            s.get_item(&format!("{CACHE_KEY_PREFIX}{key}"))
+            s.get_item(&scoped_key(&format!("{CACHE_KEY_PREFIX}{key}")))
                 .ok()
                 .flatten()
         })
         .and_then(|raw| serde_json::from_str(&raw).ok())
-}
-
-/// Drop responses tied to the signed-in identity. A reload clears the
-/// in-memory caches; these are the persistent copies that must not cross from
-/// one account to another.
-pub(crate) fn clear_user_cache() {
-    let Some(storage) = storage() else {
-        return;
-    };
-    let keys: Vec<String> = (0..storage.length().unwrap_or(0))
-        .filter_map(|n| storage.key(n).ok().flatten())
-        .filter(|key| key.starts_with(CACHE_KEY_PREFIX))
-        .collect();
-    for key in keys {
-        let _ = storage.remove_item(&key);
-        persist_shell_value(&key, None);
-    }
 }
 
 /// Connectivity-aware last-known-good read; the one data path every page
@@ -901,6 +942,7 @@ where
     {
         return Ok((value, true));
     }
+    let owner = context::scope();
     match fetch().await {
         // NB: a success does NOT promote the app to Online. On the web a
         // service worker answers cached API reads while the server is
@@ -910,7 +952,9 @@ where
         // retry, browser `online` event) sets Online; the probe is
         // network-only in the service worker for the same reason.
         Ok(value) => {
-            cache_put(key, &value);
+            if context::matches(&owner) {
+                cache_put(key, &value);
+            }
             Ok((value, false))
         }
         Err(err) => {
@@ -1251,6 +1295,17 @@ mod tests {
     use std::collections::BTreeSet;
     use uuid::Uuid;
     use yomu_domain::UnitFingerprint;
+
+    #[test]
+    fn acknowledging_a_read_mark_never_removes_a_newer_unread_mark() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let mut marks = std::collections::BTreeMap::from([(a, false), (b, true)]);
+        super::acknowledge_marks(&mut marks, &[a, b], true);
+        assert_eq!(marks, std::collections::BTreeMap::from([(a, false)]));
+        super::acknowledge_marks(&mut marks, &[a], false);
+        assert!(marks.is_empty());
+    }
 
     fn id(n: u8) -> Uuid {
         Uuid::from_bytes([n; 16])

@@ -93,7 +93,22 @@ test.describe.serial('real browser journeys', () => {
     await expect(page.getByText(/offline/).first()).toBeVisible();
     await row.getByRole('link', { name: 'Chapter 1', exact: true }).click();
     await expect(page.getByTitle('Next page')).toBeVisible();
+    await page.getByTitle('Next page').click();
+    const pendingIds = await page.evaluate(() => {
+      const key = (window as any).YomuOffline.key('yomu-outbox');
+      return JSON.parse(localStorage.getItem(key) || '[]').map((event: any) => event.id);
+    });
+    expect(pendingIds.length).toBeGreaterThan(0);
     await context.setOffline(false);
+    // CDP restores request transport but does not reliably emit the OS's online
+    // event. Deliver that platform signal explicitly; all HTTP/sync stays real.
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect.poll(() => page.evaluate(() => {
+      const key = (window as any).YomuOffline.key('yomu-outbox');
+      return JSON.parse(localStorage.getItem(key) || '[]').length;
+    }), { timeout: 20_000 }).toBe(0);
+    const events = await page.evaluate(async () => (await fetch('/api/v1/progress/events')).json());
+    for (const id of pendingIds) expect(events.events.filter((event: any) => event.id === id)).toHaveLength(1);
   });
 
   test('keeps per-user read state isolated after an account change', async ({ page }) => {

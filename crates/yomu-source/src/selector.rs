@@ -27,6 +27,10 @@ pub struct SelectorSpec {
     /// Milliseconds to wait between two requests to the site.
     #[serde(default = "default_min_delay_ms")]
     pub min_delay_ms: u64,
+    /// Exact hosts permitted to resolve to private addresses. Empty by default;
+    /// only operator-owned local sources/fixtures should need this escape hatch.
+    #[serde(default)]
+    pub allowed_private_hosts: Vec<String>,
     /// Extra headers, e.g. a Referer some sites require for images.
     #[serde(default)]
     pub referer: Option<String>,
@@ -328,6 +332,7 @@ pub struct SelectorSource {
     spec: SelectorSpec,
     compiled: CompiledSpec,
     client: reqwest::Client,
+    network: crate::network::NetworkPolicy,
     /// Earliest instant the next request may *start*, advanced by
     /// `min_delay_ms` per reserved request. `None` until the first request.
     /// Only the reservation is under the lock — see `get`.
@@ -451,18 +456,22 @@ impl SelectorSource {
         {
             headers.insert(reqwest::header::REFERER, value);
         }
+        let network = crate::network::NetworkPolicy::new(spec.allowed_private_hosts.clone());
+        let redirect_network = network.clone();
         let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(network.resolver())
             .timeout(Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) yomu/0.1")
             .default_headers(headers)
             // Cover/page image URLs come from parsed site HTML, so a redirect
             // could aim the server at an internal address. Cap the hops and
             // refuse any that land on a private/loopback target (SSRF guard).
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                 if attempt.previous().len() >= 10 {
                     attempt.error("too many redirects")
-                } else if is_private_target(attempt.url()) {
-                    attempt.error("redirect to a private address blocked")
+                } else if let Err(error) = redirect_network.check_url(attempt.url()) {
+                    attempt.error(error)
                 } else {
                     attempt.follow()
                 }
@@ -474,6 +483,7 @@ impl SelectorSource {
             spec,
             compiled,
             client,
+            network,
             next_slot: tokio::sync::Mutex::new(None),
         })
     }
@@ -563,7 +573,7 @@ impl SelectorSource {
 
         let chapters_doc = Html::parse_document(chapters_html);
         let mut chapters = Vec::new();
-        for (index, item) in chapters_doc.select(&self.compiled.chapter_item).enumerate() {
+        for item in chapters_doc.select(&self.compiled.chapter_item) {
             let Some(link) = self.compiled.chapter_link.extract(item) else {
                 continue;
             };
@@ -596,7 +606,7 @@ impl SelectorSource {
                 key: url.to_string(),
                 title,
                 number,
-                source_order: index as u32,
+                source_order: chapters.len() as u32,
                 scanlator: None,
                 published_at,
             });
@@ -718,6 +728,7 @@ impl SelectorSource {
     // ---- fetching ----
 
     async fn get(&self, url: &Url) -> Result<reqwest::Response> {
+        self.network.check_url(url).map_err(SourceError::Http)?;
         // Politeness: space request *starts* by min_delay, but don't hold the
         // lock across the request itself. The old code slept and sent while
         // holding the mutex, so every fetch ran strictly end-to-end — the N
@@ -743,12 +754,16 @@ impl SelectorSource {
             tokio::time::sleep(wait).await;
         }
 
-        let resp = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+        let resp = self.client.get(url.clone()).send().await.map_err(|error| {
+            // Reqwest's Display omits resolver/redirect policy failures.
+            // Surface the root reason so an operator can distinguish a
+            // blocked private target from an ordinary transport outage.
+            let mut reason: &dyn std::error::Error = &error;
+            while let Some(source) = reason.source() {
+                reason = source;
+            }
+            SourceError::Http(format!("{error}: {reason}"))
+        })?;
         if !resp.status().is_success() {
             return Err(SourceError::Http(format!("{} on {url}", resp.status())));
         }
@@ -756,11 +771,21 @@ impl SelectorSource {
     }
 
     async fn get_html(&self, url: &Url) -> Result<String> {
-        self.get(url)
-            .await?
-            .text()
+        let mut response = self.get(url).await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))
+            .map_err(|e| SourceError::Http(e.to_string()))?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_HTML_BYTES {
+                return Err(SourceError::Http(
+                    "source HTML exceeds the 8 MiB limit".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 
     fn key_url(&self, key: &str) -> Result<Url> {
@@ -846,11 +871,6 @@ impl Source for SelectorSource {
     }
 
     async fn image(&self, url: &Url) -> Result<ImageData> {
-        if is_private_target(url) {
-            return Err(SourceError::Parse(format!(
-                "refusing to fetch a private address: {url}"
-            )));
-        }
         let mut resp = self.get(url).await?;
         let content_type = resp
             .headers()
@@ -884,40 +904,13 @@ impl Source for SelectorSource {
 /// Upper bound on a proxied image, so a hostile/broken upstream can't OOM the
 /// server. Generous for manga pages (large webtoon strips run a few MiB).
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_HTML_BYTES: usize = 8 * 1024 * 1024;
 
-/// Whether a URL targets a private/loopback/link-local address — the cheap
-/// SSRF guard for proxied image URLs, which come from parsed site HTML and
-/// could otherwise aim the server at cloud metadata (169.254.169.254) or LAN
-/// hosts. A *hostname* that resolves to a private address (DNS rebinding) is
-/// out of scope here; that needs a connection-pinning resolver.
-fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || o[0] == 0
-        || (o[0] == 100 && (64..=127).contains(&o[1])) // carrier-grade NAT 100.64/10
-}
-
+#[cfg(test)]
 fn is_private_target(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => is_private_v4(ip),
-        Some(url::Host::Ipv6(ip)) => {
-            // An IPv4-mapped address (`::ffff:a.b.c.d`) routes to the real
-            // IPv4 host, so it must face the same checks — otherwise the
-            // metadata endpoint is reachable as `[::ffff:169.254.169.254]`.
-            if let Some(v4) = ip.to_ipv4_mapped() {
-                return is_private_v4(v4);
-            }
-            ip.is_loopback()
-                || ip.is_unspecified()
-                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local  fe80::/10
-        }
-        _ => false,
-    }
+    crate::network::NetworkPolicy::new(vec![])
+        .check_url(url)
+        .is_err()
 }
 
 /// Extract the manga cards matched by `item` on a listing/search page.
@@ -1011,6 +1004,130 @@ fn search_url(spec: &SelectorSpec, query: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn http_fixture(response: Vec<u8>) -> (SelectorSource, Url, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url: Url = format!(
+            "http://localhost:{}/",
+            listener.local_addr().unwrap().port()
+        )
+        .parse()
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(&response).await;
+        });
+        let spec: SelectorSpec = toml::from_str(&format!(
+            r#"
+            id = "fixture"
+            name = "Fixture"
+            base_url = "{url}"
+            min_delay_ms = 0
+            allowed_private_hosts = ["localhost"]
+            [search]
+            url = "{{base}}/?q={{query}}"
+            item = "a"
+            link = "@href"
+            [manga]
+            chapter_item = "a"
+            chapter_link = "@href"
+            [pages]
+            image = "img@src"
+        "#
+        ))
+        .unwrap();
+        (SelectorSource::new(spec).unwrap(), url, task)
+    }
+
+    #[tokio::test]
+    async fn redirects_cannot_escape_an_explicit_local_fixture_exception() {
+        let (source, url, task) = http_fixture(b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()).await;
+        let error = source.get_html(&url).await.unwrap_err().to_string();
+        assert!(error.contains("non-public"), "{error}");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn html_without_content_length_is_bounded() {
+        let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        response.resize(response.len() + MAX_HTML_BYTES + 1, b'x');
+        let (source, url, task) = http_fixture(response).await;
+        assert!(
+            source
+                .get_html(&url)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("8 MiB")
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_dns_is_blocked_before_a_connection_and_opt_in_still_works() {
+        let (mut source, url, task) = http_fixture(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+        )
+        .await;
+        let blocked = crate::network::NetworkPolicy::new(vec![]);
+        source.client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(blocked.resolver())
+            .build()
+            .unwrap();
+        assert!(source.get_html(&url).await.is_err());
+        assert!(
+            !task.is_finished(),
+            "blocked DNS must not reach the listening socket"
+        );
+        source.client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(source.network.resolver())
+            .build()
+            .unwrap();
+        assert_eq!(source.get_html(&url).await.unwrap(), "ok");
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn chapter_order_is_dense_after_skipping_malformed_entries() {
+        let spec: SelectorSpec = toml::from_str(
+            r#"
+            id = "fixture"
+            name = "Fixture"
+            base_url = "https://fixture.test"
+            [search]
+            url = "{base}/?s={query}"
+            item = "a"
+            link = "@href"
+            [manga]
+            chapter_item = "li"
+            chapter_link = "a@href"
+            [pages]
+            image = "img@src"
+        "#,
+        )
+        .unwrap();
+        let url = spec.base_url.clone();
+        let mut source = SelectorSource::new(spec).unwrap();
+        let html = r#"<ul><li>ad</li><li><a href="/one">First</a></li><li><a>No URL</a></li><li><a href="/two">Second</a></li><li>ad</li></ul>"#;
+        for (order, expected) in [
+            (ChapterOrder::NewestFirst, [0, 1]),
+            (ChapterOrder::OldestFirst, [1, 0]),
+        ] {
+            source.spec.manga.chapter_order = order;
+            let chapters = source.parse_manga(html, &url).unwrap().chapters;
+            assert_eq!(
+                chapters.iter().map(|c| c.source_order).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(chapters[0].title, "First");
+            assert_eq!(chapters[1].title, "Second");
+        }
+    }
 
     #[test]
     fn entity_url_substitutes_url_and_parent() {

@@ -27,13 +27,13 @@ export default defineConfig({
     {
       command: 'node e2e/fixtures/server.mjs',
       url: 'http://127.0.0.1:4811/.well-known/openid-configuration',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30_000,
     },
     {
       command: 'node e2e/start-yomu.mjs',
       url: 'http://127.0.0.1:4711/api/v1/health',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 180_000,
     },
   ],

@@ -14,6 +14,8 @@
 //! protocol (base URL injected as `window.YOMU_DEVICE_BASE`).
 
 pub mod auth;
+#[cfg(test)]
+mod storage_tests;
 
 use std::{io::Write, path::PathBuf};
 
@@ -205,6 +207,18 @@ fn device_begin_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), St
     std::fs::create_dir_all(&partial).map_err(|e| e.to_string())
 }
 
+/// Cancel staging without removing an existing complete chapter.
+#[tauri::command]
+fn device_cancel_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), String> {
+    checked_id(&chapter)?;
+    let partial = chapters_dir(&app)?.join(format!(".partial-{chapter}"));
+    match std::fs::remove_dir_all(partial) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Download one page of a chapter into its `.partial-` directory.
 #[tauri::command]
 async fn device_save_page(
@@ -238,8 +252,62 @@ fn device_finish_chapter(app: tauri::AppHandle, chapter: String) -> Result<(), S
     let dir = chapters_dir(&app)?;
     let partial = dir.join(format!(".partial-{chapter}"));
     let target = dir.join(&chapter);
-    let _ = std::fs::remove_dir_all(&target);
-    std::fs::rename(&partial, &target).map_err(|e| e.to_string())
+    publish_chapter(&partial, &target).map_err(|e| e.to_string())
+}
+
+fn publish_chapter(partial: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    // A failed or missing staging directory must never destroy the good copy.
+    if !partial.is_dir() {
+        return Err(std::io::Error::other(
+            "chapter staging directory is missing",
+        ));
+    }
+    let backup = target.with_extension("old");
+    // Recover a process killed between the two renames, before any new save.
+    if backup.exists() && !target.exists() {
+        std::fs::rename(&backup, target)?;
+    }
+    if backup.exists() {
+        std::fs::remove_dir_all(&backup)?;
+    }
+    let had_old = target.exists();
+    if had_old {
+        std::fs::rename(target, &backup)?;
+    }
+    if let Err(error) = std::fs::rename(partial, target) {
+        if had_old {
+            std::fs::rename(&backup, target)?;
+        }
+        return Err(error);
+    }
+    if had_old {
+        let _ = std::fs::remove_dir_all(backup);
+    }
+    Ok(())
+}
+
+fn recover_chapter_publications(dir: &std::path::Path) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(chapter) = name.to_str().and_then(|name| name.strip_suffix(".old")) else {
+            continue;
+        };
+        if chapter.len() != 36 || checked_id(chapter).is_err() || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let target = dir.join(chapter);
+        if !target.exists() {
+            std::fs::rename(entry.path(), target)?;
+        }
+        // If both copies exist, keep the old one until the next explicit save.
+    }
+    Ok(())
 }
 
 fn covers_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -444,6 +512,7 @@ pub fn run() {
             store_remove,
             save_backup_file,
             device_begin_chapter,
+            device_cancel_chapter,
             device_save_page,
             device_finish_chapter,
             device_delete_chapter,
@@ -486,6 +555,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            recover_chapter_publications(&app.path().app_data_dir()?.join("chapters"))?;
             let store_path = app.path().app_data_dir()?.join("client-state.db");
             let store = tauri::async_runtime::block_on(yomu_store::Store::open(&store_path))?;
             app.manage(store);

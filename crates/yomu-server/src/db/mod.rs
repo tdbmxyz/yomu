@@ -112,6 +112,9 @@ impl Db {
     }
 }
 
+#[cfg(test)]
+mod recovery_tests;
+
 mod backup;
 mod catalog;
 mod categories;
@@ -430,6 +433,56 @@ mod tests {
             genres: genres.iter().map(|g| g.to_string()).collect(),
             ..details(key, chapters)
         }
+    }
+
+    #[tokio::test]
+    async fn offline_batch_skips_foreign_units_without_losing_valid_events() {
+        let db = Db::in_memory().await.unwrap();
+        let a = db
+            .insert_publication("fixture", &details("a", &[("a1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let b = db
+            .insert_publication("fixture", &details("b", &[("b1", Some(1.0))]), false)
+            .await
+            .unwrap();
+        let a_unit = db.list_units(a.id).await.unwrap()[0].id;
+        let b_unit = db.list_units(b.id).await.unwrap()[0].id;
+        let invalid = ProgressEvent {
+            id: Uuid::new_v4(),
+            publication_id: a.id,
+            unit_id: b_unit,
+            page: 4,
+            device: "fixture".into(),
+            at: Utc::now(),
+        };
+        let valid = ProgressEvent {
+            id: Uuid::new_v4(),
+            unit_id: a_unit,
+            ..invalid.clone()
+        };
+        assert_eq!(
+            db.append_events(SHARED, &[invalid.clone(), valid.clone()])
+                .await
+                .unwrap(),
+            (1, 1)
+        );
+        assert_eq!(db.export_events(SHARED).await.unwrap(), vec![valid.clone()]);
+        assert_eq!(
+            db.latest_position(SHARED, a.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unit_id,
+            a_unit
+        );
+        assert_eq!(
+            db.append_events(SHARED, &[invalid, valid.clone()])
+                .await
+                .unwrap(),
+            (1, 1)
+        );
+        assert_eq!(db.export_events(SHARED).await.unwrap(), vec![valid]);
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ mod home;
 mod library;
 mod manga;
 mod more;
+mod offline_storage;
 mod reader;
 mod search;
 mod sources;

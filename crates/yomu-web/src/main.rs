@@ -77,7 +77,17 @@ fn main() {
         let config = AppConfig {
             api_base: api_base(),
         };
-        mount_to_body(move || view! { <App config=config.clone()/> });
+        match yomu_ui::offline::initialize(config.api_base.as_str()).await {
+            Ok(()) => mount_to_body(move || view! { <App config=config.clone()/> }),
+            Err(error) => mount_to_body(move || {
+                view! {
+                    <section><h1>"Offline storage could not be initialized"</h1>
+                        <p>{error.clone()}</p>
+                        <p>"Your stored data has not been deleted. Reconnect and reload; do not clear site data."</p>
+                    </section>
+                }
+            }),
+        }
 
         // mount_to_body appends: without this the boot skeleton stays on top
         // of the app it was covering for (it is fixed, inset: 0).

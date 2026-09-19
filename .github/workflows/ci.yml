@@ -134,9 +134,15 @@ jobs:
           rm -rf crates/yomu-web/dist
           cp -rL result-web crates/yomu-web/dist
 
+      - name: frontend delivery size budget
+        shell: bash
+        run: node scripts/check-web-size.mjs crates/yomu-web/dist | tee web-size.json
+
       - name: Playwright journeys
         env:
           YOMU_E2E_SERVER: ${{ github.workspace }}/result-server/bin/yomu-server
+          # Must be stripped by the fixture launcher, not override its TOML.
+          YOMU_LISTEN: must-not-leak-into-fixtures
         run: npm run test:e2e
 
       - name: upload Playwright report
@@ -147,6 +153,7 @@ jobs:
           path: |
             playwright-report/
             test-results/
+            web-size.json
           if-no-files-found: ignore
           retention-days: 14
 

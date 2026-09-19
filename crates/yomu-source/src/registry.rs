@@ -25,7 +25,15 @@ impl Registry {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             // Missing dir = no sources yet; that's a valid empty setup.
-            Err(_) => return Ok((registry, broken)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((registry, broken));
+            }
+            Err(error) => {
+                return Err(SourceError::Definition(format!(
+                    "reading {}: {error}",
+                    dir.display()
+                )));
+            }
         };
         for entry in entries {
             let entry = entry
@@ -102,6 +110,27 @@ mod tests {
         [pages]
         image = "img@src"
     "#;
+
+    #[test]
+    fn only_a_missing_directory_is_an_empty_configuration() {
+        let path = std::env::temp_dir().join(format!(
+            "yomu-registry-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (registry, diagnostics) = Registry::load(&path).unwrap();
+        assert!(registry.is_empty());
+        assert!(diagnostics.is_empty());
+        std::fs::write(&path, "not a directory").unwrap();
+        let result = Registry::load(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            matches!(result, Err(SourceError::Definition(message)) if message.contains(path.to_str().unwrap()))
+        );
+    }
 
     #[test]
     fn broken_definitions_are_skipped_not_fatal() {

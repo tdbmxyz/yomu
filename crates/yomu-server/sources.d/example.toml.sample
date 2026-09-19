@@ -10,6 +10,10 @@ id = "example-scans"
 name = "Example Scans"
 base_url = "https://example-scans.com"
 min_delay_ms = 800            # politeness delay between requests
+# All resolved addresses must be public; checks also apply to redirects.
+# Only for operator-owned local sources: exact hostnames/IPs, never wildcards.
+# allowed_private_hosts = ["localhost", "127.0.0.1"]
+# Ambient HTTP(S)_PROXY variables are deliberately not used by selector fetches.
 # referer = "https://example-scans.com/"   # some sites require it for images
 
 [search]

@@ -10,9 +10,8 @@ position (chapter + page) following you. Sibling project of
 - **Library**: search a source, track a manga, browse chapters.
 - **Sources without extensions**: a scan site is a TOML file with CSS
   selectors (`sources.d/*.toml`) — no code, no extension ecosystem.
-- **Local series** (à la Suwayomi): drop `local/<Series>/<Chapter>/*.png`
-  (or `<Chapter>.cbz`) on the server and it's a searchable, trackable
-  source like any other.
+- **Local series**: drop `<Series>/<Chapter>/*.png` (or `<Chapter>.cbz`)
+  under the configured `books.dir`; the streamer adds them directly to the library.
 - **Server-side downloads**: chapters are fetched to the server's disk by a
   queue worker; or read **live** (proxied page by page, nothing stored).
 - **Progress tracking**: current chapter + page, stored as an append-only
@@ -68,6 +67,8 @@ Add a scan site: copy `crates/yomu-server/sources.d/example.toml.sample` to
 `<sources_dir>/<site>.toml`, adjust the selectors (browser devtools on the
 site), restart the server. Production readiness, metrics, SQLite backup, and
 maintenance guidance is in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Release safety, test drills, size budgets, and documentation policy are in
+[`docs/MAINTENANCE.md`](docs/MAINTENANCE.md).
 
 First checkout: enter the shell, `cargo generate-lockfile`,
 `git add Cargo.lock`, re-enter (wasm-bindgen-cli pinning, as in chaos).

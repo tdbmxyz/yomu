@@ -95,6 +95,14 @@ fmt:
 test:
     cargo nextest run --workspace --exclude yomu-shell
 
+# Synthetic historical upgrade and SQLite snapshot/restore drills only.
+test-recovery:
+    cargo nextest run -p yomu-server -E 'test(recovery_tests)'
+
+# Report/enforce release shell + boot asset size.
+check-web-size: build-web
+    node scripts/check-web-size.mjs crates/yomu-web/dist
+
 # Build the real web bundle, then run Chromium against a fixture scraper and
 # OIDC provider. Install browser binaries once with:
 #   npx playwright install chromium
