@@ -177,6 +177,12 @@ fn SummaryCard(
     let client = use_client();
     let title = hit.title.clone();
     let in_library = hit.in_library;
+    let cover_src = hit.cover_url.clone().map(|url| {
+        client
+            .source_cover_url(&url)
+            .map(|url| url.to_string())
+            .unwrap_or(url)
+    });
 
     let add = move |auto_download: bool| {
         let client = client.clone();
@@ -207,23 +213,14 @@ fn SummaryCard(
     view! {
         <div class="manga-card browse-card">
             <span class="cover-wrap">
-                {match hit.cover_url.clone() {
-                    // Covers arrive through the server's cover proxy as
-                    // relative URLs — resolve them against the configured
-                    // server, not the page origin: in the shells the page
-                    // origin is the app itself, not the server.
-                    Some(url) => {
-                        // joined base-relative, like every client call
-                        let src = url
-                            .strip_prefix('/')
-                            .and_then(|path| use_client().base().join(path).ok())
-                            .map(|u| u.to_string())
-                            .unwrap_or(url);
-                        view! {
-                            <img class="manga-cover" src=src loading="lazy" alt=""/>
-                        }
-                            .into_any()
+                {match cover_src {
+                    // The client resolves this server-relative proxy URL and
+                    // signs it for native WebViews, whose `<img>` requests
+                    // cannot carry the app's Authorization header.
+                    Some(src) => view! {
+                        <img class="manga-cover" src=src loading="lazy" alt=""/>
                     }
+                        .into_any(),
                     None => view! { <span class="manga-cover cover-empty"></span> }.into_any(),
                 }}
                 {in_library

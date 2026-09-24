@@ -11,13 +11,14 @@ Fixture: `e2e/tests/seed.spec.ts`; source and IdP behavior live in `e2e/fixtures
 
 ## Reading and offline library
 
-1. As Alice, search the fixture source and track Fixture Farming.
-2. Mark Chapter 1 read and verify its row state.
-3. Download Chapter 1 to server and browser device storage.
-4. Open it, advance a page, return, and verify Continue reading.
-5. Remove the server copy while retaining the browser copy.
-6. Request a Service Worker update and verify the active worker still controls the page.
-7. Take Chromium offline, reload the publication, and open the device-saved chapter.
+1. As Alice, search the fixture source and verify its proxied cover decodes.
+2. Track Fixture Farming.
+3. Mark Chapter 1 read and verify its row state.
+4. Download Chapter 1 to server and browser device storage.
+5. Open it, advance a page, return, and verify Continue reading.
+6. Remove the server copy while retaining the browser copy.
+7. Request a Service Worker update and verify the active worker still controls the page.
+8. Take Chromium offline, reload the publication, and open the device-saved chapter.
 
 ## Per-user state
 
