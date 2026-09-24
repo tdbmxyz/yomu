@@ -263,14 +263,18 @@ mod tests {
         dir
     }
 
-    /// Router in OIDC mode: `oidc_enabled()` is true, but no session is
-    /// presented, so `CurrentUser`-gated routes must reject.
-    async fn oidc_router() -> axum::Router {
+    /// State in OIDC mode: `oidc_enabled()` is true, so content routes need
+    /// a session or a valid media credential.
+    async fn oidc_state() -> AppState {
         let mut config = Config::default();
         config.auth.issuer = Some("https://auth.example.test/".parse().unwrap());
         let db = Db::in_memory().await.unwrap();
-        let state = AppState::new(config, db, Registry::default(), None);
-        super::router(state)
+        AppState::new(config, db, Registry::default(), None)
+    }
+
+    /// Router in OIDC mode with no session presented.
+    async fn oidc_router() -> axum::Router {
+        super::router(oidc_state().await)
     }
 
     async fn status_of(method: &str, path: &str) -> StatusCode {
@@ -346,12 +350,38 @@ mod tests {
     async fn an_invalid_media_token_does_not_open_an_image_route() {
         const ID: &str = "00000000-0000-0000-0000-000000000001";
         for query in ["mt=", "mt=nonsense", "mt=a.b.c"] {
-            assert_eq!(
-                status_of("GET", &format!("/api/v1/publications/{ID}/cover?{query}")).await,
-                StatusCode::UNAUTHORIZED,
-                "cover opened with {query}"
-            );
+            for path in [
+                format!("/api/v1/publications/{ID}/cover?{query}"),
+                format!("/api/v1/covers?src=https%3A%2F%2Fsource.test%2Fc.jpg&{query}"),
+            ] {
+                assert_eq!(
+                    status_of("GET", &path).await,
+                    StatusCode::UNAUTHORIZED,
+                    "image route {path} accepted an invalid token"
+                );
+            }
         }
+    }
+
+    /// The catalog cover proxy is also loaded by `<img>` in source results.
+    /// A valid media token must get past auth just like publication covers and
+    /// page images; this fixture has no catalog entry, so the handler's 404 is
+    /// proof that the auth layer accepted it.
+    #[tokio::test]
+    async fn a_media_token_opens_the_source_cover_proxy() {
+        let state = oidc_state().await;
+        let token = state.media_key.mint(crate::auth::SHARED_USER, 60);
+        let router = super::router(state);
+        let req = Request::builder()
+            .uri(format!(
+                "/api/v1/covers?src=https%3A%2F%2Fsource.test%2Fc.jpg&mt={token}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     /// The sign-in surface: an app holding no session must be able to ask

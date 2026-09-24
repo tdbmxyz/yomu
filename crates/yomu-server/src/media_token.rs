@@ -1,10 +1,10 @@
-//! Short-lived tokens for the two routes an `<img>` loads.
+//! Short-lived tokens for routes an `<img>` loads.
 //!
-//! Covers and page images are fetched by the browser's image loader,
-//! which sends no `Authorization` header — and the shells' cookies never
-//! apply from `tauri://localhost`. So those two routes accept a signed,
-//! expiring token in the query string instead. Everything else the UI
-//! reads goes through `yomu-client`, which can send a header.
+//! Publication covers, source-result covers, and page images are fetched by
+//! the browser's image loader, which sends no `Authorization` header — and
+//! the shells' cookies never apply from `tauri://localhost`. So those routes
+//! accept a signed, expiring token in the query string instead. Everything
+//! else the UI reads goes through `yomu-client`, which can send a header.
 //!
 //! Stateless: the key is generated at startup, so a restart invalidates
 //! outstanding tokens. They last an hour and clients refetch, which is

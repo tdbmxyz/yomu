@@ -53,8 +53,8 @@ pub struct YomuClient {
     /// failure arrives as a transport error rather than a 401 — which
     /// reads as "go offline", so signing in appears to do nothing.
     token: Option<String>,
-    /// Short-lived credential appended to the two image URLs, which an
-    /// `<img>` loads without any header of ours.
+    /// Short-lived credential appended to image URLs, which an `<img>`
+    /// loads without any header of ours.
     media_token: Option<String>,
 }
 
@@ -96,8 +96,8 @@ impl YomuClient {
         &self.base
     }
 
-    /// Append `?mt=` when we hold one. Only the two routes an `<img>`
-    /// loads need this; everything else sends a header.
+    /// Append `?mt=` when we hold one. Only routes loaded by an `<img>`
+    /// need this; everything else sends a header.
     fn signed_media_url(&self, url: Option<Url>) -> Option<Url> {
         let mut url = url?;
         if let Some(token) = &self.media_token {
@@ -169,6 +169,13 @@ impl YomuClient {
             .get(self.url(&format!("api/v1/sources/{source_id}/browse"))?)
             .query(&[("sort", sort.key()), ("page", &page.to_string())]);
         self.send(req).await
+    }
+
+    /// Resolve a source result's server-relative cover-proxy URL and add the
+    /// media credential needed when a native WebView loads it with `<img>`.
+    pub fn source_cover_url(&self, path: &str) -> Option<Url> {
+        let path = path.strip_prefix('/')?;
+        self.signed_media_url(self.base.join(path).ok())
     }
 
     // ---- library ----
@@ -471,19 +478,31 @@ mod tests {
         "http://localhost:4700/".parse().unwrap()
     }
 
-    /// An `<img>` sends no header of ours, so these two URLs — and only
-    /// these two — carry the credential in the query instead.
+    /// An `<img>` sends no header of ours, so every server image URL carries
+    /// the credential in the query instead.
     #[test]
     fn image_urls_carry_a_media_token_only_when_one_is_held() {
         let id = Uuid::from_u128(1);
+        let source_cover = "/api/v1/covers?src=https%3A%2F%2Fsource.test%2Fcover.jpg";
 
         let plain = YomuClient::new(base());
         assert_eq!(plain.cover_url(id).unwrap().query(), None);
         assert_eq!(plain.page_url(id, 3).unwrap().query(), None);
+        assert_eq!(
+            plain.source_cover_url(source_cover).unwrap().query(),
+            Some("src=https%3A%2F%2Fsource.test%2Fcover.jpg")
+        );
 
         let signed = YomuClient::new(base()).with_media_token(Some("mt-1".into()));
         assert_eq!(signed.cover_url(id).unwrap().query(), Some("mt=mt-1"));
         assert_eq!(signed.page_url(id, 3).unwrap().query(), Some("mt=mt-1"));
+        let source_url = signed.source_cover_url(source_cover).unwrap();
+        assert_eq!(source_url.path(), "/api/v1/covers");
+        assert!(
+            source_url
+                .query_pairs()
+                .any(|(name, value)| name == "mt" && value == "mt-1")
+        );
         // The path is untouched; only the query gains anything.
         assert_eq!(
             signed.page_url(id, 3).unwrap().path(),
@@ -523,5 +542,8 @@ mod tests {
             "{url}"
         );
         assert_eq!(url.query(), Some("mt=mt-1"));
+        let source_url = client.source_cover_url("/api/v1/covers?src=cover").unwrap();
+        assert_eq!(source_url.path(), "/yomu/api/v1/covers");
+        assert!(source_url.query().unwrap().contains("mt=mt-1"));
     }
 }

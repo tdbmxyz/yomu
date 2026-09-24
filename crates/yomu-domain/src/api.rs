@@ -71,8 +71,8 @@ pub struct SessionResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Short-lived credential for the two routes an `<img>` loads, which
-/// cannot carry an `Authorization` header.
+/// Short-lived credential for routes an `<img>` loads, which cannot carry
+/// an `Authorization` header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaTokenResponse {
     pub token: String,

@@ -150,7 +150,7 @@ pub async fn exchange(
     Ok(Json(SessionResponse { token, expires_at }))
 }
 
-/// A short-lived credential for the two routes an `<img>` loads.
+/// A short-lived credential for routes an `<img>` loads.
 ///
 /// Itself authenticated: the token delegates a session the caller
 /// already holds, for requests that cannot carry one.
