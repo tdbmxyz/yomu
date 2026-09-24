@@ -10,8 +10,9 @@ IdP refresh-token/JWKS flow. See [ARCHITECTURE.md](ARCHITECTURE.md) and ADR 0003
 1. Deploy the server-side identity gate first. Its route-coverage tests must keep
    all content APIs protected in OIDC mode.
 2. Configure the reverse proxy to pass health/sign-in routes and bearer requests
-   to Yomu, plus narrowly matched publication-cover/unit-page URLs carrying `mt`.
-   Yomu, not the proxy bypass, validates these credentials. Never bypass all media.
+   to Yomu, plus narrowly matched `/api/v1/covers`, publication-cover, and unit-page
+   URLs carrying `mt`. Yomu, not the proxy bypass, validates these credentials.
+   Never bypass all media.
 3. Update clients. Keep the existing browser forward-auth path working throughout.
 
 A WebView cannot borrow the system browser's cookies. A proxy redirect to an IdP

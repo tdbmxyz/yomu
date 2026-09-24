@@ -19,6 +19,11 @@ async function openFixture(page: Page) {
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   const card = page.locator('.manga-card').filter({ hasText: 'Fixture Farming' });
   await expect(card).toBeVisible();
+  const cover = card.locator('img.manga-cover');
+  await expect(cover).toBeVisible();
+  await expect.poll(() => cover.evaluate(
+    (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
+  )).toBe(true);
   const track = card.getByRole('button', { name: 'track', exact: true });
   if (await track.isVisible().catch(() => false)) {
     await track.click();

@@ -31,7 +31,7 @@ identity layer differs from chaos in both directions:
 Progress events and read marks are per-user. Library, downloads and categories
 stay server-wide — chapters are downloaded once for the household. In OIDC mode
 all content APIs require identity. Health/metrics and the sign-in surface are
-public; the two media routes also accept short-lived signed media credentials.
+public; image routes also accept short-lived signed media credentials.
 
 ## Consequences
 

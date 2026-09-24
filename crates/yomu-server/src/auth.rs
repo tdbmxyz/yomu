@@ -76,10 +76,13 @@ pub fn is_public(path: &str) -> bool {
     )
 }
 
-/// The two routes an `<img>` loads, which may present a media token
-/// instead of a session (see `media_token.rs`). Not public: without a
-/// valid token they still 401.
+/// Routes an `<img>` loads, which may present a media token instead of a
+/// session (see `media_token.rs`). Not public: without a valid token they
+/// still 401.
 pub fn takes_media_token(path: &str) -> bool {
+    if path == "/covers" {
+        return true; // proxied covers in source search/browse results
+    }
     let mut segments = path.split('/').skip(1);
     match (segments.next(), segments.next(), segments.next()) {
         // /publications/{id}/cover
@@ -125,9 +128,8 @@ async fn resolve(parts: &Parts, state: &AppState) -> Option<User> {
 ///
 /// Resolves the session once and puts the `User` in request extensions,
 /// so `CurrentUser` becomes a read rather than a second database hit.
-/// Anything not named in [`is_public`] needs that user; the two image
-/// routes may present a media token instead, because an `<img>` cannot
-/// send a header.
+/// Anything not named in [`is_public`] needs that user; image routes may
+/// present a media token instead, because an `<img>` cannot send a header.
 ///
 /// This is a layer rather than an extractor on every handler because
 /// axum offers no way to enumerate a router's routes: with per-handler
@@ -269,9 +271,12 @@ mod tests {
     #[test]
     fn image_routes_take_a_media_token_but_are_not_public() {
         assert!(!is_public("/publications/0199-abc/cover"));
+        assert!(takes_media_token("/covers"));
         assert!(takes_media_token("/publications/0199-abc/cover"));
         assert!(takes_media_token("/units/0199-abc/pages/12"));
-        // The page *list* is JSON, fetched by the client with a header.
+        // Matching stays exact; JSON and similarly named routes still need
+        // the normal Authorization header.
+        assert!(!takes_media_token("/covers/anything"));
         assert!(!takes_media_token("/units/0199-abc/pages"));
         assert!(!takes_media_token("/library"));
         assert!(!takes_media_token("/publications/0199-abc"));
