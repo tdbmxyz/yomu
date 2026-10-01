@@ -101,6 +101,18 @@
         };
       };
 
+    # Trunk 0.21.14 vendors libdeflate-sys 1.23.1, whose evex512 target
+    # attributes were removed by GCC 16. Keep this compatibility compiler
+    # scoped to Trunk (web builds and every dev shell), not the app/toolchain.
+    # Remove the override when Trunk bundles libdeflate >= 1.25.
+    trunk = pkgs.trunk.overrideAttrs (old: {
+      env = (old.env or {}) // {
+        # cc-rs's target-specific override takes precedence over HOST_CC,
+        # which Nix's Rust hooks export from the current stdenv.
+        CC_x86_64_unknown_linux_gnu = "${pkgs.gcc15}/bin/cc";
+      };
+    });
+
     tauriLibs = with pkgs; [
       webkitgtk_4_1
       gtk3
@@ -165,7 +177,7 @@
 
       nativeBuildInputs = [
         rustToolchain
-        pkgs.trunk
+        trunk
         pkgs.binaryen
         wasm-bindgen-cli
         pkgs.rustPlatform.cargoSetupHook
