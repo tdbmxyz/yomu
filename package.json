@@ -8,8 +8,8 @@
     "test:e2e:agents": "playwright init-agents --loop=codex"
   },
   "devDependencies": {
-    "@playwright/mcp": "0.0.79",
-    "@playwright/test": "1.62.1"
+    "@playwright/mcp": "0.0.82",
+    "@playwright/test": "1.63.0"
   },
   "dependencies": {
     "pdfjs-dist": "6.3.289"
