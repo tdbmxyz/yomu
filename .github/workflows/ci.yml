@@ -178,6 +178,9 @@ jobs:
       - name: compile Android shell and Kotlin customization
         run: |
           env -u ANDROID_SDK_ROOT nix develop .#android -c bash -c '
+            set -euo pipefail
+            # Trunk packages the pinned PDF.js assets during beforeBuildCommand.
+            npm ci
             cd crates/yomu-shell
             cargo tauri android build --debug --apk --target aarch64
           '
