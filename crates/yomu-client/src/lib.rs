@@ -7,9 +7,9 @@ use yomu_domain::{
     AddPublicationRequest, ApiErrorBody, Backup, BrowseSort, BulkUnitsResponse, Category,
     DownloadUnitsRequest, DownloadsResponse, EventsResponse, FingerprintsResponse, HealthResponse,
     Locator, MangaSummary, MarkUnitsRequest, MeResponse, MediaTokenResponse, PagesResponse,
-    Publication, PublicationDetailResponse, PublicationWithLocator, PushEventsRequest,
-    PushEventsResponse, ReadingUnit, RefreshResponse, RescanResponse, RestoreSummary,
-    SetLocatorRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
+    Publication, PublicationDetailResponse, PublicationManifest, PublicationWithLocator,
+    PushEventsRequest, PushEventsResponse, ReadingUnit, RefreshResponse, RescanResponse,
+    RestoreSummary, SetLocatorRequest, SourceInfo, SourceSearchResults, UpdateCategoryRequest,
     UpdatePublicationRequest, UpdatesResponse,
 };
 
@@ -226,6 +226,41 @@ impl YomuClient {
                 .join(&format!("api/v1/publications/{id}/cover"))
                 .ok(),
         )
+    }
+
+    pub async fn publication_manifest(&self, id: Uuid) -> Result<PublicationManifest> {
+        self.get(&format!("api/v1/publications/{id}/manifest"))
+            .await
+    }
+
+    /// URL handed to a format navigator. The media credential is a path
+    /// segment, not a query, so relative resources requested from inside an
+    /// EPUB iframe inherit it automatically.
+    pub fn publication_resource_url(&self, id: Uuid, resource: &str) -> Option<Url> {
+        let token = self.media_token.as_deref().unwrap_or("-");
+        let mut url = self
+            .base
+            .join(&format!("api/v1/publications/{id}/resources/"))
+            .ok()?;
+        {
+            let mut segments = url.path_segments_mut().ok()?;
+            segments.pop_if_empty().push(token);
+            for part in resource.split('/') {
+                if part.is_empty() || part == "." || part == ".." {
+                    return None;
+                }
+                segments.push(part);
+            }
+        }
+        Some(url)
+    }
+
+    pub fn publication_link_url(&self, id: Uuid, href: &str) -> Option<Url> {
+        let resource = href.strip_prefix("resources/-/")?;
+        let base = self.publication_resource_url(id, "placeholder")?;
+        let url = base.join(resource).ok()?;
+        let prefix = base.path().strip_suffix("placeholder")?;
+        (url.origin() == base.origin() && url.path().starts_with(prefix)).then_some(url)
     }
 
     // ---- updates feed ----
@@ -508,6 +543,32 @@ mod tests {
             signed.page_url(id, 3).unwrap().path(),
             format!("/api/v1/units/{id}/pages/3")
         );
+    }
+
+    #[test]
+    fn publication_links_keep_capabilities_and_encoded_resource_names() {
+        let id = Uuid::from_u128(7);
+        let client = YomuClient::new("https://host/yomu/".parse().unwrap())
+            .with_media_token(Some("media.capability".into()));
+        let url = client
+            .publication_resource_url(id, "OPS/A chapter.xhtml")
+            .unwrap();
+        assert_eq!(
+            url.path(),
+            format!(
+                "/yomu/api/v1/publications/{id}/resources/media.capability/OPS/A%20chapter.xhtml"
+            )
+        );
+        assert_eq!(
+            client.publication_link_url(id, "resources/-/OPS/A%20chapter.xhtml"),
+            Some(url)
+        );
+        assert!(
+            client
+                .publication_link_url(id, "resources/-/../../cover")
+                .is_none()
+        );
+        assert!(client.publication_resource_url(id, "../secret").is_none());
     }
 
     /// The session is per client instance, which is what forces call

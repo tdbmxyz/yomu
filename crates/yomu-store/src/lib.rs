@@ -267,6 +267,7 @@ mod tests {
             publication_id: Uuid::new_v4(),
             unit_id: Uuid::new_v4(),
             page: 7,
+            progression: None,
             device: "test".into(),
             at: Utc::now(),
         };

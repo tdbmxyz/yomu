@@ -1,5 +1,6 @@
 /target
 /crates/yomu-web/dist
+/crates/yomu-web/reader-assets
 /result
 /result-*
 /node_modules

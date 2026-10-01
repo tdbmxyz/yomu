@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 use yomu_domain::{
-    EventsResponse, Locations, Locator, ProgressEvent, PushEventsRequest, PushEventsResponse,
+    EventsResponse, Locator, ProgressEvent, PushEventsRequest, PushEventsResponse,
     SetLocatorRequest,
 };
 
@@ -29,11 +29,31 @@ pub async fn set_position(
         ));
     }
 
+    if req
+        .progression
+        .is_some_and(|p| !p.is_finite() || !(0.0..=1.0).contains(&p))
+    {
+        return Err(ApiError::Unprocessable(
+            "progression must be between 0 and 1".into(),
+        ));
+    }
+    if let Some(count) = req.page_count {
+        let publication = state.db.get_publication(publication_id).await?;
+        if publication.book_format() != Some(yomu_domain::BookFormat::Pdf)
+            || count == 0
+            || count > 1_000_000
+            || req.page >= count
+        {
+            return Err(ApiError::Unprocessable("invalid PDF page count".into()));
+        }
+        state.db.set_page_count(unit.id, count).await?;
+    }
     let event = ProgressEvent {
         id: Uuid::now_v7(),
         publication_id,
         unit_id: req.unit_id,
         page: req.page,
+        progression: req.progression,
         device: req.device,
         at: Utc::now(),
     };
@@ -41,7 +61,7 @@ pub async fn set_position(
     auto_mark_read(&state, user.id, std::slice::from_ref(&event)).await;
     Ok(Json(Locator {
         unit_id: event.unit_id,
-        locations: Locations::Page { page: event.page },
+        locations: event.locations(),
         at: event.at,
     }))
 }
@@ -71,10 +91,13 @@ async fn auto_mark_read(state: &AppState, user_id: Uuid, events: &[ProgressEvent
                 continue;
             };
             ids.extend(chapters[..idx].iter().map(|c| c.id));
-            if chapters[idx]
-                .page_count
-                .is_some_and(|n| event.page.saturating_add(1) >= n)
-            {
+            let finished = match event.progression {
+                Some(progression) => progression >= 0.999,
+                None => chapters[idx]
+                    .page_count
+                    .is_some_and(|n| event.page.saturating_add(1) >= n),
+            };
+            if finished {
                 ids.insert(event.unit_id);
             }
         }
@@ -97,6 +120,15 @@ pub async fn push_events(
     CurrentUser(user): CurrentUser,
     Json(req): Json<PushEventsRequest>,
 ) -> Result<Json<PushEventsResponse>, ApiError> {
+    if req.events.iter().any(|event| {
+        event
+            .progression
+            .is_some_and(|p| !p.is_finite() || !(0.0..=1.0).contains(&p))
+    }) {
+        return Err(ApiError::Unprocessable(
+            "progression must be between 0 and 1".into(),
+        ));
+    }
     let (accepted, skipped) = state.db.append_events(user.id, &req.events).await?;
     if skipped > 0 {
         tracing::debug!(accepted, skipped, "journal push skipped stale events");

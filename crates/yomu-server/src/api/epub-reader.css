@@ -1,0 +1,57 @@
+/* Reader-owned colors, publisher-owned typography and illustration artwork.
+   Important declarations in a named layer outrank unlayered publisher rules,
+   including publisher !important colors. No image inversion or text scaling. */
+@layer yomu-reader {
+  html {
+    --reader-paper: #fff;
+    --reader-ink: #202020;
+    --reader-link: #185abc;
+    --reader-border: #a0a0a0;
+    --reader-width: 48rem;
+    color-scheme: only light !important;
+    background: #30343b !important;
+    font-size: 18px !important;
+    touch-action: pan-y;
+  }
+  html[data-yomu-theme="night"] {
+    --reader-paper: #161616;
+    --reader-ink: #eee;
+    --reader-link: #8ac5ff;
+    --reader-border: #777;
+    color-scheme: only dark !important;
+  }
+  body, body :not(svg):not(svg *):not(img) {
+    color: var(--reader-ink) !important;
+    -webkit-text-fill-color: currentColor !important;
+    background-color: transparent !important;
+    border-color: var(--reader-border) !important;
+    text-shadow: none !important;
+  }
+  body {
+    background: var(--reader-paper) !important;
+    width: calc(100% - 2rem) !important;
+    max-width: var(--reader-width) !important;
+    min-height: calc(100vh - 2rem);
+    box-sizing: border-box;
+    margin: 1rem auto !important;
+    padding: 4.5rem clamp(1.25rem, 3vw, 3rem) 35vh !important;
+    font-size: 100% !important;
+    line-height: 1.6 !important;
+    overflow-wrap: anywhere;
+  }
+  body p, body li, body dd { line-height: 1.6 !important; }
+  body a[href], body a[href] :not(svg):not(svg *) {
+    color: var(--reader-link) !important;
+    text-decoration: underline !important;
+  }
+  /* Transparent black diagrams need a light backing even in night mode.
+     Preserve their actual colors and embedded labels, rather than inverting. */
+  body img, body svg {
+    max-width: 100% !important;
+    height: auto;
+    background-color: #fff !important;
+  }
+  body video { max-width: 100%; height: auto; }
+  body pre, body table { max-width: 100%; overflow: auto; }
+  ::selection { background: #b3d4ff !important; color: #111 !important; -webkit-text-fill-color: #111 !important; }
+}

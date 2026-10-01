@@ -1,4 +1,4 @@
-//! File resolution for the streamer: CBZ archives and image directories
+//! File resolution for the streamer: EPUB/PDF, CBZ archives and image directories
 //! under the books dir, addressed by dir-relative keys and `local:` URLs.
 //! Moved from the retired built-in local source; the `local:` URL scheme is
 //! kept verbatim so cover/page URLs stored by 1.x keep resolving.
@@ -6,10 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+mod epub;
+
 use regex::Regex;
 use serde::Deserialize;
 use url::Url;
-use yomu_domain::{ChapterRef, MangaDetails, MangaSummary};
+use yomu_domain::{ChapterRef, Kind, MangaDetails, MangaSummary};
 use yomu_source::{ImageData, SourceError};
 
 pub type Result<T> = std::result::Result<T, SourceError>;
@@ -17,7 +19,8 @@ pub type Result<T> = std::result::Result<T, SourceError>;
 const IMAGE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "avif"];
 const COVER_STEMS: [&str; 2] = ["cover", "folder"];
 
-/// Publication formats the streamer cannot open. Counted per publication
+/// Formats not supported as comic-folder units (EPUB/PDF are supported only
+/// as root-level publications). Counted per publication
 /// rather than passed over in silence: nine `.cbr` volumes sitting between
 /// `.cbz` ones used to go missing from a series without a trace.
 const UNSUPPORTED_EXTENSIONS: [&str; 8] =
@@ -79,6 +82,7 @@ struct Details {
 pub struct Streamer {
     pub books_dir: PathBuf,
     base: Url,
+    cover_workers: tokio::sync::Semaphore,
 }
 
 impl Streamer {
@@ -86,6 +90,7 @@ impl Streamer {
         Self {
             books_dir,
             base: Url::parse("local:///").expect("valid local base url"),
+            cover_workers: tokio::sync::Semaphore::new(2),
         }
     }
 
@@ -284,6 +289,102 @@ impl Streamer {
             .collect())
     }
 
+    /// Resolve an original book container, refusing any other file key.
+    pub fn book_path(&self, publication: &str, resource: &str) -> Result<PathBuf> {
+        if yomu_domain::BookFormat::from_path(publication).is_none() || resource != publication {
+            return Err(SourceError::Parse(
+                "Book resource does not belong to publication".into(),
+            ));
+        }
+        self.resolve(publication)
+    }
+
+    pub async fn epub_resources(&self, key: &str) -> Result<Vec<yomu_domain::PublicationLink>> {
+        let path = self.resolve(key)?;
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || epub::inspect(&path, &key).map(|book| book.resources))
+            .await
+            .map_err(|e| SourceError::Http(format!("epub task: {e}")))?
+    }
+
+    /// Read one resource from a local publication. EPUB resources are archive
+    /// entries; PDF resources are the file itself. Resolution always starts
+    /// from the publication path recorded by the scanner, never from a client
+    /// supplied filesystem path.
+    pub async fn publication_resource(
+        &self,
+        publication: &str,
+        resource: &str,
+    ) -> Result<ImageData> {
+        let path = self.resolve(publication)?;
+        let lower = publication.to_lowercase();
+        if lower.ends_with(".epub") {
+            let resource = resource.to_string();
+            let entry = resource.clone();
+            let resource = tokio::task::spawn_blocking(move || epub::resource(&path, &entry))
+                .await
+                .map_err(|e| SourceError::Http(format!("epub task: {e}")))??;
+            return Ok(ImageData {
+                bytes: resource.bytes.into(),
+                content_type: resource.media_type,
+            });
+        }
+        if lower.ends_with(".pdf") && resource == publication {
+            let bytes = tokio::fs::read(path).await.map_err(io_err)?;
+            return Ok(ImageData {
+                bytes: bytes.into(),
+                content_type: "application/pdf".into(),
+            });
+        }
+        Err(SourceError::Parse(format!(
+            "resource {resource:?} does not belong to publication {publication:?}"
+        )))
+    }
+
+    /// Lazy first-page thumbnails. Poppler is shipped with the server package;
+    /// no shell, client-supplied path, or full-size page rendering is involved.
+    async fn pdf_cover(&self, path: &Path) -> Result<ImageData> {
+        use std::process::Stdio;
+        use tokio::io::AsyncReadExt;
+        let _permit = self
+            .cover_workers
+            .acquire()
+            .await
+            .map_err(|e| SourceError::Http(e.to_string()))?;
+        let mut child = tokio::process::Command::new("pdftoppm")
+            .args(["-f", "1", "-singlefile", "-scale-to", "600", "-jpeg"])
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| SourceError::Http(format!("PDF cover renderer (install Poppler): {e}")))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .take(8 * 1024 * 1024 + 1);
+        let render = async {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await.map_err(io_err)?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err(SourceError::Parse("PDF cover exceeds size limit".into()));
+            }
+            let status = child.wait().await.map_err(io_err)?;
+            if !status.success() || !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+                return Err(SourceError::Parse("PDF cover rendering failed".into()));
+            }
+            Ok(ImageData {
+                bytes: bytes.into(),
+                content_type: "image/jpeg".into(),
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), render)
+            .await
+            .map_err(|_| SourceError::Http("PDF cover rendering timed out".into()))?
+    }
+
     /// Resolve a `local:` URL produced by this streamer back to file bytes.
     pub async fn image(&self, url: &Url) -> Result<ImageData> {
         if url.scheme() != "local" {
@@ -303,6 +404,13 @@ impl Streamer {
             })
             .unwrap_or_default();
         let path = self.resolve(&relative)?;
+        if relative.to_lowercase().ends_with(".pdf")
+            && url
+                .query_pairs()
+                .any(|(key, value)| key == "cover" && value == "1")
+        {
+            return self.pdf_cover(&path).await;
+        }
         let entry = url
             .query_pairs()
             .find(|(k, _)| k == "entry")
@@ -318,6 +426,16 @@ impl Streamer {
             }
             Some(entry) => {
                 let content_type = content_type_of(&entry).to_string();
+                if relative.to_lowercase().ends_with(".epub") {
+                    let resource =
+                        tokio::task::spawn_blocking(move || epub::resource(&path, &entry))
+                            .await
+                            .map_err(|e| SourceError::Http(format!("epub task: {e}")))??;
+                    return Ok(ImageData {
+                        bytes: resource.bytes.into(),
+                        content_type: resource.media_type,
+                    });
+                }
                 let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
                     use std::io::Read;
                     let file = std::fs::File::open(&path).map_err(io_err)?;
@@ -345,17 +463,19 @@ impl Streamer {
 pub(super) struct Discovered {
     /// Books-dir-relative path — the publication's identity.
     pub path: String,
+    pub kind: Kind,
     pub details: MangaDetails,
+    /// Page counts known while inspecting a fixed-layout publication.
+    pub page_counts: Vec<(String, u32)>,
     /// Files in this folder the scan could not read.
     pub unsupported: Unsupported,
 }
 
 impl Streamer {
     /// Walk the books dir top level. Series directories (holding unit
-    /// dirs / .cbz) become multi-unit publications; root-level .cbz files
-    /// and loose image directories become single-unit ones. Anything else
-    /// is skipped with one info line — the folder will legitimately hold
-    /// future-format files (.epub, .pdf, .cbr).
+    /// dirs / .cbz) become multi-unit comic publications; root-level EPUB,
+    /// PDF and CBZ files are standalone publications. Other formats are
+    /// reported rather than exposed as empty readable books.
     pub(super) async fn discover(&self) -> Vec<Discovered> {
         let mut out = Vec::new();
         let mut reader = match tokio::fs::read_dir(&self.books_dir).await {
@@ -395,7 +515,79 @@ impl Streamer {
 
     async fn discover_entry(&self, name: &str, is_dir: bool) -> Result<Option<Discovered>> {
         if !is_dir {
-            if !name.to_lowercase().ends_with(".cbz") {
+            let lower = name.to_lowercase();
+            if lower.ends_with(".epub") {
+                let path = self.resolve(name)?;
+                let key = name.to_string();
+                let mut book = tokio::task::spawn_blocking(move || epub::inspect(&path, &key))
+                    .await
+                    .map_err(|e| SourceError::Http(format!("epub task: {e}")))??;
+                book.details.summary.cover_url = book
+                    .cover_entry
+                    .as_deref()
+                    .map(|entry| self.local_url(name, Some(entry)).to_string());
+                return Ok(Some(Discovered {
+                    path: name.to_string(),
+                    kind: Kind::Novels,
+                    details: book.details,
+                    page_counts: Vec::new(),
+                    unsupported: Unsupported::default(),
+                }));
+            }
+            if lower.ends_with(".pdf") {
+                let path = self.resolve(name)?;
+                let pages = tokio::task::spawn_blocking(move || {
+                    let doc = lopdf::Document::load(path)
+                        .map_err(|e| SourceError::Parse(format!("not a readable PDF: {e}")))?;
+                    if doc.is_encrypted() {
+                        return Err(SourceError::Parse("encrypted PDF is not supported".into()));
+                    }
+                    let pages = doc.get_pages().len() as u32;
+                    if pages == 0 {
+                        return Err(SourceError::Parse("PDF has no readable pages".into()));
+                    }
+                    Ok(pages)
+                })
+                .await
+                .map_err(|e| SourceError::Http(format!("pdf task: {e}")))??;
+                let title = Path::new(name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(name)
+                    .to_string();
+                return Ok(Some(Discovered {
+                    path: name.to_string(),
+                    kind: Kind::Novels,
+                    details: single_unit_details(name, &title, {
+                        let mut cover = self.local_url(name, None);
+                        cover.query_pairs_mut().append_pair("cover", "1");
+                        Some(cover)
+                    }),
+                    page_counts: vec![(name.to_string(), pages)],
+                    unsupported: Unsupported::default(),
+                }));
+            }
+            if let Some(format) = yomu_domain::BookFormat::from_path(name)
+                && !format.readable()
+            {
+                let title = Path::new(name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(name);
+                let mut details = single_unit_details(name, title, None);
+                details.chapters.clear();
+                return Ok(Some(Discovered {
+                    path: name.to_string(),
+                    kind: Kind::Novels,
+                    details,
+                    page_counts: Vec::new(),
+                    unsupported: Unsupported {
+                        count: 1,
+                        formats: vec![format.label().to_lowercase()],
+                    },
+                }));
+            }
+            if !lower.ends_with(".cbz") {
                 tracing::info!(file = %name, "streamer: unsupported file type, skipping");
                 return Ok(None);
             }
@@ -409,7 +601,9 @@ impl Streamer {
                 .to_string();
             return Ok(Some(Discovered {
                 path: name.to_string(),
+                kind: Kind::Comics,
                 details: single_unit_details(name, &title, pages.first().cloned()),
+                page_counts: Vec::new(),
                 unsupported: Unsupported::default(),
             }));
         }
@@ -460,7 +654,9 @@ impl Streamer {
         if !units.is_empty() {
             return Ok(Some(Discovered {
                 path: name.to_string(),
+                kind: Kind::Comics,
                 details: self.series_details(name, &units).await?,
+                page_counts: Vec::new(),
                 unsupported,
             }));
         }
@@ -468,7 +664,9 @@ impl Streamer {
             let pages = self.pages(name).await?;
             return Ok(Some(Discovered {
                 path: name.to_string(),
+                kind: Kind::Comics,
                 details: single_unit_details(name, name, pages.first().cloned()),
+                page_counts: Vec::new(),
                 unsupported,
             }));
         }
@@ -478,7 +676,9 @@ impl Streamer {
             // dropping it and leaving the reader to wonder where it went.
             return Ok(Some(Discovered {
                 path: name.to_string(),
+                kind: Kind::Comics,
                 details: self.series_details(name, &[]).await?,
+                page_counts: Vec::new(),
                 unsupported,
             }));
         }
@@ -565,6 +765,26 @@ fn content_type_of(name: &str) -> &'static str {
         Some("gif") => "image/gif",
         Some("avif") => "image/avif",
         _ => "image/jpeg",
+    }
+}
+
+pub(crate) fn resource_content_type(name: &str) -> &'static str {
+    let path = name.split(['?', '#']).next().unwrap_or(name).to_lowercase();
+    match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("xhtml" | "html" | "htm") => "application/xhtml+xml",
+        Some("css") => "text/css",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("avif") => "image/avif",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
     }
 }
 

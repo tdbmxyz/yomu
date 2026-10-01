@@ -97,11 +97,15 @@ pub fn Home() -> impl IntoView {
                         .into_iter()
                         .map(|entry| {
                             let locator = entry.locator.clone().expect("filtered");
+                            let location = locator
+                                .progression()
+                                .map(|value| format!("{:.0}%", value * 100.0))
+                                .unwrap_or_else(|| format!("p. {}", locator.page() + 1));
                             let subtitle = entry
                                 .locator_unit_title
                                 .clone()
-                                .map(|t| format!("{t} · p. {}", locator.page() + 1))
-                                .unwrap_or_else(|| format!("p. {}", locator.page() + 1));
+                                .map(|title| format!("{title} · {location}"))
+                                .unwrap_or(location);
                             view! {
                                 <ShelfCard
                                     entry=entry
@@ -119,11 +123,15 @@ pub fn Home() -> impl IntoView {
                         .into_iter()
                         .map(|entry| {
                             let badge = format!("+{}", entry.unread_count);
-                            let subtitle = format!(
-                                "{} chapter{}",
-                                entry.unit_count,
-                                if entry.unit_count == 1 { "" } else { "s" },
-                            );
+                            let noun = match (entry.publication.kind, entry.unit_count) {
+                                (yomu_domain::Kind::Comics, 1) => "chapter",
+                                (yomu_domain::Kind::Comics, _) => "chapters",
+                                (yomu_domain::Kind::Novels, 1) => "section",
+                                (yomu_domain::Kind::Novels, _) => "sections",
+                                (yomu_domain::Kind::Pdf, 1) => "document",
+                                (yomu_domain::Kind::Pdf, _) => "documents",
+                            };
+                            let subtitle = format!("{} {noun}", entry.unit_count);
                             view! {
                                 <ShelfCard
                                     entry=entry
@@ -201,7 +209,15 @@ fn ShelfCard(
 ) -> impl IntoView {
     let id = entry.publication.id;
     let href = match href_chapter {
-        Some((chapter, page)) => format!("/read/{id}/{chapter}?page={page}"),
+        Some((chapter, page)) => {
+            let query = entry
+                .locator
+                .as_ref()
+                .filter(|l| l.unit_id == chapter)
+                .map(|l| l.query())
+                .unwrap_or_else(|| format!("page={page}"));
+            format!("/read/{id}/{chapter}?{query}")
+        }
         None => format!("/publications/{id}"),
     };
     view! {
@@ -249,6 +265,7 @@ mod tests {
             publication: Publication {
                 id: uuid::Uuid::from_u128(day as u128 * 1000 + unread as u128),
                 kind: Kind::Comics,
+                work_id: None,
                 origin: Origin::LocalFile { path: title.into() },
                 title: title.into(),
                 description: None,
@@ -262,6 +279,7 @@ mod tests {
                 unsupported_count: 0,
                 unsupported_formats: Vec::new(),
             },
+            editions: Vec::new(),
             unit_count: 10,
             unread_count: unread,
             downloaded_count: 0,

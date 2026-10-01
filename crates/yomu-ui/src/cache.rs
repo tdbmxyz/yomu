@@ -376,6 +376,7 @@ mod tests {
             publication: yomu_domain::Publication {
                 id,
                 kind: yomu_domain::Kind::Comics,
+                work_id: None,
                 origin: yomu_domain::Origin::LocalFile {
                     path: id.to_string(),
                 },
@@ -391,6 +392,7 @@ mod tests {
                 unsupported_count: 0,
                 unsupported_formats: Vec::new(),
             },
+            editions: Vec::new(),
             locator: None,
             unit_count: 3,
             unread_count: 3,

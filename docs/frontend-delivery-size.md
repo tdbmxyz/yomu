@@ -24,6 +24,21 @@ for the actual shell dependency set and enforces the budget in CI.
 - Compute stored-body sizes from bytes, not cached Content-Length: the browser
   decodes compressed bodies while retained headers can describe the wire payload.
 
+## Lazy PDF reader
+
+PDF.js is a pinned runtime dependency, copied by `scripts/prepare-reader-assets.mjs`
+into ignored build assets. Local Trunk builds require `npm ci`; Nix supplies the
+same version from a fixed-output npm archive, without network access during the
+web build. Keep the upstream LICENSE and bundled font/data notices intact.
+
+The viewer, PDF.js worker, fonts, CMaps, ICC profiles and WASM decoders load only
+when opening a PDF: they are not part of the shell boot budget. Do not eagerly
+import them from the SPA entrypoint. Precompression includes `.mjs` alongside
+other scripts. Book resources and the viewer are network-only in the Service
+Worker; EPUB/PDF device saves and their offline dependency closure are not yet
+implemented. Changing that policy requires real worker-upgrade/offline tests,
+not just caching the manifest.
+
 ## Native packages
 
 - Preserve Nix's frame-pointer flags when adding panic-path remapping. Embedded

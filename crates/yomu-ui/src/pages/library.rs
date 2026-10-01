@@ -69,7 +69,7 @@ pub fn Library() -> impl IntoView {
         if let Some(entries) = library.value.get() {
             let kind = selected_kind.get_untracked();
             if kind != yomu_domain::Kind::Comics
-                && !entries.iter().any(|e| e.publication.kind == kind)
+                && !entries.iter().any(|e| e.publication.shelf() == kind)
             {
                 selected_kind.set(yomu_domain::Kind::Comics);
             }
@@ -141,7 +141,7 @@ pub fn Library() -> impl IntoView {
                     let genre = active_genre.get();
                     let filtered: Vec<_> = list
                         .into_iter()
-                        .filter(|entry| entry.publication.kind == selected_kind.get())
+                        .filter(|entry| entry.publication.shelf() == selected_kind.get())
                         .filter(|entry| {
                             selected
                                 .get()
@@ -183,7 +183,9 @@ pub fn Library() -> impl IntoView {
                                         .get(&entry.publication.id)
                                         .copied()
                                         .unwrap_or(0);
-                                    let meta = if entry.unread_count > 0 {
+                                    let meta = if !entry.editions.is_empty() {
+                                        entry.editions.iter().map(|e| e.format.label()).collect::<Vec<_>>().join(" · ")
+                                    } else if entry.unread_count > 0 {
                                         format!("{} new", entry.unread_count)
                                     } else {
                                         format!(
@@ -320,8 +322,7 @@ fn LibraryFilters(
 fn kind_label(kind: yomu_domain::Kind) -> &'static str {
     match kind {
         yomu_domain::Kind::Comics => "Comics",
-        yomu_domain::Kind::Novels => "Novels",
-        yomu_domain::Kind::Pdf => "PDF",
+        yomu_domain::Kind::Novels | yomu_domain::Kind::Pdf => "Books",
     }
 }
 
@@ -335,8 +336,8 @@ fn KindSwitcher(
     use yomu_domain::Kind;
     let open = RwSignal::new(false);
     let mut kinds = vec![Kind::Comics];
-    for kind in [Kind::Novels, Kind::Pdf] {
-        if entries.iter().any(|e| e.publication.kind == kind) {
+    for kind in [Kind::Novels] {
+        if entries.iter().any(|e| e.publication.shelf() == kind) {
             kinds.push(kind);
         }
     }

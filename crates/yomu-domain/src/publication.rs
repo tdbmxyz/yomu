@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-/// What a publication is, for the library's kind switcher. Only `Comics`
-/// exists in this slice; the others are reserved for later slices.
+/// Library shelf. `Pdf` is retained for older wire payloads; new PDFs use
+/// `Novels` (the Books shelf). Format selection is independent of the shelf.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -15,6 +15,41 @@ pub enum Kind {
     Comics,
     Novels,
     Pdf,
+}
+
+/// Container format of a book version, independent of its library shelf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BookFormat {
+    Epub,
+    Pdf,
+    Mobi,
+    Azw3,
+}
+
+impl BookFormat {
+    pub fn from_path(path: &str) -> Option<Self> {
+        match path.rsplit_once('.')?.1.to_ascii_lowercase().as_str() {
+            "epub" => Some(Self::Epub),
+            "pdf" => Some(Self::Pdf),
+            "mobi" => Some(Self::Mobi),
+            "azw3" => Some(Self::Azw3),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Epub => "EPUB",
+            Self::Pdf => "PDF",
+            Self::Mobi => "MOBI",
+            Self::Azw3 => "AZW3",
+        }
+    }
+
+    pub fn readable(self) -> bool {
+        matches!(self, Self::Epub | Self::Pdf)
+    }
 }
 
 /// Where a publication's content comes from.
@@ -37,6 +72,9 @@ pub enum Origin {
 pub struct Publication {
     pub id: Uuid,
     pub kind: Kind,
+    /// Versions of one work share this ID, but retain their own units and
+    /// reading journals. Absent for comics and legacy, not-yet-scanned books.
+    pub work_id: Option<Uuid>,
     pub origin: Origin,
     pub title: String,
     pub description: Option<String>,
@@ -68,6 +106,8 @@ struct PublicationWire {
     id: Uuid,
     #[serde(default)]
     kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    work_id: Option<Uuid>,
     source_id: String,
     source_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +149,7 @@ impl From<Publication> for PublicationWire {
         PublicationWire {
             id: p.id,
             kind: p.kind,
+            work_id: p.work_id,
             source_id,
             source_key,
             file_path,
@@ -143,6 +184,7 @@ impl TryFrom<PublicationWire> for Publication {
         Ok(Publication {
             id: w.id,
             kind: w.kind,
+            work_id: w.work_id,
             origin,
             title: w.title,
             description: w.description,
@@ -156,6 +198,25 @@ impl TryFrom<PublicationWire> for Publication {
             unsupported_count: w.unsupported_count,
             unsupported_formats: w.unsupported_formats,
         })
+    }
+}
+
+impl Publication {
+    pub fn book_format(&self) -> Option<BookFormat> {
+        if self.kind == Kind::Comics {
+            return None;
+        }
+        match &self.origin {
+            Origin::LocalFile { path } => BookFormat::from_path(path),
+            Origin::Source { .. } => None,
+        }
+    }
+
+    pub fn shelf(&self) -> Kind {
+        match self.kind {
+            Kind::Pdf => Kind::Novels,
+            other => other,
+        }
     }
 }
 

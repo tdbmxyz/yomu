@@ -15,7 +15,11 @@ use crate::offline::{self, ReaderDirection, ReaderFit, ReaderMode};
 use crate::pager;
 use crate::use_client;
 
+mod chrome;
 mod gesture;
+mod publication;
+
+use chrome::{ReaderShell, ReaderTop};
 mod stages;
 
 use stages::{ReaderCtx, paged_stage, vertical_strip};
@@ -45,13 +49,62 @@ pub fn Reader() -> impl IntoView {
     view! {
         {move || {
             params.track();
-            view! { <ReaderInner/> }
+            view! { <FormatReader/> }
         }}
     }
 }
 
 #[component]
-fn ReaderInner() -> impl IntoView {
+fn FormatReader() -> impl IntoView {
+    let (Some(publication_id), Some(unit_id)) = (param_uuid("publication"), param_uuid("unit"))
+    else {
+        return view! { <NotFound/> }.into_any();
+    };
+    let client = use_client();
+    let conn = crate::use_connectivity();
+    let detail = LocalResource::new(move || {
+        let client = client.clone();
+        async move {
+            let (detail, _) = offline::cached(conn, &format!("manga:{publication_id}"), || {
+                client.publication(publication_id)
+            })
+            .await?;
+            let resource = if detail.publication.kind == yomu_domain::Kind::Comics {
+                None
+            } else {
+                let manifest = client.publication_manifest(publication_id).await?;
+                // Sandboxed EPUB subresources have an opaque origin and no
+                // reliable session cookie. Mint a fresh capability for every
+                // format navigator, including browser clients.
+                let media = client.media_token().await?;
+                let client = client.with_media_token(Some(media.token));
+                manifest
+                    .reading_order
+                    .iter()
+                    .find(|link| link.unit_id == Some(unit_id))
+                    .and_then(|link| client.publication_link_url(publication_id, &link.href))
+                    .map(|url| url.to_string())
+            };
+            Ok::<_, yomu_client::ClientError>((detail, resource))
+        }
+    });
+    view! {
+        {move || match detail.get() {
+            None => view! { <p class="muted reader-route-loading">"Opening publication…"</p> }.into_any(),
+            Some(Err(err)) => view! { <p class="error reader-route-loading">{err.to_string()}</p> }.into_any(),
+            Some(Ok((detail, resource))) => match (detail.publication.kind, detail.publication.book_format(), resource) {
+                (yomu_domain::Kind::Comics, _, _) => view! { <ComicReader/> }.into_any(),
+                (_, Some(yomu_domain::BookFormat::Epub), Some(resource)) => publication::epub_reader(detail, unit_id, resource),
+                (_, Some(yomu_domain::BookFormat::Pdf), Some(resource)) => publication::pdf_reader(detail, unit_id, resource),
+                _ => view! { <p class="error">"Reading resource not found"</p> }.into_any(),
+            },
+        }}
+    }
+    .into_any()
+}
+
+#[component]
+fn ComicReader() -> impl IntoView {
     let (Some(manga_id), Some(chapter_id)) = (param_uuid("publication"), param_uuid("unit")) else {
         return view! { <NotFound/> }.into_any();
     };
@@ -160,6 +213,8 @@ fn ReaderInner() -> impl IntoView {
                 let req = SetLocatorRequest {
                     unit_id: unit,
                     page: p,
+                    progression: None,
+                    page_count: None,
                     device: "web".into(),
                 };
                 if client.set_locator(manga_id, &req).await.is_err() {
@@ -168,6 +223,7 @@ fn ReaderInner() -> impl IntoView {
                         publication_id: manga_id,
                         unit_id: unit,
                         page: p,
+                        progression: None,
                         device: "web-offline".into(),
                         at: Utc::now(),
                     });
@@ -371,20 +427,6 @@ fn ReaderInner() -> impl IntoView {
         offline::set_reader_direction(manga_id, next);
     };
 
-    // Android shell: the reader runs edge-to-edge (bars overlay the page
-    // instead of resizing the webview — no shift on chrome toggle) and
-    // the system bars follow the reader chrome (no-ops elsewhere — see
-    // offline::set_reading / set_immersive). Cleanup restores everything
-    // however the reader is left, back gesture included.
-    offline::set_reading(true);
-    Effect::new(move |_| {
-        offline::set_immersive(!chrome.get());
-    });
-    on_cleanup(|| {
-        offline::set_immersive(false);
-        offline::set_reading(false);
-    });
-
     let request_view = request_turn.clone();
     let finish_view = finish_snap.clone();
     let report_scroll = report.clone();
@@ -466,11 +508,7 @@ fn ReaderInner() -> impl IntoView {
     };
 
     view! {
-        <div
-            class="reader-overlay"
-            class:chrome-hidden=move || !chrome.get()
-            class:flow=move || mode.get() == ReaderMode::Vertical
-        >
+        <ReaderShell chrome flow=Signal::derive(move || mode.get() == ReaderMode::Vertical)>
             <div class="reader-progress">
                 <div
                     class="reader-progress-fill"
@@ -480,10 +518,9 @@ fn ReaderInner() -> impl IntoView {
                     }
                 ></div>
             </div>
-            <div class="reader-chrome reader-top">
-                <a href=format!("/publications/{manga_id}")>"← back"</a>
+            <ReaderTop publication_id=manga_id>
                 <span class="reader-title">{chapter_title}</span>
-            </div>
+            </ReaderTop>
 
             {move || {
                 let request = request_view.clone();
@@ -659,7 +696,7 @@ fn ReaderInner() -> impl IntoView {
                     "⚙"
                 </button>
             </div>
-        </div>
+        </ReaderShell>
     }
     .into_any()
 }

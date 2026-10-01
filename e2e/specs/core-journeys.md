@@ -20,6 +20,46 @@ Fixture: `e2e/tests/seed.spec.ts`; source and IdP behavior live in `e2e/fixtures
 7. Request a Service Worker update and verify the active worker still controls the page.
 8. Take Chromium offline, reload the publication, and open the device-saved chapter.
 
+## EPUB and PDF publications
+
+1. Scan small, generated EPUB/PDF fixtures from the real books folder (never
+   commit the user's test books).
+2. Verify EPUB and PDF share the Books shelf and open in their own navigators;
+   EPUB follows the package spine, not filename or chapter-number sorting.
+   Matching filename stems identify versions of one work (not metadata titles).
+   Show one card with an EPUB/PDF/MOBI version picker; MOBI is explicitly not
+   readable yet. Switching versions preserves separate locations and resumes
+   the latest available readable version from the library. PDF first-page covers
+   must decode, including for PDFs with no EPUB counterpart. Categories apply
+   to the whole work; removing a version never removes its siblings.
+3. Render EPUB text and illustrations inside an isolated paper/night surface,
+   even under OS dark mode and conflicting publisher black/red text or backgrounds.
+   Both palettes have readable neutral text; changing colors survives section changes
+   and reloads without inverting illustrations.
+   Preserve publisher typography, diagrams and callout structure; verify readable
+   heading/body/link contrast. Jump to a section, scroll, leave, resume and reload
+   without rewinding progression. Horizontal swipes turn sections; vertical touch
+   scrolling and text selection must not turn sections; pinch adjusts text size.
+4. Render actual PDF pages (including in browsers/WebViews without a built-in
+   PDF plugin), advance and resume at the same page. Verify fit-width, fit-page,
+   percentage zoom, zoom buttons and Ctrl-wheel. Zoom rerenders both canvas and
+   selectable text, stays on the same page, and survives page turns/viewport resizing.
+   Real touch input verifies swipe turns, pinch zoom and panning while zoomed;
+   a pinch or cancelled/vertical swipe must never become a page turn.
+5. Comic, EPUB and PDF readers share the overlay/header/back control. Viewport
+   clicks/taps hide and restore book chrome without resizing the frame or
+   rewinding text/page location. Text selection, double-click, links, swipes and
+   pinch must not hide controls accidentally. Escape restores hidden chrome,
+   and hidden controls are not focusable. Back always returns to the publication.
+6. EPUB reading width offers narrow/comfortable/wide/full presets in reader
+   options. Changing width preserves progression and typography; the device
+   retains the choice across sections/reload. Presets remain within a phone's
+   viewport without horizontal overflow.
+7. Confirm resource routes require authentication/capability, reject archive
+   traversal and do not permit publication scripts to access the app.
+8. Keep comics' existing offline journeys unchanged. Document device saves for
+   EPUB/PDF as unsupported until their resource graph has an atomic save path.
+
 ## Per-user state
 
 1. As Bob, open the shared Fixture Farming publication and verify Alice's read mark is absent.

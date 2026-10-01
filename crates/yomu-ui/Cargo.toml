@@ -45,6 +45,8 @@ features = [
     "HtmlInputElement",
     "Event",
     "EventTarget",
+    "MessageEvent",
+    "HtmlIFrameElement",
     "css",
 ]
 

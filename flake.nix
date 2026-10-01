@@ -123,6 +123,11 @@
       cargoLock.lockFile = ./Cargo.lock;
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
+      nativeBuildInputs = [pkgs.makeWrapper];
+      nativeCheckInputs = [pkgs.poppler-utils];
+      postInstall = ''
+        wrapProgram $out/bin/yomu-server --prefix PATH : ${lib.makeBinPath [pkgs.poppler-utils]}
+      '';
       env.YOMU_BUILD_COMMIT = buildCommit;
 
       meta = {
@@ -131,6 +136,16 @@
       };
     };
 
+    # Matches package.json/package-lock.json. Lazy reader assets are copied by
+    # the same Trunk hook as local builds, from this fixed-output npm archive.
+    pdfjsDist = pkgs.runCommand "pdfjs-dist-6.3.289" {} ''
+      mkdir -p $out
+      tar -xzf ${pkgs.fetchurl {
+        url = "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.3.289.tgz";
+        hash = "sha256-BvJeiHrcZInwTJ/LFBmMd+TlYjpZoLulxM6lg4pPEkE=";
+      }} --strip-components=1 -C $out
+    '';
+
     yomu-web = pkgs.stdenv.mkDerivation {
       pname = "yomu-web";
       inherit version;
@@ -138,6 +153,7 @@
 
       cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
       YOMU_BUILD_COMMIT = buildCommit;
+      YOMU_PDFJS_DIST = pdfjsDist;
 
       # The same remap as the native packages, so panic strings in the wasm
       # stop naming a store path — but without their -Cforce-frame-pointers,
@@ -153,6 +169,7 @@
         pkgs.binaryen
         wasm-bindgen-cli
         pkgs.rustPlatform.cargoSetupHook
+        pkgs.nodejs_22
       ];
 
       buildPhase = ''
@@ -193,7 +210,7 @@
         # the directory rehashing mid-walk can drop an entry find had not
         # reached yet, and a wasm that quietly ships without its sibling looks
         # exactly like a working build.
-        find $out -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' \
+        find $out -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.mjs' -o -name '*.css' \
           -o -name '*.html' -o -name '*.json' -o -name '*.svg' \
           -o -name '*.webmanifest' \) -print0 > "$TMPDIR/targets"
         while IFS= read -r -d "" f; do
@@ -277,6 +294,7 @@
             just
             cargo-nextest
             cargo-deny
+            poppler-utils
             nodejs_22
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
@@ -294,6 +312,7 @@
             binaryen
             just
             cargo-tauri
+            nodejs_22
             pkg-config
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
@@ -313,6 +332,7 @@
             binaryen
             just
             cargo-tauri
+            nodejs_22
             jdk17
             androidComposition.androidsdk
             # `just apk`'s strip guard unpacks the built APK to read the
