@@ -30,7 +30,9 @@ async function stored(page: Page, key: string) {
 async function seedEvent(page: Page, legacy = false) {
   return page.evaluate(async legacy => {
     const library = await (await fetch('/api/v1/library')).json();
-    const id = library[0].id;
+    const comic = library.find((entry: any) => entry.title === 'Fixture Farming' && entry.kind === 'comics');
+    if (!comic) throw new Error('Fixture Farming comic is missing from the library');
+    const id = comic.id;
     const detail = await (await fetch(`/api/v1/publications/${id}`)).json();
     const event = { id: crypto.randomUUID(), manga_id: id, chapter_id: detail.chapters[0].id, page: 1, device: 'e2e-offline', at: new Date().toISOString() };
     localStorage.setItem(legacy ? 'yomu-outbox' : (window as any).YomuOffline.key('yomu-outbox'), JSON.stringify([event]));

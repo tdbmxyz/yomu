@@ -10,5 +10,8 @@
   "devDependencies": {
     "@playwright/mcp": "0.0.79",
     "@playwright/test": "1.62.1"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.3.289"
   }
 }

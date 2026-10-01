@@ -106,8 +106,11 @@ check-web-size: build-web
 # Build the real web bundle, then run Chromium against a fixture scraper and
 # OIDC provider. Install browser binaries once with:
 #   npx playwright install chromium
-e2e: build-web
+# npm dependencies come first because the Trunk pre-build hook copies the
+# pinned PDF.js distribution into the lazy reader bundle.
+e2e:
     npm ci
+    just build-web
     npm run test:e2e
 
 # Supply-chain policy (advisories, licenses, duplicate crates, registries).

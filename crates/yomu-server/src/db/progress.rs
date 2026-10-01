@@ -1,6 +1,6 @@
 use sqlx::Row;
 use uuid::Uuid;
-use yomu_domain::{Locations, Locator, ProgressEvent};
+use yomu_domain::{Locator, ProgressEvent};
 
 use super::*;
 
@@ -9,8 +9,8 @@ impl Db {
     /// harmless, which makes offline sync retries safe.
     pub async fn append_event(&self, user_id: Uuid, event: &ProgressEvent) -> Result<()> {
         sqlx::query(
-            "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page, device, at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page, progression, device, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(event.id.to_string())
@@ -18,6 +18,7 @@ impl Db {
         .bind(event.publication_id.to_string())
         .bind(event.unit_id.to_string())
         .bind(event.page)
+        .bind(event.progression)
         .bind(&event.device)
         .bind(event.at)
         .execute(&self.pool)
@@ -63,8 +64,8 @@ impl Db {
                 continue;
             }
             sqlx::query(
-                "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page, device, at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page, progression, device, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(event.id.to_string())
@@ -72,6 +73,7 @@ impl Db {
             .bind(event.publication_id.to_string())
             .bind(event.unit_id.to_string())
             .bind(event.page)
+            .bind(event.progression)
             .bind(&event.device)
             .bind(event.at)
             .execute(&mut *tx)
@@ -91,7 +93,7 @@ impl Db {
         publication_id: Uuid,
     ) -> Result<Option<Locator>> {
         let row = sqlx::query(
-            "SELECT unit_id, page, at FROM progress_events
+            "SELECT unit_id, page, progression, at FROM progress_events
              WHERE publication_id = ? AND user_id = ? ORDER BY at DESC, id DESC LIMIT 1",
         )
         .bind(publication_id.to_string())
@@ -101,9 +103,10 @@ impl Db {
         row.map(|row| {
             Ok(Locator {
                 unit_id: parse_uuid(row.get::<String, _>("unit_id"))?,
-                locations: Locations::Page {
-                    page: row.get::<i64, _>("page") as u32,
-                },
+                locations: super::stored_locations(
+                    row.get::<i64, _>("page") as u32,
+                    row.get("progression"),
+                ),
                 at: row.get("at"),
             })
         })

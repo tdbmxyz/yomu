@@ -69,7 +69,15 @@ pub async fn scan(
         // progress) survive. Two candidates → never guess.
         let candidates: Vec<_> = existing
             .iter()
-            .filter(|p| p.title == found.details.summary.title)
+            .filter(|p| p.shelf() == found.kind && p.title == found.details.summary.title)
+            .filter(|p| {
+                p.book_format()
+                    == if found.kind == yomu_domain::Kind::Comics {
+                        None
+                    } else {
+                        yomu_domain::BookFormat::from_path(&found.path)
+                    }
+            })
             .filter(|p| match &p.origin {
                 Origin::LocalFile { path } => !seen.contains(path.as_str()),
                 Origin::Source { .. } => false,
@@ -91,7 +99,7 @@ pub async fn scan(
                 outcome.updated += 1;
             }
             _ => match db
-                .insert_local_publication(&found.path, &found.details)
+                .insert_local_publication(&found.path, found.kind, &found.details)
                 .await
             {
                 Ok(publication) => {
@@ -101,6 +109,7 @@ pub async fn scan(
                         &found.unsupported.formats,
                     )
                     .await?;
+                    set_known_page_counts(db, publication.id, found).await?;
                     outcome.added += 1;
                 }
                 Err(DbError::Constraint(err)) => {
@@ -124,6 +133,7 @@ pub async fn scan(
         }
     }
 
+    db.associate_book_versions().await?;
     Ok(outcome)
 }
 
@@ -164,6 +174,8 @@ async fn sync_known(
     let sync = db
         .sync_units(publication.id, &found.details.chapters)
         .await?;
+    let mut changed = db.set_kind(publication.id, found.kind).await?;
+    set_known_page_counts(db, publication.id, found).await?;
     db.update_local_metadata(
         publication.id,
         found.details.description.as_deref(),
@@ -171,7 +183,7 @@ async fn sync_known(
     )
     .await?;
     db.set_genres(publication.id, &found.details.genres).await?;
-    let mut changed = db
+    changed |= db
         .set_unsupported(
             publication.id,
             found.unsupported.count,
@@ -192,6 +204,27 @@ async fn sync_known(
         changed = true;
     }
     Ok(changed)
+}
+
+async fn set_known_page_counts(
+    db: &Db,
+    publication_id: uuid::Uuid,
+    found: &files::Discovered,
+) -> Result<(), DbError> {
+    if found.page_counts.is_empty() {
+        return Ok(());
+    }
+    let units = db.list_units(publication_id).await?;
+    for (source_key, count) in &found.page_counts {
+        if let Some(unit) = units.iter().find(|unit| &unit.source_key == source_key)
+            && unit.page_count.is_none()
+        {
+            // A PDF navigator may have repaired a malformed page tree and
+            // reported a more accurate count. Don't undo it on every rescan.
+            db.set_page_count(unit.id, *count).await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

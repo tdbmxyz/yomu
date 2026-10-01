@@ -237,23 +237,25 @@ impl Db {
         .await?
         .rows_affected();
 
-        let events = sqlx::query_as::<_, (String, String, i64, String, DateTime<Utc>)>(
-            "SELECT publication_id, unit_id, page, device, at FROM progress_events
+        let events =
+            sqlx::query_as::<_, (String, String, i64, Option<f64>, String, DateTime<Utc>)>(
+                "SELECT publication_id, unit_id, page, progression, device, at FROM progress_events
              WHERE user_id = '00000000-0000-0000-0000-000000000000'
              ORDER BY seq",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        for (publication_id, unit_id, page, device, at) in &events {
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+        for (publication_id, unit_id, page, progression, device, at) in &events {
             sqlx::query(
                 "INSERT INTO progress_events
-                 (id, publication_id, unit_id, page, device, at, user_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id, publication_id, unit_id, page, progression, device, at, user_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(Uuid::now_v7().to_string())
             .bind(publication_id)
             .bind(unit_id)
             .bind(page)
+            .bind(progression)
             .bind(device)
             .bind(at)
             .bind(&user_id)

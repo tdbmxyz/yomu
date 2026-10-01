@@ -18,8 +18,9 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 tower-http.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
@@ -32,7 +33,8 @@ sha2.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
 zip.workspace = true
+roxmltree.workspace = true
+lopdf.workspace = true
 
 [dev-dependencies]
-tower = { workspace = true }
 figment = { workspace = true, features = ["test"] }

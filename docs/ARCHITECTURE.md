@@ -49,6 +49,8 @@ books/
     details.json                (optional {"title", "description"})
     Chapter 1/  001.png …       (directory of images)
     Chapter 2.cbz               (zip archive of images)
+  A Novel.epub                  (standalone reflowable EPUB; spine → units)
+  A Document.pdf                (standalone PDF; one unit, indexed pages)
   One Shot.cbz                  (root-level archive or loose image dir
   Loose Pages/  001.png …        → single-unit publication; cover is the
                                  first page)
@@ -57,7 +59,7 @@ books/
 A scan upserts publications and their reading units, feeds the updates
 feed (and ntfy) for new units in known publications, flags vanished
 files with `missing_since` instead of deleting anything, and self-heals
-unambiguous renames (a new path whose title matches exactly one missing
+unambiguous renames (a new path whose title and kind match exactly one missing
 publication re-points that row, so ids and progress survive). Keys are
 dir-relative paths, validated against escaping the books dir; page and
 cover URLs use the 1.x-compatible `local:` scheme only the streamer
@@ -65,7 +67,7 @@ resolves.
 
 ## Reading paths
 
-One endpoint serves both modes, so clients don't care:
+For comics, one endpoint serves downloaded and live image modes:
 
 ```
 GET /api/v1/units/{id}/pages/{n}
@@ -84,9 +86,52 @@ chapter directory is always complete. `downloading` rows are re-queued at
 startup after a crash; a manga deleted mid-download has its just-written
 files discarded when the outcome update matches no row.
 
+### Publication navigators (ADR-0004)
+
+Following [Readium's architecture](https://readium.org/architecture/), the
+streamer opens a publication and exposes a `manifest` with `readingOrder` and
+supporting resources. The reader host selects a format navigator and persists
+its reported locations; it does not infer locations from button presses.
+This is a Readium-inspired subset, not an integration of the Readium toolkit.
+
+- `GET /api/v1/publications/{id}/manifest` returns `application/webpub+json`.
+- `GET /api/v1/publications/{id}/resources/{capability}/{resource}` streams the
+  original PDF (including range requests) or reads a bounded EPUB ZIP entry.
+  Resources resolve from the recorded publication, never arbitrary filesystem
+  paths. Short-lived read-only media capabilities survive relative asset links;
+  capability responses allow credential-free CORS for opaque EPUB frames.
+- EPUB is isolated in a sandboxed frame without same-origin privileges. CSP
+  blocks book scripts and remote resources; a nonce-authorized bridge reports
+  scroll progression and mediates spine links. OPF spine order, EPUB 3 navigation
+  labels, and EPUB 2 NCX labels are kept separate from comic chapter sorting.
+  Reader-owned paper/night palettes normalize publisher text colors, backgrounds
+  and shadows without inverting artwork; the device retains palette and reading
+  width (narrow/comfortable/wide/full). Width changes reflow at the current
+  progression rather than reloading the resource.
+  Vertical scrolling remains native, horizontal swipes navigate the spine, and
+  pinch/Ctrl-wheel adjust text size.
+- PDF.js and its worker/data files are pinned, packaged locally, and loaded only
+  when opening a PDF. The navigator renders canvas and selectable text, then
+  reports the actual page/count. The renderer can repair the scanner's count
+  when a malformed PDF is interpreted differently by the two parsers. Fit-width,
+  fit-page, percentage zoom and pinch/Ctrl-wheel rerasterize canvas and text
+  together, with a bounded pixel budget. Zoomed pages pan natively; fitted pages
+  accept horizontal turn swipes. Zoom does not create progress events.
+
+Comic and book navigators use the same `ReaderShell`/`ReaderTop` components,
+back control and immersive-mode lifecycle. Book clicks are bridged from their
+isolated frames; selection, links, drags and pinch are not chrome intent. Hidden
+chrome is not focusable, Escape restores it, and overlays never resize the frame
+or change a PDF's zoom/text progression. The trusted interaction bridge is shared
+between nonce-embedded EPUB code and the lazy packaged PDF viewer.
+
+Initial limits: root-level files only, reflowable EPUB, no encrypted/obfuscated
+resources or fixed-layout EPUB, and no book device-save/offline resource graph.
+Comic downloads and atomic offline saves remain on their existing image path.
+
 ## Progress = append-only journal
 
-`progress_events(seq, id UUIDv7, manga_id, chapter_id, page, device, at)` —
+`progress_events(seq, id UUIDv7, manga_id, chapter_id, page, progression?, device, at)` —
 never updated, never deleted (except manga cascade). Current position =
 event with max `at`, id as tie-break; `yomu_domain::merge_position` is the
 single definition of that rule, and the SQL `ORDER BY at DESC, id DESC
@@ -99,8 +144,10 @@ The API also exposes an incremental tail (`?since=<seq cursor>` — server arriv
 order, because event ids are device-stamped and a late offline push would slip
 behind an id cursor); the UI does not yet consume that tail.
 Merge is associative and commutative — no conflict resolution UI, no clock
-negotiation beyond last-write-wins at page granularity, which matches the
-product decision (track chapter + page, nothing finer).
+negotiation beyond last-write-wins at location granularity. Fixed layouts use a
+0-based page; reflowable text uses resource-relative progression in [0, 1].
+The additive progression field survives outboxes, per-user transfer and backups;
+legacy clients still see a safe `page: 0` fallback for text locations.
 
 ## Updater & categories
 

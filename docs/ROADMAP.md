@@ -11,6 +11,11 @@ are described in [MAINTENANCE.md](MAINTENANCE.md).
   resilient startup that reports and skips malformed definitions.
 - Unified source and local-file publications, CBZ/directories, rename healing,
   unsupported-format reporting, and periodic/on-demand rescans.
+- Root-level EPUB/PDF import with Readium-inspired publication manifests and
+  isolated format navigators, spine navigation, text size, readable paper/night
+  palettes/reading width, PDF selectable text/fit/zoom, touch swipe/pinch/pan,
+  shared tap-to-hide reader chrome/back controls, and
+  section-progression/page resume. Comic device saves remain separate.
 - Paged and continuous vertical readers, fit/direction controls, prefetch,
   progress journal synchronization, manual read/unread marks, unread badges,
   and update ordering.
@@ -45,6 +50,15 @@ are described in [MAINTENANCE.md](MAINTENANCE.md).
   duplicate, and page-limit guards.
 - Add the first native JSON/API source to validate authentication, API
   pagination, unavailable/premium content, and source-specific metadata.
+
+### Book reading
+
+- Add EPUB resource-graph device saves with the same verified, atomic completion
+  and ownership guarantees as comic saves; include lazy reader assets for offline boot.
+- Persist reading preferences, add semantic text locators/search and richer TOC;
+  validate desktop/Android WebViews as well as Chromium.
+- Extend organized-folder ebook import, PDF outlines/search, and fixed-layout EPUB
+  with distinct navigators rather than treating them as image chapters.
 
 ### Library and storage
 

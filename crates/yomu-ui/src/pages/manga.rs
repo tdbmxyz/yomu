@@ -33,6 +33,17 @@ type ServerProgress = RwSignal<std::collections::HashMap<Uuid, (u32, u32)>>;
 
 #[component]
 pub fn MangaPage() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    view! {
+        {move || {
+            params.track();
+            view! { <VersionPage/> }
+        }}
+    }
+}
+
+#[component]
+fn VersionPage() -> impl IntoView {
     let Some(id) = param_uuid("id") else {
         return view! { <NotFound/> }.into_any();
     };
@@ -195,6 +206,45 @@ fn MangaDetail(
     let detail_cache = crate::cache::use_detail_cache();
     let publication = detail.publication.clone();
     let id = publication.id;
+    let kind = if publication.book_format() == Some(yomu_domain::BookFormat::Pdf) {
+        yomu_domain::Kind::Pdf
+    } else {
+        publication.kind
+    };
+    let editions = detail.editions.clone();
+    let multiple_versions = editions.len() > 1;
+    let navigate = leptos_router::hooks::use_navigate();
+    let original_path = if publication.book_format().is_some() {
+        match &publication.origin {
+            yomu_domain::Origin::LocalFile { path } => Some(path.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let original_client = client.clone();
+    let original = LocalResource::new(move || {
+        let client = original_client.clone();
+        let path = original_path.clone();
+        async move {
+            let path = path?;
+            let media = client.media_token().await.ok()?;
+            client
+                .with_media_token(Some(media.token))
+                .publication_resource_url(id, &path)
+                .map(|u| u.to_string())
+        }
+    });
+    let (unit_singular, unit_plural) = match kind {
+        yomu_domain::Kind::Comics => ("chapter", "chapters"),
+        yomu_domain::Kind::Novels => ("section", "sections"),
+        yomu_domain::Kind::Pdf => ("document", "documents"),
+    };
+    let unit_noun = if detail.units.len() == 1 {
+        unit_singular
+    } else {
+        unit_plural
+    };
     // LocalFile publications: their content *is* the server copy, so no
     // server-download affordances make sense for them.
     let is_local = matches!(publication.origin, yomu_domain::Origin::LocalFile { .. });
@@ -213,8 +263,8 @@ fn MangaDetail(
     let locator = offline::effective_position(id, detail.locator.clone(), &offline::outbox());
     let continue_target = locator
         .as_ref()
-        .map(|p| (p.unit_id, p.page()))
-        .or_else(|| detail.units.first().map(|c| (c.id, 0)));
+        .map(|p| (p.unit_id, p.query()))
+        .or_else(|| detail.units.first().map(|c| (c.id, "page=0".into())));
     let continue_label = if locator.is_some() {
         "Continue reading"
     } else {
@@ -229,8 +279,9 @@ fn MangaDetail(
                 match client.refresh_publication(id).await {
                     Ok(r) => {
                         status.set(Some(match r.new_units {
-                            0 => "No new chapters".into(),
-                            n => format!("{n} new chapter(s)"),
+                            0 => format!("No new {unit_plural}"),
+                            1 => format!("1 new {unit_singular}"),
+                            n => format!("{n} new {unit_plural}"),
                         }));
                         crate::cache::mark_publication_stale(library_cache, detail_cache);
                         refresh.update(|n| *n += 1);
@@ -310,6 +361,22 @@ fn MangaDetail(
                 <crate::cover::Cover manga_id=id large=true/>
                 <div class="manga-head-body">
                     <h2>{publication.title.clone()}</h2>
+                    {(!editions.is_empty()).then(|| view! {
+                        <label class="book-version-picker">
+                            "Version "
+                            <select aria-label="Book version" prop:value=id.to_string()
+                                on:change=move |ev| navigate(&format!("/publications/{}", event_target_value(&ev)), Default::default())>
+                                {editions.into_iter().map(|edition| {
+                                    let suffix = if edition.missing { " · file missing" } else if !edition.format.readable() { " · not readable yet" } else { "" };
+                                    view! {
+                                        <option value=edition.id.to_string() selected={edition.id == id}>
+                                            {format!("{} · {}{}", edition.format.label(), edition.filename, suffix)}
+                                        </option>
+                                    }
+                                }).collect_view()}
+                            </select>
+                        </label>
+                    })}
                     {missing.then(|| view! {
                         <span
                             class="missing-badge"
@@ -323,7 +390,7 @@ fn MangaDetail(
                         view! {
                             <span
                                 class="unsupported-badge"
-                                title="yomu can see these files but cannot open their format yet — convert them to .cbz to read them here"
+                                title="yomu can see these files but cannot read their format yet — use a supported version"
                             >
                                 {format!("{count} unreadable {plural}: {formats}")}
                             </span>
@@ -339,21 +406,24 @@ fn MangaDetail(
                         {match &publication.origin {
                             yomu_domain::Origin::Source { source_id, .. } => source_id.clone(),
                             yomu_domain::Origin::LocalFile { .. } => "local".to_string(),
-                        }} " · " {detail.units.len()} " chapters"
+                        }} " · " {detail.units.len()} " " {unit_noun}
                     </p>
                     <div class="manga-actions">
                         {continue_target
-                            .map(|(chapter_id, page)| {
+                            .map(|(chapter_id, query)| {
                                 view! {
                                     <a
                                         class="button primary"
-                                        href=format!("/read/{id}/{chapter_id}?page={page}")
+                                        href=format!("/read/{id}/{chapter_id}?{query}")
                                     >
                                         {continue_label}
                                     </a>
                                 }
                             })}
-                        <button on:click=do_refresh>"Check for new chapters"</button>
+                        {move || original.get().flatten().map(|href| view! {
+                            <a class="button" href=href download="">"Download original"</a>
+                        })}
+                        <button on:click=do_refresh>{format!("Check for new {unit_plural}")}</button>
                         {(!is_local)
                             .then(|| {
                                 view! {
@@ -395,7 +465,7 @@ fn MangaDetail(
                                 })
                         }}
                         <button class="danger" on:click=delete>
-                            "Remove from library"
+                            {if multiple_versions { "Remove this version" } else { "Remove from library" }}
                         </button>
                     </div>
                 </div>
@@ -403,6 +473,7 @@ fn MangaDetail(
             <ChapterList
                 publication_id=id
                 units=detail.units
+                kind
                 offline
                 is_local
                 locator_unit=locator.map(|p| p.unit_id)
@@ -521,6 +592,7 @@ pub(crate) async fn save_locally(
 fn ChapterList(
     publication_id: Uuid,
     units: Vec<ReadingUnit>,
+    kind: yomu_domain::Kind,
     offline: bool,
     /// LocalFile publication: units are inherently on the server, and no
     /// server download/remove actions apply.
@@ -539,7 +611,10 @@ fn ChapterList(
     // the server's prefix "mark read" logic. Reversing here keeps this
     // component's indices (ids, selection range, rendering) consistent
     // among themselves.
-    let mut units: Vec<ReadingUnit> = units.into_iter().rev().collect();
+    let mut units = units;
+    if kind == yomu_domain::Kind::Comics {
+        units.reverse();
+    }
     // Read marks queued while offline overlay the server's answer, so
     // marking works (and shows) without a connection.
     let pending = offline::pending_marks();
@@ -661,11 +736,20 @@ fn ChapterList(
         });
     };
 
+    let image_units = kind == yomu_domain::Kind::Comics;
+    let actions_title = match kind {
+        yomu_domain::Kind::Comics => "Chapter actions",
+        yomu_domain::Kind::Novels => "Section actions",
+        yomu_domain::Kind::Pdf => "Document actions",
+    };
     let caps = crate::chapter_actions::Caps {
         online: !offline,
-        local_tier: offline::shell_available() || offline::service_worker_active(),
-        local_remove: offline::shell_available(),
-        server_downloads: !is_local,
+        // Device chapter saves currently cache image pages. EPUB/PDF assets
+        // use their own navigator resource graph and must not be offered a
+        // button that only saves `/pages/{n}` images.
+        local_tier: image_units && (offline::shell_available() || offline::service_worker_active()),
+        local_remove: image_units && offline::shell_available(),
+        server_downloads: image_units && !is_local,
     };
     let menu_open = RwSignal::new(false);
     let run_action = move |action: crate::chapter_actions::Action| {
@@ -795,7 +879,7 @@ fn ChapterList(
             <span class="grow"></span>
             <button
                 class="icon-btn chapter-menu-btn"
-                title="Chapter actions"
+                title=actions_title
                 on:click=move |_| menu_open.update(|open| *open = !*open)
             >
                 "⋮"

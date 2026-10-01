@@ -18,7 +18,7 @@ pub(crate) mod sync;
 pub use context::initialize;
 
 use uuid::Uuid;
-use yomu_domain::{Locations, Locator, ProgressEvent, PushEventsRequest, merge_position};
+use yomu_domain::{Locator, ProgressEvent, PushEventsRequest, merge_position};
 
 const OUTBOX_KEY: &str = "yomu-outbox";
 const DEVICE_KEY: &str = "yomu-device-chapters";
@@ -241,12 +241,12 @@ pub fn effective_position(
     match (server, local) {
         (Some(server), Some(local)) if local.at > server.at => Some(Locator {
             unit_id: local.unit_id,
-            locations: Locations::Page { page: local.page },
+            locations: local.locations(),
             at: local.at,
         }),
         (None, Some(local)) => Some(Locator {
             unit_id: local.unit_id,
-            locations: Locations::Page { page: local.page },
+            locations: local.locations(),
             at: local.at,
         }),
         (server, _) => server,
@@ -1097,6 +1097,54 @@ pub fn set_theme(theme: Theme) {
     apply_theme(theme);
 }
 
+// Reading palette is a device preference, like the app theme, not private
+// account data. EPUB cannot safely inherit arbitrary publisher text colors.
+const EPUB_PALETTE_KEY: &str = "yomu-epub-palette";
+
+pub fn epub_palette() -> String {
+    match storage()
+        .and_then(|s| s.get_item(EPUB_PALETTE_KEY).ok().flatten())
+        .as_deref()
+    {
+        Some("paper") => "paper",
+        Some("night") => "night",
+        _ if theme() == Theme::Paper => "paper",
+        _ => "night",
+    }
+    .into()
+}
+
+pub fn set_epub_palette(palette: &str) {
+    if matches!(palette, "paper" | "night")
+        && let Some(storage) = storage()
+    {
+        let _ = storage.set_item(EPUB_PALETTE_KEY, palette);
+    }
+}
+
+const EPUB_WIDTH_KEY: &str = "yomu-epub-width";
+
+pub fn epub_width() -> String {
+    match storage()
+        .and_then(|s| s.get_item(EPUB_WIDTH_KEY).ok().flatten())
+        .as_deref()
+    {
+        Some("narrow") => "narrow",
+        Some("wide") => "wide",
+        Some("full") => "full",
+        _ => "comfortable",
+    }
+    .into()
+}
+
+pub fn set_epub_width(width: &str) {
+    if matches!(width, "narrow" | "comfortable" | "wide" | "full")
+        && let Some(storage) = storage()
+    {
+        let _ = storage.set_item(EPUB_WIDTH_KEY, width);
+    }
+}
+
 const LIBRARY_KIND_KEY: &str = "yomu-library-kind";
 
 /// The library kind this device last viewed; restored on relaunch so a
@@ -1106,8 +1154,7 @@ pub fn library_kind() -> yomu_domain::Kind {
         .and_then(|s| s.get_item(LIBRARY_KIND_KEY).ok().flatten())
         .as_deref()
     {
-        Some("novels") => yomu_domain::Kind::Novels,
-        Some("pdf") => yomu_domain::Kind::Pdf,
+        Some("novels" | "pdf" | "books") => yomu_domain::Kind::Novels,
         _ => yomu_domain::Kind::Comics,
     }
 }

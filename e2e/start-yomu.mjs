@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { startProxy } from './proxy.mjs';
+import { writeBooks } from './fixtures/books.mjs';
 import { createServer } from 'node:net';
 
 // Refuse an occupied upstream port before opening the proxy. It must never
@@ -17,6 +18,7 @@ const state = resolve(import.meta.dirname, '.state');
 rmSync(state, { recursive: true, force: true });
 mkdirSync(resolve(state, 'data'), { recursive: true });
 mkdirSync(resolve(state, 'books'), { recursive: true });
+writeBooks(resolve(state, 'books'));
 const config = resolve(state, 'yomu.toml');
 writeFileSync(config, `
 listen = "127.0.0.1:4712"
@@ -29,7 +31,7 @@ sources_dir = "${resolve(root, 'e2e/fixtures')}"
 enabled = false
 
 [books]
-enabled = false
+enabled = true
 dir = "${resolve(state, 'books')}"
 
 [operations]
@@ -41,6 +43,7 @@ issuer = "http://127.0.0.1:4811/"
 client_id = "yomu-e2e"
 public_url = "http://127.0.0.1:4711"
 session_days = 1
+allowed_origins = ["http://127.0.0.1:4711"]
 `);
 
 const proxy = startProxy();
