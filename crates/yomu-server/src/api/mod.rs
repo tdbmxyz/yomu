@@ -57,6 +57,11 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(library::refresh),
         )
         .route("/publications/{id}/cover", get(library::cover))
+        .route("/publications/{id}/manifest", get(library::manifest))
+        .route(
+            "/publications/{id}/resources/{token}/{*resource}",
+            get(library::resource),
+        )
         .route("/publications/{id}/fingerprints", get(fingerprints::list))
         .route(
             "/publications/{id}/position",
@@ -309,6 +314,11 @@ mod tests {
             ("DELETE", format!("/api/v1/publications/{ID}")),
             ("POST", format!("/api/v1/publications/{ID}/refresh")),
             ("GET", format!("/api/v1/publications/{ID}/cover")),
+            ("GET", format!("/api/v1/publications/{ID}/manifest")),
+            (
+                "GET",
+                format!("/api/v1/publications/{ID}/resources/-/OPS/chapter.xhtml"),
+            ),
             ("GET", format!("/api/v1/publications/{ID}/fingerprints")),
             ("PUT", format!("/api/v1/publications/{ID}/position")),
             ("GET", format!("/api/v1/units/{ID}/pages")),
@@ -360,6 +370,26 @@ mod tests {
                     "image route {path} accepted an invalid token"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_path_capabilities_are_read_only_and_verified() {
+        let state = oidc_state().await;
+        let token = state.media_key.mint(crate::auth::SHARED_USER, 60);
+        let router = super::router(state);
+        for (method, token, expected) in [
+            ("GET", token.as_str(), StatusCode::NOT_FOUND),
+            ("GET", "invalid", StatusCode::UNAUTHORIZED),
+            ("POST", token.as_str(), StatusCode::UNAUTHORIZED),
+        ] {
+            let request = Request::builder().method(method)
+                .uri(format!("/api/v1/publications/00000000-0000-0000-0000-000000000001/resources/{token}/OPS/chapter.xhtml"))
+                .body(Body::empty()).unwrap();
+            assert_eq!(
+                router.clone().oneshot(request).await.unwrap().status(),
+                expected
+            );
         }
     }
 

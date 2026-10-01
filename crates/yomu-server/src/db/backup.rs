@@ -61,8 +61,8 @@ impl Db {
                 "INSERT INTO publications (id, kind, source_id, source_key, file_path, title,
                                            description, cover_url, auto_download, category,
                                            added_at, last_checked_at, missing_since,
-                                           unsupported_count, unsupported_formats)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                           unsupported_count, unsupported_formats, work_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(publication.id.to_string())
@@ -80,6 +80,7 @@ impl Db {
             .bind(publication.missing_since)
             .bind(publication.unsupported_count as i64)
             .bind(publication.unsupported_formats.join(","))
+            .bind(publication.work_id.map(|id| id.to_string()))
             .execute(&mut *tx)
             .await?;
             // Genres ride along whether or not the publication row was new,
@@ -153,14 +154,15 @@ impl Db {
             }
             let r = sqlx::query(
                 "INSERT INTO progress_events (id, user_id, publication_id, unit_id, page,
-                                              device, at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                                              progression, device, at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
             )
             .bind(event.id.to_string())
             .bind(user_id.to_string())
             .bind(event.publication_id.to_string())
             .bind(event.unit_id.to_string())
             .bind(event.page)
+            .bind(event.progression)
             .bind(&event.device)
             .bind(event.at)
             .execute(&mut *tx)

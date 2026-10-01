@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Locator, Publication, ReadingUnit};
+use crate::{Kind, Locator, Publication, ReadingUnit};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -111,10 +111,36 @@ pub struct UpdateCategoryRequest {
     pub update_enabled: bool,
 }
 
+/// A format-specific version. Locators always belong to its publication ID,
+/// never to the work ID or another container's reading order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicationEdition {
+    pub id: Uuid,
+    pub format: crate::BookFormat,
+    pub filename: String,
+    pub missing: bool,
+}
+
+impl PublicationEdition {
+    pub fn from_publication(publication: &Publication) -> Option<Self> {
+        let crate::Origin::LocalFile { path } = &publication.origin else {
+            return None;
+        };
+        Some(Self {
+            id: publication.id,
+            format: publication.book_format()?,
+            filename: path.clone(),
+            missing: publication.missing_since.is_some(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublicationWithLocator {
     #[serde(flatten)]
     pub publication: Publication,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editions: Vec<PublicationEdition>,
     #[serde(rename = "position", default, skip_serializing_if = "Option::is_none")]
     pub locator: Option<Locator>,
     #[serde(rename = "chapter_count")]
@@ -146,6 +172,8 @@ pub struct PublicationWithLocator {
 pub struct PublicationDetailResponse {
     #[serde(rename = "manga")]
     pub publication: Publication,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editions: Vec<PublicationEdition>,
     /// Ordered for reading: number ascending, source_order as fallback.
     #[serde(rename = "chapters")]
     pub units: Vec<ReadingUnit>,
@@ -155,11 +183,17 @@ pub struct PublicationDetailResponse {
 
 /// Set the current locator (the server wraps it into a journal
 /// event; `device` identifies the writer).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetLocatorRequest {
     #[serde(rename = "chapter_id")]
     pub unit_id: Uuid,
     pub page: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progression: Option<f64>,
+    /// PDF navigator's verified page count. Rendering systems can repair a
+    /// malformed PDF page tree differently from metadata-only parsers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
     #[serde(default = "default_device")]
     pub device: String,
 }
@@ -169,7 +203,7 @@ fn default_device() -> String {
 }
 
 /// Batch journal upload from an offline client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushEventsRequest {
     pub events: Vec<crate::ProgressEvent>,
 }
@@ -186,7 +220,7 @@ pub struct PushEventsResponse {
 /// Journal page for incremental sync (`?since=<cursor>`). The cursor is the
 /// server-assigned arrival sequence — not the event id, which is stamped by
 /// the observing device and would skip late-arriving offline pushes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsResponse {
     pub events: Vec<crate::ProgressEvent>,
     /// Pass as `?since=` on the next poll; `None` when the journal is empty
@@ -295,6 +329,42 @@ pub struct PagesResponse {
     pub downloaded: bool,
 }
 
+/// Format-neutral publication model exposed to navigators. This follows the
+/// Readium Web Publication Manifest split: ordered renderable links live in
+/// `reading_order`; supporting assets stay behind the publication resource
+/// endpoint. URLs are relative so the client can attach its short-lived media
+/// capability before handing a document to an iframe or PDF renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationManifest {
+    #[serde(rename = "@context")]
+    pub context: String,
+    pub metadata: PublicationMetadata,
+    pub links: Vec<PublicationLink>,
+    #[serde(rename = "readingOrder")]
+    pub reading_order: Vec<PublicationLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<PublicationLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationMetadata {
+    pub title: String,
+    pub kind: Kind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationLink {
+    pub href: String,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<Uuid>,
+}
+
 /// One downloaded unit as content, not as an id: what a client compares a
 /// directory it can no longer name against. Additive to the frozen 1.x wire —
 /// it travels one route, `GET /publications/{id}/fingerprints`.
@@ -345,6 +415,7 @@ mod wire {
         Publication {
             id: Uuid::from_u128(1),
             kind: Kind::Comics,
+            work_id: None,
             origin: Origin::Source {
                 source_id: "fixture".into(),
                 source_key: "solo-farming".into(),
@@ -377,6 +448,7 @@ mod wire {
     fn publication_with_locator_keeps_1x_field_names() {
         let entry = PublicationWithLocator {
             publication: publication(),
+            editions: Vec::new(),
             locator: Some(locator()),
             unit_count: 12,
             unread_count: 4,
@@ -406,6 +478,7 @@ mod wire {
     fn publication_detail_response_keeps_1x_keys() {
         let detail = PublicationDetailResponse {
             publication: publication(),
+            editions: Vec::new(),
             units: vec![],
             locator: Some(locator()),
         };

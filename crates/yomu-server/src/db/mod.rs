@@ -197,6 +197,7 @@ fn parse_url_opt(s: Option<String>) -> Result<Option<url::Url>> {
 struct PublicationRow {
     id: String,
     kind: String,
+    work_id: Option<String>,
     source_id: Option<String>,
     source_key: Option<String>,
     file_path: Option<String>,
@@ -234,6 +235,7 @@ impl TryFrom<PublicationRow> for Publication {
         Ok(Publication {
             id: parse_uuid(row.id)?,
             kind,
+            work_id: row.work_id.map(parse_uuid).transpose()?,
             origin,
             title: row.title,
             description: row.description,
@@ -372,6 +374,7 @@ struct EventRow {
     publication_id: String,
     unit_id: String,
     page: i64,
+    progression: Option<f64>,
     device: String,
     at: DateTime<Utc>,
 }
@@ -385,9 +388,17 @@ impl TryFrom<EventRow> for ProgressEvent {
             publication_id: parse_uuid(row.publication_id)?,
             unit_id: parse_uuid(row.unit_id)?,
             page: row.page as u32,
+            progression: row.progression,
             device: row.device,
             at: row.at,
         })
+    }
+}
+
+fn stored_locations(page: u32, progression: Option<f64>) -> yomu_domain::Locations {
+    match progression {
+        Some(progression) => yomu_domain::Locations::Progression { progression, page },
+        None => yomu_domain::Locations::Page { page },
     }
 }
 
@@ -395,6 +406,77 @@ impl TryFrom<EventRow> for ProgressEvent {
 mod tests {
     use super::*;
     use yomu_domain::{MangaDetails, MangaSummary, merge_position};
+
+    #[tokio::test]
+    async fn progression_survives_journal_backup_and_shared_account_transfer() {
+        let db = Db::in_memory().await.unwrap();
+        let publication = db
+            .insert_publication("fixture", &details("epub", &[("section", None)]), false)
+            .await
+            .unwrap();
+        let unit = db.list_units(publication.id).await.unwrap()[0].id;
+        let event = ProgressEvent {
+            id: Uuid::now_v7(),
+            publication_id: publication.id,
+            unit_id: unit,
+            page: 0,
+            progression: Some(0.625),
+            device: "test".into(),
+            at: Utc::now(),
+        };
+        db.append_event(SHARED, &event).await.unwrap();
+        assert_eq!(
+            db.latest_position(SHARED, publication.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .progression(),
+            Some(0.625)
+        );
+        assert_eq!(
+            db.latest_positions(SHARED).await.unwrap()[&publication.id]
+                .0
+                .progression(),
+            Some(0.625)
+        );
+        assert_eq!(db.export_events(SHARED).await.unwrap(), vec![event.clone()]);
+        let user = db
+            .upsert_oidc_user("epub-reader", "epub-reader", "Reader")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.latest_position(user.id, publication.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .progression(),
+            Some(0.625)
+        );
+        assert_eq!(
+            db.export_events(user.id).await.unwrap()[0].progression,
+            Some(0.625)
+        );
+        let backup = yomu_domain::Backup {
+            version: 1,
+            exported_at: Utc::now(),
+            publications: db.list_publications().await.unwrap(),
+            units: db.list_units(publication.id).await.unwrap(),
+            progress: db.export_events(user.id).await.unwrap(),
+            categories: db.list_categories().await.unwrap(),
+            read_unit_ids: vec![],
+        };
+        let restored = Db::in_memory().await.unwrap();
+        restored.import_backup(SHARED, &backup).await.unwrap();
+        assert_eq!(
+            restored
+                .latest_position(SHARED, publication.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .progression(),
+            Some(0.625)
+        );
+    }
 
     /// The seeded single-account user (see migration 0004).
     const SHARED: Uuid = Uuid::nil();
@@ -453,6 +535,7 @@ mod tests {
             publication_id: a.id,
             unit_id: b_unit,
             page: 4,
+            progression: None,
             device: "fixture".into(),
             at: Utc::now(),
         };
@@ -535,6 +618,7 @@ mod tests {
                 publication_id: publication.id,
                 unit_id: units[1].id,
                 page: 3,
+                progression: None,
                 device: "test".into(),
                 at: Utc::now(),
             },
@@ -583,6 +667,7 @@ mod tests {
                     publication_id: publication.id,
                     unit_id: units[1].id,
                     page: 5,
+                    progression: None,
                     device: "test".into(),
                     at: Utc::now(),
                 },
@@ -729,8 +814,9 @@ mod tests {
             publications: vec![Publication {
                 id: Uuid::from_u128(0xF0),
                 kind: Kind::Novels,
+                work_id: Some(Uuid::from_u128(0xB00)),
                 origin: Origin::LocalFile {
-                    path: "A Novel".into(),
+                    path: "A Novel.epub".into(),
                 },
                 title: "A Novel".into(),
                 description: None,
@@ -754,6 +840,144 @@ mod tests {
         assert_eq!(summary.publications, 1);
         let restored = db.get_publication(Uuid::from_u128(0xF0)).await.unwrap();
         assert_eq!(restored.kind, Kind::Novels);
+        assert_eq!(restored.work_id, backup.publications[0].work_id);
+        assert_eq!(restored.book_format(), Some(yomu_domain::BookFormat::Epub));
+    }
+
+    #[tokio::test]
+    async fn book_versions_group_conservatively_and_keep_identity() {
+        let db = Db::in_memory().await.unwrap();
+        // Different metadata titles, same file stem: versions of one work.
+        let epub = db
+            .insert_local_publication(
+                "Same Book.epub",
+                Kind::Novels,
+                &details("epub metadata", &[("OPS/first.xhtml", None)]),
+            )
+            .await
+            .unwrap();
+        let pdf = db
+            .insert_local_publication(
+                "Same Book.PDF",
+                Kind::Novels,
+                &details("PDF metadata", &[("Same Book.PDF", None)]),
+            )
+            .await
+            .unwrap();
+        let mobi = db
+            .insert_local_publication(
+                "Same Book.mobi",
+                Kind::Novels,
+                &details("mobi metadata", &[]),
+            )
+            .await
+            .unwrap();
+        // Identical metadata title, different directory/stem: never combine.
+        let unrelated = db
+            .insert_local_publication(
+                "Elsewhere/Same Book.pdf",
+                Kind::Novels,
+                &details("epub metadata", &[]),
+            )
+            .await
+            .unwrap();
+        db.associate_book_versions().await.unwrap();
+        let work = db.get_publication(epub.id).await.unwrap().work_id.unwrap();
+        for id in [epub.id, pdf.id, mobi.id] {
+            assert_eq!(db.get_publication(id).await.unwrap().work_id, Some(work));
+        }
+        assert_ne!(
+            db.get_publication(unrelated.id).await.unwrap().work_id,
+            Some(work)
+        );
+        let epub_unit = db.list_units(epub.id).await.unwrap()[0].id;
+        let pdf_unit = db.list_units(pdf.id).await.unwrap()[0].id;
+        for (publication_id, unit_id, page, progression) in [
+            (epub.id, epub_unit, 0, Some(0.6)),
+            (pdf.id, pdf_unit, 7, None),
+        ] {
+            db.append_event(
+                SHARED,
+                &ProgressEvent {
+                    id: Uuid::now_v7(),
+                    publication_id,
+                    unit_id,
+                    page,
+                    progression,
+                    device: "test".into(),
+                    at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            db.latest_position(SHARED, epub.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .progression(),
+            Some(0.6)
+        );
+        assert_eq!(
+            db.latest_position(SHARED, pdf.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .page(),
+            7
+        );
+        db.repoint_local_publication(epub.id, "Renamed Book.epub")
+            .await
+            .unwrap();
+        let renamed_pdf = db
+            .insert_local_publication(
+                "Renamed Book.pdf",
+                Kind::Novels,
+                &details("new version", &[]),
+            )
+            .await
+            .unwrap();
+        db.associate_book_versions().await.unwrap();
+        assert_eq!(
+            db.get_publication(renamed_pdf.id).await.unwrap().work_id,
+            Some(work)
+        );
+        db.set_category(pdf.id, "finished").await.unwrap();
+        assert_eq!(
+            db.get_publication(epub.id).await.unwrap().category,
+            "finished"
+        );
+        assert_eq!(
+            db.get_publication(unrelated.id).await.unwrap().category,
+            "reading"
+        );
+        let added = db
+            .insert_local_publication(
+                "Renamed Book.azw3",
+                Kind::Novels,
+                &details("downloadable version", &[]),
+            )
+            .await
+            .unwrap();
+        db.associate_book_versions().await.unwrap();
+        assert_eq!(
+            db.get_publication(added.id).await.unwrap().category,
+            "finished"
+        );
+        assert_eq!(
+            db.get_publication(added.id).await.unwrap().work_id,
+            Some(work)
+        );
+        db.delete_publication(mobi.id).await.unwrap();
+        assert_eq!(
+            db.book_editions(&db.get_publication(epub.id).await.unwrap())
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(db.list_units(epub.id).await.unwrap()[0].id, epub_unit);
     }
 
     #[tokio::test]
@@ -1325,6 +1549,7 @@ mod tests {
                 publication_id: publication.id,
                 unit_id: old1.id,
                 page: 4,
+                progression: None,
                 device: "test".into(),
                 at: Utc::now(),
             },
@@ -1529,6 +1754,7 @@ mod tests {
                 publication_id: publication.id,
                 unit_id: c1.id,
                 page: 4,
+                progression: None,
                 device: "test".into(),
                 at: Utc::now(),
             },
@@ -1596,6 +1822,7 @@ mod tests {
             publication_id: publication.id,
             unit_id: chapter.id,
             page,
+            progression: None,
             device: "test".into(),
             at: DateTime::from_timestamp(at, 0).unwrap(),
         };
@@ -1675,6 +1902,7 @@ mod tests {
             publication_id: publication.id,
             unit_id: real.id,
             page: 4,
+            progression: None,
             device: "test".into(),
             at: DateTime::from_timestamp(100, 0).unwrap(),
         };
@@ -1756,6 +1984,7 @@ mod tests {
             publication_id: publication.id,
             unit_id: chapter.id,
             page: 7,
+            progression: None,
             device: "test".into(),
             at: Utc::now(),
         };
@@ -1820,6 +2049,7 @@ mod tests {
                 publication_id: publication.id,
                 unit_id: unit.id,
                 page: 4,
+                progression: None,
                 device: "proxy".into(),
                 at: Utc::now(),
             },
@@ -1877,6 +2107,7 @@ mod tests {
             publication_id: publication.id,
             unit_id: unit.id,
             page: 7,
+            progression: None,
             device: "legacy".into(),
             at: Utc::now(),
         };
@@ -2184,7 +2415,11 @@ mod tests {
             .unwrap();
 
         let local = db
-            .insert_local_publication("Solo Farming", &details("Solo Farming", &[("c1", None)]))
+            .insert_local_publication(
+                "Solo Farming",
+                Kind::Comics,
+                &details("Solo Farming", &[("c1", None)]),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2198,8 +2433,12 @@ mod tests {
 
         // Duplicate path is a constraint error, not a second row.
         assert!(matches!(
-            db.insert_local_publication("Solo Farming", &details("Solo Farming", &[]))
-                .await,
+            db.insert_local_publication(
+                "Solo Farming",
+                Kind::Comics,
+                &details("Solo Farming", &[]),
+            )
+            .await,
             Err(DbError::Constraint(_))
         ));
 

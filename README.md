@@ -1,8 +1,8 @@
 # yomu (読む)
 
-Self-hosted manga/webtoon library: track what you read, download chapters on
-the server from scan sites, read from any browser on the LAN — with your
-position (chapter + page) following you. Sibling project of
+Self-hosted manga/webtoon and book library: download chapters from scan sites,
+import local EPUB/PDF books, and read from any browser on the LAN — with your
+section progression or page position following you. Sibling project of
 [chaos](../chaos), built on the same stack and conventions.
 
 ## What it does
@@ -12,9 +12,23 @@ position (chapter + page) following you. Sibling project of
   selectors (`sources.d/*.toml`) — no code, no extension ecosystem.
 - **Local series**: drop `<Series>/<Chapter>/*.png` (or `<Chapter>.cbz`)
   under the configured `books.dir`; the streamer adds them directly to the library.
+- **Books and versions**: drop standalone `.epub` or `.pdf` files directly under
+  `books.dir`. All books share the Books shelf; matching filename stems (for
+  example `My Book.epub` and `My Book.pdf`) appear as selectable versions of one
+  work. Each version keeps its own progress and reading order. Categories apply
+  to the work; removing a version leaves its siblings intact. Different filenames
+  are not automatically linked merely because metadata titles match.
+  `.mobi`/`.azw3` versions are catalogued and downloadable, not readable yet.
+  PDF covers are generated lazily from page one and cached. Nix packages include
+  Poppler; non-Nix servers need `pdftoppm` (Poppler utilities) on PATH.
+  EPUB follows the spine, with section navigation and text-size
+  controls, adjustable width and readable night/paper colors; PDF has selectable text and fit/zoom
+  controls. Touch swipes navigate, with text pinch for EPUB and pinch/pan for PDF.
+  Both share the comic reader's back control and tap-to-hide chrome, and resume
+  where you stopped. See [reader architecture and limits](docs/adr/0004-publication-navigators.md).
 - **Server-side downloads**: chapters are fetched to the server's disk by a
   queue worker; or read **live** (proxied page by page, nothing stored).
-- **Progress tracking**: current chapter + page, stored as an append-only
+- **Progress tracking**: current unit + page or text progression, stored as an append-only
   journal; offline-capable clients merge queued events on reconnect.
 - **Optional sign-in**: point `[auth]` at an OIDC provider (authentik) for
   per-user reading positions; without it everyone shares one account and
@@ -44,6 +58,7 @@ rationale (ADRs there apply; yomu-specific decisions in `docs/adr/`).
 
 ```console
 $ nix develop
+$ npm ci                 # pinned PDF.js assets and Playwright tooling
 $ just server            # backend on http://127.0.0.1:4700
 $ just web               # frontend with hot reload on http://127.0.0.1:8081
 $ just check && just test

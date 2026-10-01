@@ -87,6 +87,12 @@ pub fn takes_media_token(path: &str) -> bool {
     match (segments.next(), segments.next(), segments.next()) {
         // /publications/{id}/cover
         (Some("publications"), Some(_), Some("cover")) => segments.next().is_none(),
+        // /publications/{id}/resources/{token}/... — nested EPUB assets
+        // keep the media capability as a path segment when resolving relative
+        // links. The token is extracted separately below.
+        (Some("publications"), Some(_), Some("resources")) => {
+            segments.next().is_some_and(|token| !token.is_empty()) && segments.next().is_some()
+        }
         // /units/{id}/pages/{n} — but not the page list, which is JSON
         // the client fetches with a header.
         (Some("units"), Some(_), Some("pages")) => {
@@ -156,8 +162,12 @@ pub async fn require_auth(
     if is_public(&path) {
         return next.run(request).await;
     }
-    if takes_media_token(&path)
-        && let Some(token) = media_token_param(request.uri().query())
+    if matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && takes_media_token(&path)
+        && let Some(token) =
+            media_token_param(request.uri().query()).or_else(|| media_token_path(&path))
         && let Some(id) = state.media_key.verify(&token, 0)
         && let Ok(user) = state.db.user_by_id(id).await
     {
@@ -173,6 +183,17 @@ fn media_token_param(query: Option<&str>) -> Option<String> {
         .filter_map(|pair| pair.split_once('='))
         .find(|(name, _)| *name == "mt")
         .map(|(_, value)| value.to_string())
+}
+
+fn media_token_path(path: &str) -> Option<String> {
+    let segments: Vec<_> = path.split('/').collect();
+    let at = segments
+        .iter()
+        .position(|segment| *segment == "resources")?;
+    segments
+        .get(at + 1)
+        .filter(|token| !token.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Extractor for handlers that need a user (progress reads/writes). In

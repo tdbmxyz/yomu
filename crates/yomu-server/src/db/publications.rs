@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
-use yomu_domain::{Locations, Locator, MangaDetails, Publication};
+use yomu_domain::{Locator, MangaDetails, Publication};
 
 use super::*;
 
@@ -80,10 +80,82 @@ impl Db {
         rows.into_iter().map(Publication::try_from).collect()
     }
 
+    /// Return versions without conflating their units or per-user progress.
+    pub async fn book_editions(&self, publication: &Publication) -> Result<Vec<Publication>> {
+        let Some(work_id) = publication.work_id else {
+            return Ok(vec![publication.clone()]);
+        };
+        let rows = sqlx::query_as::<_, PublicationRow>(
+            "SELECT * FROM publications WHERE work_id = ? ORDER BY file_path COLLATE NOCASE",
+        )
+        .bind(work_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Publication::try_from).collect()
+    }
+
+    /// Associate previously ungrouped local versions by directory + filename
+    /// stem, NOT metadata title (unrelated authors can share a title). Existing
+    /// work IDs survive renames and restores. Ambiguous families never merge.
+    pub async fn associate_book_versions(&self) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let publications = sqlx::query_as::<_, PublicationRow>(
+            "SELECT * FROM publications WHERE file_path IS NOT NULL ORDER BY title COLLATE NOCASE",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(Publication::try_from)
+        .collect::<Result<Vec<_>>>()?;
+        let mut families: std::collections::BTreeMap<String, Vec<&Publication>> =
+            Default::default();
+        for publication in &publications {
+            if publication.book_format().is_none() {
+                continue;
+            }
+            let yomu_domain::Origin::LocalFile { path } = &publication.origin else {
+                continue;
+            };
+            let stem = path.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(path);
+            families
+                .entry(stem.trim().to_lowercase())
+                .or_default()
+                .push(publication);
+        }
+        for versions in families.values() {
+            let known: std::collections::HashSet<_> =
+                versions.iter().filter_map(|p| p.work_id).collect();
+            let work_id = match known.len() {
+                0 => Some(Uuid::now_v7()),
+                1 => known.iter().next().copied(),
+                _ => None,
+            };
+            let category = versions
+                .iter()
+                .filter(|p| p.work_id.is_some() && p.work_id == work_id)
+                .min_by_key(|p| (p.added_at, p.id))
+                .map(|p| p.category.as_str());
+            for version in versions.iter().filter(|p| p.work_id.is_none()) {
+                sqlx::query(
+                    "UPDATE publications SET work_id = ?, category = COALESCE(?, category)
+                             WHERE id = ? AND work_id IS NULL",
+                )
+                .bind(work_id.unwrap_or_else(Uuid::now_v7).to_string())
+                .bind(category)
+                .bind(version.id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Insert a streamer-discovered publication with its units.
     pub async fn insert_local_publication(
         &self,
         path: &str,
+        kind: yomu_domain::Kind,
         details: &MangaDetails,
     ) -> Result<Publication> {
         let id = Uuid::now_v7();
@@ -92,9 +164,14 @@ impl Db {
         sqlx::query(
             "INSERT INTO publications (id, kind, file_path, title, description, cover_url,
                                        auto_download, added_at)
-             VALUES (?, 'comics', ?, ?, ?, ?, 0, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
         )
         .bind(id.to_string())
+        .bind(match kind {
+            yomu_domain::Kind::Comics => "comics",
+            yomu_domain::Kind::Novels => "novels",
+            yomu_domain::Kind::Pdf => "pdf",
+        })
         .bind(path)
         .bind(&details.summary.title)
         .bind(&details.description)
@@ -112,6 +189,22 @@ impl Db {
         write_genres(&mut tx, id, &details.genres).await?;
         tx.commit().await?;
         self.get_publication(id).await
+    }
+
+    /// Keep the scanner-detected format authoritative for local files.
+    pub async fn set_kind(&self, id: Uuid, kind: yomu_domain::Kind) -> Result<bool> {
+        let kind = match kind {
+            yomu_domain::Kind::Comics => "comics",
+            yomu_domain::Kind::Novels => "novels",
+            yomu_domain::Kind::Pdf => "pdf",
+        };
+        let result = sqlx::query("UPDATE publications SET kind = ? WHERE id = ? AND kind <> ?")
+            .bind(kind)
+            .bind(id.to_string())
+            .bind(kind)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Re-point a missing LocalFile publication at a renamed path (self-heal).
@@ -257,9 +350,9 @@ impl Db {
     ) -> Result<std::collections::HashMap<Uuid, (Locator, Option<String>)>> {
         let rows = sqlx::query(
             "SELECT p.publication_id AS publication_id, p.unit_id AS unit_id, p.page AS page,
-                    p.at AS at, u.title AS title
+                    p.progression AS progression, p.at AS at, u.title AS title
              FROM (
-                 SELECT publication_id, unit_id, page, at,
+                 SELECT publication_id, unit_id, page, progression, at,
                         ROW_NUMBER() OVER (
                             PARTITION BY publication_id ORDER BY at DESC, id DESC
                         ) AS rn
@@ -276,9 +369,10 @@ impl Db {
                 let publication_id = parse_uuid(row.get::<String, _>("publication_id"))?;
                 let locator = Locator {
                     unit_id: parse_uuid(row.get::<String, _>("unit_id"))?,
-                    locations: Locations::Page {
-                        page: row.get::<i64, _>("page") as u32,
-                    },
+                    locations: super::stored_locations(
+                        row.get::<i64, _>("page") as u32,
+                        row.get("progression"),
+                    ),
                     at: row.get("at"),
                 };
                 let title: Option<String> = row.get("title");
@@ -313,11 +407,15 @@ impl Db {
                 "unknown category {category:?}"
             )));
         }
-        let result = sqlx::query("UPDATE publications SET category = ? WHERE id = ?")
-            .bind(category)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE publications SET category = ? WHERE id = ? OR work_id =
+             (SELECT work_id FROM publications WHERE id = ?)",
+        )
+        .bind(category)
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound);
         }

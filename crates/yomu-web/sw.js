@@ -280,6 +280,12 @@ async function privateRead(event, url) {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  // Format navigators are separate documents, not SPA routes. Their resource
+  // graph is network-only until we implement an atomic EPUB/PDF save protocol.
+  // In particular PDF.js issues range reads from a child client which must not
+  // inherit private runtime cache ownership from the parent implicitly.
+  if (url.pathname === '/pdf-reader.html'
+      || /^\/api\/v1\/publications\/[^/]+\/resources\/[^/]+\/.+/.test(url.pathname)) return;
   if (url.pathname.startsWith('/api/')) {
     // Identity and reachability are NEVER answered from a cached account.
     if (url.pathname.startsWith('/api/v1/auth/') || /\/api\/v1\/(health|metrics)/.test(url.pathname)) return;

@@ -70,6 +70,13 @@ test.describe.serial('real browser journeys', () => {
     await row.getByRole('link', { name: 'Chapter 1', exact: true }).click();
     await expect(page.getByTitle('Next page')).toBeVisible();
     await page.getByTitle('Next page').click();
+    // The same shell/header/back control is used by the book navigators.
+    const viewport = (await page.locator('.reader-pager').boundingBox())!;
+    await page.mouse.click(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+    await expect(page.locator('.reader-top')).toBeHidden();
+    await page.mouse.click(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+    await expect(page.locator('.reader-top')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Back to publication', exact: true }).locator('svg')).toBeVisible();
     await page.goBack();
     await expect(page.getByRole('link', { name: 'Continue reading' })).toBeVisible();
 
