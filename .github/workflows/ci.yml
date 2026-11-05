@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v22
 
       # Persist the Nix store across runs: without this every job
       # re-downloads the whole dev-shell closure from cache.nixos.org —
@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v22
 
       # Same store-persistence as the check job, separate key: this
       # job's closure is the package build inputs, not the dev shell.
@@ -97,7 +97,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v22
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -153,7 +153,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v22
       - uses: nix-community/cache-nix-action@v6
         with:
           primary-key: nix-android-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'Cargo.lock', 'crates/yomu-shell/gen/android/**/*.kt', 'crates/yomu-shell/gen/android/**/*.kts') }}
