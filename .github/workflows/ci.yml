@@ -18,7 +18,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
@@ -70,7 +70,7 @@ jobs:
   packages:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: actions/setup-node@v4
         with:
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: nix-community/cache-nix-action@v6
         with:
