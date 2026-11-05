@@ -18,7 +18,7 @@
 ## Checks
 
 `just check`, `just test`, `just e2e`, and `just deny` cover Rust, browser journeys,
-fixtures, and dependency policy. Desktop and Android checks run separately in CI.
+fixtures, and dependency policy. Android compilation runs separately in CI.
 The database recovery tests exercise historical migrations, file-backed reopen,
 SQLite snapshots, identity reconciliation, and idempotent startup without any
 production data. `just test-recovery` runs them alone.

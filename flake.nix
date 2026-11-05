@@ -101,19 +101,19 @@
         };
       };
 
-    tauriLibs = with pkgs; [
-      webkitgtk_4_1
-      gtk3
-      libsoup_3
-      glib
-      cairo
-      pango
-      gdk-pixbuf
-      atk
-      librsvg
-      openssl
-      dbus
-    ];
+    # Trunk 0.21.14 vendors libdeflate-sys 1.23.1, whose evex512 target
+    # attributes were removed by GCC 16. Keep this compatibility compiler
+    # scoped to Trunk (web builds and every dev shell), not the app/toolchain.
+    # Remove the override when Trunk bundles libdeflate >= 1.25.
+    trunk = pkgs.trunk.overrideAttrs (old: {
+      env =
+        (old.env or {})
+        // {
+          # cc-rs's target-specific override takes precedence over HOST_CC,
+          # which Nix's Rust hooks export from the current stdenv.
+          CC_x86_64_unknown_linux_gnu = "${pkgs.gcc15}/bin/cc";
+        };
+    });
 
     yomu-server = buildYomuRustPackage {
       pname = "yomu-server";
@@ -165,7 +165,7 @@
 
       nativeBuildInputs = [
         rustToolchain
-        pkgs.trunk
+        trunk
         pkgs.binaryen
         wasm-bindgen-cli
         pkgs.rustPlatform.cargoSetupHook
@@ -190,11 +190,8 @@
     };
 
     # What the server serves: the trunk dist plus brotli/gzip siblings built
-    # once here, so ServeDir never compresses per request. Kept separate from
-    # yomu-web because yomu-desktop bakes that one into the binary, where the
-    # siblings would be ~1.08 MB of files the asset protocol never serves.
-    # (Approximate on purpose: `src = self` and the baked build commit change
-    # the wasm, so an exact byte figure does not reproduce across checkouts.)
+    # once here, so ServeDir never compresses per request. Android embeds the
+    # uncompressed web bundle; its asset protocol does not use these siblings.
     yomu-web-compressed =
       pkgs.runCommand "yomu-web-compressed-${version}" {
         nativeBuildInputs = [pkgs.brotli pkgs.gzip];
@@ -218,62 +215,9 @@
           gzip -9 -c "$f" > "$f.gz"
         done < "$TMPDIR/targets"
       '';
-
-    # Desktop shell (same scheme as chaos-desktop): generate_context! bakes
-    # the web dist into the binary at compile time, so the yomu-web output
-    # is copied in place before cargo runs. wrapGAppsHook3 wires GSettings
-    # schemas + TLS (glib-networking), without which WebKitGTK apps crash or
-    # fail https at runtime.
-    yomu-desktop = buildYomuRustPackage {
-      pname = "yomu-desktop";
-      inherit version;
-      src = self;
-
-      cargoLock.lockFile = ./Cargo.lock;
-
-      cargoBuildFlags = ["-p" "yomu-shell"];
-      cargoTestFlags = ["-p" "yomu-shell"];
-      env.YOMU_BUILD_COMMIT = buildCommit;
-
-      nativeBuildInputs = with pkgs; [pkg-config wrapGAppsHook3];
-      buildInputs = tauriLibs ++ [pkgs.glib-networking];
-
-      preBuild = ''
-        rm -rf crates/yomu-web/dist
-        cp -r ${yomu-web} crates/yomu-web/dist
-      '';
-
-      postInstall = ''
-        # yomu-shell is a staticlib/cdylib/rlib because the Android build
-        # needs the first two; buildRustPackage installs whatever it finds,
-        # and the .a alone is five sixths of this output. Only bin/yomu-shell
-        # ever runs on the desktop.
-        rm -f $out/lib/libyomu_shell_lib.a
-
-        install -Dm644 crates/yomu-shell/icons/128x128.png \
-          $out/share/icons/hicolor/128x128/apps/yomu.png
-        install -Dm644 crates/yomu-shell/icons/32x32.png \
-          $out/share/icons/hicolor/32x32/apps/yomu.png
-        mkdir -p $out/share/applications
-        cat > $out/share/applications/yomu.desktop <<INI
-        [Desktop Entry]
-        Name=yomu
-        Comment=Manga and webtoon library and reader
-        Exec=yomu-shell
-        Icon=yomu
-        Type=Application
-        Categories=Utility;
-        INI
-      '';
-
-      meta = {
-        description = "yomu desktop shell (Tauri)";
-        mainProgram = "yomu-shell";
-      };
-    };
   in {
     packages.${system} = {
-      inherit yomu-server yomu-web yomu-web-compressed yomu-desktop;
+      inherit yomu-server yomu-web yomu-web-compressed;
       default = yomu-server;
     };
 
@@ -298,26 +242,6 @@
             nodejs_22
           ]
           ++ lib.optional hasCargoLock wasm-bindgen-cli;
-      };
-
-      # Desktop/mobile shell development: `nix develop .#tauri`. Adds the
-      # Linux webview stack and the tauri CLI on top of the default shell.
-      tauri = pkgs.mkShell {
-        name = "yomu-tauri";
-
-        packages = with pkgs;
-          [
-            rustToolchain
-            trunk
-            binaryen
-            just
-            cargo-tauri
-            nodejs_22
-            pkg-config
-          ]
-          ++ lib.optional hasCargoLock wasm-bindgen-cli;
-
-        buildInputs = tauriLibs;
       };
 
       # Android build of the shell: `nix develop .#android`, then

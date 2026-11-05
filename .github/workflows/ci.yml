@@ -3,9 +3,8 @@
 # head commit; running the same four jobs again on the PR and main push added
 # no coverage.
 #
-# yomu-shell is excluded from the cargo jobs: it needs the Linux webview
-# stack and a baked-in web dist, both of which the `packages` job covers
-# through `nix build .#yomu-desktop`.
+# yomu-shell is Android-only and is compiled, with its baked-in web dist,
+# by the separate Android job rather than the host cargo jobs.
 name: ci
 
 on:
@@ -48,7 +47,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       - name: cargo fmt
-        run: nix develop -c cargo fmt --check
+        run: nix develop -c cargo fmt --all --check
 
       - name: cargo clippy
         run: |
@@ -67,8 +66,7 @@ jobs:
       - name: dependency advisories, licenses, and sources
         run: nix develop -c cargo deny --locked check
 
-  # Everything a release ships must build from the flake, including the
-  # desktop shell (the one workspace member the cargo jobs skip).
+  # Server and browser packages must build from the flake.
   packages:
     runs-on: ubuntu-latest
     steps:
@@ -92,14 +90,7 @@ jobs:
         run: nix flake check --print-build-logs
 
       - name: nix build
-        run: nix build .#yomu-server .#yomu-web .#yomu-desktop
-
-      - name: cargo clippy (desktop shell)
-        run: |
-          nix build .#yomu-web --out-link result-web
-          rm -rf crates/yomu-web/dist
-          cp -rL result-web crates/yomu-web/dist
-          nix develop .#tauri -c cargo clippy -p yomu-shell --all-targets -- -D warnings
+        run: nix build .#yomu-server .#yomu-web .#yomu-web-compressed
 
   browser-e2e:
     runs-on: ubuntu-latest

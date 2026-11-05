@@ -170,7 +170,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// CORS policy. Default (no `allowed_origins`) is permissive: any origin,
-/// no credentials. That's what the native shells (Android/desktop pointed at
+/// no credentials. That's what the Android shell (pointed at
 /// a LAN server) and a separately-hosted web frontend rely on, and it's safe
 /// now that every mutating route requires a session — a credentialed request
 /// may not use a wildcard `Access-Control-Allow-Origin`, so `*` cannot ride a

@@ -32,13 +32,13 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            ## Server and desktop
+            ## Server and web
 
             Deploy directly from the Nix flake:
 
             ```bash
             nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-server
-            nix run github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-desktop
+            nix build github:tdbmxyz/yomu/${{ github.ref_name }}#yomu-web-compressed
             ```
 
             ## Android

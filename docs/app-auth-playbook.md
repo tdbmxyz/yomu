@@ -23,9 +23,8 @@ remain reachable and advertise the native app sign-in configuration.
 
 - Use a public OIDC app client with PKCE S256; never embed a client secret in an APK.
 - Keep the redirect `xyz.tdbm.yomu://auth/callback` consistent between provider,
-  shell constant, Tauri deep-link config, Android intent filter, and desktop handler.
-- Process both running-app callbacks and startup intents. Android uses singleTask;
-  desktop single-instance handling must precede deep-link handling.
+  shell constant, Tauri deep-link config, and Android intent filter.
+- Process both running-app callbacks and startup intents. Android uses singleTask.
 - Check auth on visibilitychange as well as a timer: Android suspends timers and
   may kill the process while the system browser is foregrounded.
 - Retain useful on-device status/error messages; never log tokens, codes or verifiers.

@@ -25,8 +25,8 @@ are described in [MAINTENANCE.md](MAINTENANCE.md).
   download APIs exist but are not yet the shell's synchronization adapter.
 - OIDC/browser/native-app sign-in, per-user progress/read state, proxy identity,
   account sign-out, backup/restore, updates and notifications.
-- Tauri desktop and Android shells, Android background notifications and
-  immersive reading, reproducible Nix server/web/desktop packages, a hardened
+- Tauri Android app, background notifications and immersive reading,
+  reproducible Nix server/web packages, a hardened
   NixOS module, and CI package builds.
 
 - Account-scoped offline state with retained legacy recovery; acknowledged browser
@@ -56,7 +56,7 @@ are described in [MAINTENANCE.md](MAINTENANCE.md).
 - Add EPUB resource-graph device saves with the same verified, atomic completion
   and ownership guarantees as comic saves; include lazy reader assets for offline boot.
 - Persist reading preferences, add semantic text locators/search and richer TOC;
-  validate desktop/Android WebViews as well as Chromium.
+  validate Android WebViews as well as Chromium.
 - Extend organized-folder ebook import, PDF outlines/search, and fixed-layout EPUB
   with distinct navigators rather than treating them as image chapters.
 
@@ -73,4 +73,4 @@ are described in [MAINTENANCE.md](MAINTENANCE.md).
 - Continue database backup drills, integrity checks, WAL/session maintenance,
   readiness thresholds, and useful service metrics.
 - Keep advisories, licenses, dependency automation, Rust pin, NixOS module
-  evaluation, desktop linting, and Android Kotlin compilation green in CI.
+  evaluation, and Android Kotlin compilation green in CI.

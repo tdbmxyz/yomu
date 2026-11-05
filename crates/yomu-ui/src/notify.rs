@@ -125,7 +125,7 @@ async fn notify(event: &UpdateEvent) {
     }
 }
 
-/// Plugin permission dance (Android 13+ prompts; desktop is a yes).
+/// Plugin permission dance (Android 13+ prompts).
 async fn ensure_permission() -> bool {
     let granted = crate::offline::shell_invoke(
         "plugin:notification|is_permission_granted",
