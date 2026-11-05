@@ -463,7 +463,7 @@ pub(super) fn vertical_strip(
     // anchoring (Blink, Gecko) do the compensation inside layout instead —
     // there the strip leaves the scroll position alone entirely. The manual
     // glue below only runs on engines without it (WebKit), which are the
-    // wheel-scrolled desktop shells where an immediate scrollBy is safe.
+    // wheel-scrolled browsers where an immediate scrollBy is safe.
     let native_anchor =
         web_sys::css::supports_with_value("overflow-anchor", "auto").unwrap_or(false);
     // Scroll events only count once the programmatic

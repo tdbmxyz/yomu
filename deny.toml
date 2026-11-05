@@ -8,8 +8,8 @@ yanked = "warn"
 unmaintained = "workspace"
 unsound = "all"
 ignore = [
-  # Tauri 2's Linux WebKit stack is still on gtk-rs 0.18. The affected
-  # VariantStrIter API is not used by yomu; remove when Tauri upgrades gtk-rs.
+  # Tauri 2's Linux WebKit stack remains in its cross-platform lock graph even
+  # though yomu only builds Tauri for Android. The affected iterator is unused.
   { id = "RUSTSEC-2024-0429", reason = "transitive Tauri GTK binding; affected iterator unused" },
 ]
 

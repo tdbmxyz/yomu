@@ -1,17 +1,14 @@
-//! Tauri shell: loads the bundled web UI and tells it where the server is.
-//!
-//! The UI resolves its API base from `window.YOMU_API_BASE` first (see
-//! yomu-web/src/main.rs); the shell injects it before the bundle runs. The
-//! address comes from, in order: the `YOMU_SERVER` env var (desktop dev),
-//! `$XDG_CONFIG_HOME/yomu/server` (one line, desktop), or nothing — then the
-//! UI's own resolution takes over (localStorage override set through the
-//! in-app connect screen, which is the path on Android).
+//! Android shell: loads the bundled web UI. The server address is set
+//! through the in-app connect screen and retained in localStorage.
 //!
 //! Device downloads: webviews here have no service worker, so "save to
 //! device" drives [`device_begin_chapter`] / [`device_save_page`] /
 //! [`device_finish_chapter`], which store pages under the app data
 //! directory; the reader loads them back through the `yomudev` custom
 //! protocol (base URL injected as `window.YOMU_DEVICE_BASE`).
+
+// The native app is Android-only; host workspace checks have no webview deps.
+#![cfg(target_os = "android")]
 
 pub mod auth;
 #[cfg(test)]
@@ -23,59 +20,6 @@ use sha2::{Digest, Sha256};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FsExt;
-
-fn configured_server() -> Option<String> {
-    if let Ok(url) = std::env::var("YOMU_SERVER") {
-        return Some(url.trim().to_string());
-    }
-    let config = dirs_config()?.join("yomu/server");
-    let raw = std::fs::read_to_string(config).ok()?;
-    let url = raw.trim();
-    (!url.is_empty()).then(|| url.to_string())
-}
-
-fn dirs_config() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-}
-
-#[tauri::command]
-fn open_external(url: String) -> Result<(), String> {
-    let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("only http(s) links open externally".into());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    }
-    #[cfg(windows)]
-    {
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", &url])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = url;
-        Err("use the Android URL bridge".into())
-    }
-}
 
 fn handle_auth_callback<R: tauri::Runtime>(app: &tauri::AppHandle<R>, raw: &str) {
     let app = app.clone();
@@ -120,8 +64,7 @@ async fn store_remove(store: State<'_, yomu_store::Store>, key: String) -> Resul
 
 /// Android WebViews do not implement downloads for JavaScript `blob:` URLs.
 /// Use the platform document picker and filesystem bridge so the user chooses
-/// a real, externally accessible destination. The same command also gives
-/// desktop shells a native save dialog.
+/// a real, externally accessible destination.
 #[tauri::command]
 async fn save_backup_file(app: tauri::AppHandle, json: String) -> Result<bool, String> {
     let dialog_app = app.clone();
@@ -476,26 +419,9 @@ fn device_page_file(app: &tauri::AppHandle, chapter: &str, n: u32) -> Option<Pat
         })
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[tauri::mobile_entry_point]
 pub fn run() {
-    // WebKitGTK's DMABUF renderer draws a blank window on the NVIDIA
-    // driver; disable it there unless the user decided themselves.
-    #[cfg(target_os = "linux")]
-    if std::path::Path::new("/proc/driver/nvidia").exists()
-        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-    {
-        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
-    }
-
-    let builder = tauri::Builder::default();
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-        for arg in argv {
-            handle_auth_callback(app, &arg);
-        }
-    }));
-
-    builder
+    tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_deep_link::init())
@@ -503,7 +429,6 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(Http(reqwest::Client::new()))
         .invoke_handler(tauri::generate_handler![
-            open_external,
             auth::auth_start,
             auth::auth_status,
             auth::auth_sign_out,
@@ -523,7 +448,7 @@ pub fn run() {
         ])
         // Serves device-saved content: yomudev://localhost/chapter/<id>/<n>
         // and yomudev://localhost/cover/<manga>
-        // (http://yomudev.localhost/… on Android/Windows).
+        // (http://yomudev.localhost/… on Android).
         .register_uri_scheme_protocol("yomudev", |ctx, request| {
             let not_found = || {
                 tauri::http::Response::builder()
@@ -560,23 +485,10 @@ pub fn run() {
             let store = tauri::async_runtime::block_on(yomu_store::Store::open(&store_path))?;
             app.manage(store);
 
-            let device_base = if cfg!(any(windows, target_os = "android")) {
-                "http://yomudev.localhost/"
-            } else {
-                "yomudev://localhost/"
-            };
-            let mut window =
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title("yomu")
-                    .initialization_script(format!("window.YOMU_DEVICE_BASE = '{device_base}';"));
-            if let Some(server) = configured_server().filter(|s| url::Url::parse(s).is_ok()) {
-                // serde_json-free single-quoted injection: the URL was just
-                // validated, but escape quotes anyway.
-                let escaped = server.replace('\\', "\\\\").replace('\'', "\\'");
-                window =
-                    window.initialization_script(format!("window.YOMU_API_BASE = '{escaped}';"));
-            }
-            window.build()?;
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("yomu")
+                .initialization_script("window.YOMU_DEVICE_BASE = 'http://yomudev.localhost/';")
+                .build()?;
 
             use tauri_plugin_deep_link::DeepLinkExt;
             let handle = app.handle().clone();

@@ -43,13 +43,12 @@ not just caching the manifest.
 
 - Preserve Nix's frame-pointer flags when adding panic-path remapping. Embedded
   toolchain paths can accidentally retain gigabytes in a runtime closure.
-- Do not install Android's static library in the desktop package.
 - Scope Android stripping to its target, not global RUSTFLAGS (which reaches the
   nested WASM build and can remove required target features). Verify the APK's
   shipped `.so`, not just build settings; `just apk` rejects a retained `.symtab`.
 - Inject the workspace version into the Android build and remove stale generated
-  tauri.properties first. Tauri's desktop Cargo-version fallback is not sufficient
-  for Android. Verify the signed artifact before attaching it to a release.
+  tauri.properties first; do not rely on generated Gradle defaults. Verify the
+  signed artifact before attaching it to a release.
 
 Historical measurements and the implementation walkthroughs remain in Git. Do not
 use those numbers as today's baseline; dependencies and UI features change it.

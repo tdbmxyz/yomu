@@ -268,8 +268,13 @@ impl Streamer {
                 let entry = archive
                     .by_index(i)
                     .map_err(|e| SourceError::Parse(format!("cbz entry {i}: {e}")))?;
-                if entry.is_file() && is_image_name(entry.name()) {
-                    names.push(entry.name().to_string());
+                if entry.is_file() {
+                    let name = entry
+                        .name()
+                        .map_err(|e| SourceError::Parse(format!("cbz entry {i} name: {e}")))?;
+                    if is_image_name(&name) {
+                        names.push(name.into_owned());
+                    }
                 }
             }
             Ok(names)
@@ -892,6 +897,63 @@ mod tests {
         let mut names = vec!["10.png".into(), "2.png".into(), "1.png".into()];
         sort_pages(&mut names);
         assert_eq!(names, ["1.png", "2.png", "10.png"]);
+    }
+
+    #[tokio::test]
+    async fn cbz_pages_round_trip_unicode_names_and_compression_methods() {
+        use std::io::Write;
+        use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+        let root = std::env::temp_dir().join(format!("yomu-cbz-round-trip-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = std::fs::File::create(root.join("Book.cbz")).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive
+            .add_directory("pages/", SimpleFileOptions::default())
+            .unwrap();
+        for (name, content, compression) in [
+            (
+                "pages/10-猫.jpg",
+                b"page ten".as_slice(),
+                CompressionMethod::Deflated,
+            ),
+            ("pages/2-é.png", b"page two", CompressionMethod::Stored),
+            ("pages/1.png", b"page one", CompressionMethod::Deflated),
+            (".hidden.png", b"hidden", CompressionMethod::Stored),
+            ("README.txt", b"ignored", CompressionMethod::Stored),
+        ] {
+            archive
+                .start_file(
+                    name,
+                    SimpleFileOptions::default().compression_method(compression),
+                )
+                .unwrap();
+            archive.write_all(content).unwrap();
+        }
+        archive.finish().unwrap();
+
+        let streamer = Streamer::new(root.clone());
+        let pages = streamer.pages("Book.cbz").await.unwrap();
+        assert_eq!(pages.len(), 3);
+        for (url, name, content, content_type) in [
+            (
+                &pages[0],
+                "pages/1.png",
+                b"page one".as_slice(),
+                "image/png",
+            ),
+            (&pages[1], "pages/2-é.png", b"page two", "image/png"),
+            (&pages[2], "pages/10-猫.jpg", b"page ten", "image/jpeg"),
+        ] {
+            assert_eq!(
+                url.query_pairs().find(|(key, _)| key == "entry").unwrap().1,
+                name
+            );
+            let image = streamer.image(url).await.unwrap();
+            assert_eq!(&image.bytes[..], content);
+            assert_eq!(image.content_type, content_type);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -10,9 +10,19 @@ members = [
     "crates/yomu-web",
     "crates/yomu-shell",
 ]
+# Plain cargo commands build server/web, not the Android-only app.
+default-members = [
+    "crates/yomu-domain",
+    "crates/yomu-source",
+    "crates/yomu-server",
+    "crates/yomu-client",
+    "crates/yomu-store",
+    "crates/yomu-ui",
+    "crates/yomu-web",
+]
 
 [workspace.package]
-version = "2.6.0"
+version = "2.6.1"
 edition = "2024"
 authors = ["Tibo <thibaudbalem@gmail.com>"]
 license = "AGPL-3.0-or-later"
@@ -39,7 +49,7 @@ percent-encoding = "2"
 regex = "1"
 scraper = "0.27"
 toml = "0.8"
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
 lopdf = { version = "0.42", default-features = false }
 
@@ -54,7 +64,7 @@ sha2 = "0.10"
 futures = "0.3"
 figment = { version = "0.10", features = ["toml", "env"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "derive", "macros"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "signal", "fs"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"

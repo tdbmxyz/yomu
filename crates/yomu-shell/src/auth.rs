@@ -1,4 +1,4 @@
-//! Native authorization-code + PKCE flow for desktop/mobile shells.
+//! Native authorization-code + PKCE flow for the Android shell.
 //!
 //! Authentik returns to a custom-scheme deep link. The shell validates the
 //! state, sends the code and verifier to yomu, and stores the resulting opaque
