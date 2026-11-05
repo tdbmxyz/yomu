@@ -1,6 +1,5 @@
-//! Shared Leptos UI, mounted by the web bundle (and later by a desktop
-//! shell). Platform specifics are injected via [`AppConfig`], same seam as
-//! chaos.
+//! Shared Leptos UI for web and Android. Platform specifics are injected
+//! via [`AppConfig`], same seam as chaos.
 
 mod auth;
 mod cache;
@@ -690,7 +689,7 @@ pub(crate) fn Account() -> impl IntoView {
                 }
                 (yomu_domain::AuthMode::Oidc, None) => {
                     // Full document navigation (the endpoint 302s to the
-                    // provider), against the API base so a desktop shell
+                    // provider), against the API base so the Android shell
                     // pointing at a remote server signs in there.
                     let href = use_client()
                         .base()

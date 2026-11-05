@@ -52,7 +52,7 @@ rationale (ADRs there apply; yomu-specific decisions in `docs/adr/`).
 | `yomu-store` | SQLite journal, sync cursor, device metadata, and native client state |
 | `yomu-ui` | Leptos pages: library, search, manga, reader |
 | `yomu-web` | Trunk entrypoint |
-| `yomu-shell` | Tauri v2 desktop/Android shell around the same UI |
+| `yomu-shell` | Tauri v2 Android app around the same UI |
 
 ## Development
 
@@ -70,8 +70,7 @@ planning/generation/healing in pi, install `pi-mcp-adapter`; the checked-in
 `.mcp.json` and `.pi/skills/playwright-e2e/` connect pi to Playwright MCP while
 CI remains model- and credential-free.
 
-Desktop shell: `nix develop .#tauri`, then `just shell http://<server>:4700`
-(or set `~/.config/yomu/server`). Android: `just apk` — it enters
+Android: `just apk` — it enters
 `nix develop .#android` itself and injects the workspace version from
 `Cargo.toml`, so the APK can never be stamped with a stale one. On first
 launch the app shows a connect screen asking for the server URL. Release
@@ -90,21 +89,10 @@ First checkout: enter the shell, `cargo generate-lockfile`,
 
 ## Clients
 
-The browser is the primary client: point it at the server. There is no
-prebuilt desktop download — the desktop shell requires nix, and is run
-from the flake:
-
-```console
-$ nix run github:tdbmxyz/yomu#yomu-desktop
-```
-
-That needs nix with flakes enabled (`nix-command` and `flakes` experimental
-features); on a non-NixOS host a WebKitGTK app run from the store may also
-need a GL wrapper such as `nixGL`.
-
-It asks for the server address on first launch (or read it from
-`YOMU_SERVER` / `~/.config/yomu/server`). Android is an APK, signed
-locally and attached to a release by hand.
+Use the Android app or point a browser at the server. The Android APK is
+signed locally and attached to a release by hand; it asks for the server
+address on first launch. There is no native desktop app; use the web UI on
+desktop systems.
 
 ## Branching & releases
 
@@ -119,8 +107,7 @@ Git flow, enforced by CI on the long-lived branches:
   merge `develop` into `main`, tag `vX.Y.Z`. The release workflow checks
   the tag against `Cargo.toml` and creates release metadata; deployments
   consume the tagged Nix flake, so no web bundle is attached. The Android
-  APK is signed locally and attached by hand. The desktop shell is not
-  published as an artifact — it is run from the flake (see Clients above).
+  APK is signed locally and attached by hand.
 
 ## License
 

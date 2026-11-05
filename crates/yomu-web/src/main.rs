@@ -4,12 +4,12 @@ use yomu_ui::{App, AppConfig};
 
 /// Where the yomu server lives, resolved in order:
 ///
-/// 1. `window.YOMU_API_BASE` — set by a hosting shell (Tauri injects it, a
-///    reverse proxy can inline a `<script>`); wins over everything.
+/// 1. `window.YOMU_API_BASE` — optional hosting override (a reverse proxy
+///    can inline a `<script>`); wins over everything.
 /// 2. `localStorage["yomu-api-base"]` — user override, survives reloads.
 /// 3. The page origin, when it's http(s) — the served-by-yomu-server case
-///    (and trunk's dev proxy). Note Windows Tauri uses `https://tauri.localhost`,
-///    which is *not* the API — shells must set YOMU_API_BASE.
+///    (and trunk's dev proxy). Android's `http://tauri.localhost` is the
+///    bundled UI, not the API; the app uses the stored server override.
 /// 4. The default local server, as a last resort for non-http origins.
 fn api_base() -> Url {
     let fallback = Url::parse("http://127.0.0.1:4700").expect("valid fallback url");

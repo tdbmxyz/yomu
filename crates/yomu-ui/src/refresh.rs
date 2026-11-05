@@ -1,5 +1,5 @@
-//! Pull-to-refresh. Touch-only by design: on the web and the desktop
-//! shell a page reload is the refresh, and a mouse never triggers this.
+//! Pull-to-refresh. Touch-only by design: desktop browsers can reload
+//! the page, and a mouse never triggers this.
 //!
 //! Not to be confused with `pull.rs`, which drains the device-download
 //! queue.

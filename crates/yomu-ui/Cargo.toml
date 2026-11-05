@@ -1,6 +1,6 @@
 [package]
 name = "yomu-ui"
-description = "Leptos components and pages shared by web (and later desktop)"
+description = "Leptos components and pages shared by web and Android"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

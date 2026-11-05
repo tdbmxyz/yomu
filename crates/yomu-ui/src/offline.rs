@@ -468,7 +468,7 @@ pub fn device_manga() -> std::collections::BTreeMap<Uuid, u32> {
 
 // ---- Tauri shell bridge ----
 //
-// In the desktop/Android shell there is no service worker; "save to
+// In the Android shell there is no service worker; "save to
 // device" goes through Tauri commands that download pages to the app's
 // data directory, and the reader loads them back over the shell's
 // `yomudev` custom protocol (`window.YOMU_DEVICE_BASE`, injected at
@@ -498,7 +498,7 @@ pub fn shell_page_url(chapter_id: Uuid, n: u32) -> Option<String> {
 
 /// Android shell: hide/show the system bars while reading. The bridge is
 /// installed by the Android activity as `window.YomuAndroid`; anywhere it
-/// is absent (desktop shell, plain browser, an APK older than the bridge)
+/// is absent (plain browser or an APK older than the bridge)
 /// this is a no-op.
 pub fn set_immersive(on: bool) {
     android_bridge("setImmersive", on);

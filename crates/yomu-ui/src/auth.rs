@@ -120,11 +120,7 @@ async fn open_external(url: &str) -> Result<(), String> {
             .map_err(|e| format!("{e:?}"))?;
         return Ok(());
     }
-    let args = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&args, &"url".into(), &url.into());
-    crate::offline::shell_invoke("open_external", args)
-        .await
-        .map(|_| ())
+    Err("Android URL bridge unavailable".into())
 }
 
 pub(crate) async fn sign_out() {
