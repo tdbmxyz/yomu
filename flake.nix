@@ -123,7 +123,9 @@
       cargoLock.lockFile = ./Cargo.lock;
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
-      nativeBuildInputs = [pkgs.makeWrapper];
+      nativeBuildInputs = [pkgs.makeWrapper pkgs.pkg-config];
+      # nixpkgs' Cargo hook disables bundled SQLite; SQLx needs the system lib.
+      buildInputs = [pkgs.sqlite];
       nativeCheckInputs = [pkgs.poppler-utils];
       postInstall = ''
         wrapProgram $out/bin/yomu-server --prefix PATH : ${lib.makeBinPath [pkgs.poppler-utils]}
