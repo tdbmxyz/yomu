@@ -193,6 +193,11 @@ where
 /// The library list, shared by the Library and Home pages — they fetch the
 /// same thing, so switching between them costs nothing.
 pub type LibraryCache = Keyed<(), Vec<yomu_domain::PublicationWithLocator>>;
+pub type SourcesCache = Keyed<(), Vec<yomu_domain::SourceInfo>>;
+
+pub fn use_sources_cache() -> SourcesCache {
+    use_context().expect("SourcesCache provided by App")
+}
 /// The category list, shared by the Library and manga pages.
 pub type CategoriesCache = Keyed<(), Vec<yomu_domain::Category>>;
 /// One open publication. The bool is the served-from-cache flag that tells

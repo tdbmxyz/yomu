@@ -2,17 +2,22 @@
 //! browsing lives in the Sources tab (see `sources.rs`).
 
 use leptos::prelude::*;
-use leptos::task::spawn_local;
-use yomu_domain::{AddPublicationRequest, MangaSummary};
+use leptos_router::hooks::{use_navigate, use_query_map};
+use yomu_domain::MangaSummary;
+
+use super::source_title::TrackResult;
+use crate::cover::SourceCover;
 
 use crate::use_client;
 
 #[component]
 pub fn Search() -> impl IntoView {
     let client = use_client();
-    let query = RwSignal::new(String::new());
-    // Query of the search currently displayed; None = browse mode.
-    let submitted = RwSignal::new(None::<String>);
+    let params = use_query_map();
+    let submitted = Memo::new(move |_| params.get().get("q").filter(|q| !q.is_empty()));
+    let query = RwSignal::new(submitted.get_untracked().unwrap_or_default());
+    Effect::new(move |_| query.set(submitted.get().unwrap_or_default()));
+    let navigate = use_navigate();
     let status = RwSignal::new(None::<String>);
 
     let sources = LocalResource::new({
@@ -43,9 +48,14 @@ pub fn Search() -> impl IntoView {
             return;
         }
         status.set(None);
-        submitted.set(Some(q));
+        if submitted.get_untracked().as_ref() == Some(&q) {
+            results.refetch();
+        } else {
+            navigate(&search_href(&q), Default::default());
+        }
     };
 
+    let clear_search = use_navigate();
     view! {
         <section class="browse">
             <h2>"Search"</h2>
@@ -67,9 +77,13 @@ pub fn Search() -> impl IntoView {
                             view! {
                                 <button
                                     type="button"
-                                    on:click=move |_| {
-                                        submitted.set(None);
-                                        query.set(String::new());
+                                    on:click={
+                                        let navigate = clear_search.clone();
+                                        move |_| {
+                                            status.set(None);
+                                            query.set(String::new());
+                                            navigate("/search", Default::default());
+                                        }
                                     }
                                 >
                                     "Clear"
@@ -100,8 +114,9 @@ pub fn Search() -> impl IntoView {
                                             None => {
                                                 view! {
                                                     <SummaryGrid
-                                                        items=group.results
+                                                        items=Signal::stored(group.results)
                                                         source=group.source_id
+                                                        search_query=submitted.get_untracked()
                                                         status
                                                     />
                                                 }
@@ -150,20 +165,33 @@ pub fn Search() -> impl IntoView {
     }
 }
 
+pub(super) fn search_href(query: &str) -> String {
+    format!(
+        "/search?{}",
+        url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", query)
+            .finish()
+    )
+}
+
 /// Cover grid of source results, each with track actions. Shared with the
 /// Sources tab's catalog page.
 #[component]
 pub(crate) fn SummaryGrid(
-    items: Vec<MangaSummary>,
+    #[prop(into)] items: Signal<Vec<MangaSummary>>,
     source: String,
+    #[prop(optional_no_strip)] search_query: Option<String>,
     status: RwSignal<Option<String>>,
 ) -> impl IntoView {
     view! {
         <div class="manga-grid browse-grid">
-            {items
-                .into_iter()
-                .map(|hit| view! { <SummaryCard hit source=source.clone() status/> })
-                .collect_view()}
+            <For
+                each=move || items.get()
+                key=|hit| hit.key.clone()
+                children=move |hit| view! {
+                    <SummaryCard hit source=source.clone() search_query=search_query.clone() status/>
+                }
+            />
         </div>
     }
 }
@@ -172,87 +200,28 @@ pub(crate) fn SummaryGrid(
 fn SummaryCard(
     hit: MangaSummary,
     source: String,
+    #[prop(optional_no_strip)] search_query: Option<String>,
     status: RwSignal<Option<String>>,
 ) -> impl IntoView {
-    let client = use_client();
-    let title = hit.title.clone();
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("key", &hit.key);
+    if let Some(q) = search_query {
+        query.append_pair("q", &q);
+    }
+    let href = format!("/sources/{source}/title?{}", query.finish());
     let in_library = hit.in_library;
-    let cover_src = hit.cover_url.clone().map(|url| {
-        client
-            .source_cover_url(&url)
-            .map(|url| url.to_string())
-            .unwrap_or(url)
-    });
-
-    let add = move |auto_download: bool| {
-        let client = client.clone();
-        let req = AddPublicationRequest {
-            source_id: source.clone(),
-            source_key: hit.key.clone(),
-            auto_download,
-        };
-        // Captured before the task: a context read after an await returns
-        // None, and the new title would never reach the library list.
-        let library_cache = crate::cache::use_library_cache();
-        let detail_cache = crate::cache::use_detail_cache();
-        spawn_local(async move {
-            match client.add_publication(&req).await {
-                Ok(publication) => {
-                    crate::cache::mark_publication_stale(library_cache, detail_cache);
-                    status.set(Some(format!(
-                        "Added \"{}\" to the library",
-                        publication.title
-                    )));
-                }
-                Err(err) => status.set(Some(format!("Add failed: {err}"))),
-            }
-        });
-    };
-    let add_plain = add.clone();
-
     view! {
         <div class="manga-card browse-card">
-            <span class="cover-wrap">
-                {match cover_src {
-                    // The client resolves this server-relative proxy URL and
-                    // signs it for native WebViews, whose `<img>` requests
-                    // cannot carry the app's Authorization header.
-                    Some(src) => view! {
-                        <img class="manga-cover" src=src loading="lazy" alt=""/>
-                    }
-                        .into_any(),
-                    None => view! { <span class="manga-cover cover-empty"></span> }.into_any(),
-                }}
-                {in_library
-                    .map(|_| {
-                        view! {
-                            <span class="in-library-badge" title="Already in the library">
-                                "✓"
-                            </span>
-                        }
+            <a class="browse-title" href=href>
+                <span class="cover-wrap">
+                    <SourceCover path=hit.cover_url/>
+                    {in_library.map(|_| view! {
+                        <span class="in-library-badge" title="Already in the library" aria-hidden="true">"✓"</span>
                     })}
-            </span>
-            <span class="manga-title">{title}</span>
-            <span class="browse-actions">
-                {match in_library {
-                    Some(id) => view! {
-                        <a class="button" href=format!("/publications/{id}")>"open"</a>
-                    }
-                        .into_any(),
-                    None => view! {
-                        <button title="Track in the library" on:click=move |_| add_plain(false)>
-                            "track"
-                        </button>
-                        <button
-                            title="Track and auto-download new chapters"
-                            on:click=move |_| add(true)
-                        >
-                            "+ auto"
-                        </button>
-                    }
-                        .into_any(),
-                }}
-            </span>
+                </span>
+                <span class="manga-title">{hit.title}</span>
+            </a>
+            <TrackResult source key=hit.key in_library status/>
         </div>
     }
 }

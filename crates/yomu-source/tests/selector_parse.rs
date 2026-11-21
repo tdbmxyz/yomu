@@ -4,8 +4,8 @@ use url::Url;
 use yomu_source::SourceError;
 use yomu_source::selector::{SelectorSource, SelectorSpec};
 
-fn fixture_source() -> SelectorSource {
-    let spec: SelectorSpec = toml::from_str(
+fn fixture_spec() -> SelectorSpec {
+    toml::from_str(
         r#"
         id = "fixture"
         name = "Fixture Scans"
@@ -29,8 +29,32 @@ fn fixture_source() -> SelectorSource {
         image = ".reading-content img.page@data-src"
         "#,
     )
-    .expect("valid spec");
-    SelectorSource::new(spec).expect("source compiles")
+    .expect("valid spec")
+}
+
+fn fixture_source() -> SelectorSource {
+    SelectorSource::new(fixture_spec()).expect("source compiles")
+}
+
+#[test]
+fn icons_default_to_the_site_favicon_and_allow_configured_paths() {
+    use yomu_source::Source;
+    assert_eq!(
+        fixture_source().icon_url().unwrap().as_str(),
+        "https://fixture.test/favicon.ico"
+    );
+    for (configured, expected) in [
+        ("/assets/logo.png", "https://fixture.test/assets/logo.png"),
+        (
+            "https://cdn.fixture.test/logo.png",
+            "https://cdn.fixture.test/logo.png",
+        ),
+    ] {
+        let mut spec = fixture_spec();
+        spec.icon_url = Some(configured.into());
+        let source = SelectorSource::new(spec).unwrap();
+        assert_eq!(source.icon_url().unwrap().as_str(), expected);
+    }
 }
 
 fn fixture(name: &str) -> String {

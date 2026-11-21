@@ -24,6 +24,9 @@ pub struct SelectorSpec {
     pub id: String,
     pub name: String,
     pub base_url: Url,
+    /// Source icon URL/path; defaults to /favicon.ico.
+    #[serde(default)]
+    pub icon_url: Option<String>,
     /// Milliseconds to wait between two requests to the site.
     #[serde(default = "default_min_delay_ms")]
     pub min_delay_ms: u64,
@@ -34,6 +37,10 @@ pub struct SelectorSpec {
     /// Extra headers, e.g. a Referer some sites require for images.
     #[serde(default)]
     pub referer: Option<String>,
+    /// Optional source-local browser fallback policy. The service endpoint
+    /// is configured separately by the server; absent means no fallback.
+    #[serde(default)]
+    pub flaresolverr: Option<crate::flaresolverr::FlareSolverrSourceConfig>,
 
     pub search: SearchSpec,
     #[serde(default)]
@@ -333,6 +340,7 @@ pub struct SelectorSource {
     compiled: CompiledSpec,
     client: reqwest::Client,
     network: crate::network::NetworkPolicy,
+    solver: Option<crate::flaresolverr::SolverSession>,
     /// Earliest instant the next request may *start*, advanced by
     /// `min_delay_ms` per reserved request. `None` until the first request.
     /// Only the reservation is under the lock — see `get`.
@@ -341,6 +349,9 @@ pub struct SelectorSource {
 
 impl SelectorSource {
     pub fn new(spec: SelectorSpec) -> Result<Self> {
+        if let Some(scope) = &spec.flaresolverr {
+            scope.validate(&spec.base_url)?;
+        }
         let sel = |raw: &str| {
             Selector::parse(raw)
                 .map_err(|e| SourceError::Definition(format!("selector {raw:?}: {e}")))
@@ -484,6 +495,7 @@ impl SelectorSource {
             compiled,
             client,
             network,
+            solver: None,
             next_slot: tokio::sync::Mutex::new(None),
         })
     }
@@ -725,6 +737,19 @@ impl SelectorSource {
             .ok()
     }
 
+    pub fn with_flaresolverr(
+        mut self,
+        solver: std::sync::Arc<crate::flaresolverr::FlareSolverr>,
+    ) -> Self {
+        if let Some(scope) = &self.spec.flaresolverr {
+            self.solver = Some(crate::flaresolverr::SolverSession::new(
+                solver,
+                scope.clone(),
+            ));
+        }
+        self
+    }
+
     // ---- fetching ----
 
     async fn get(&self, url: &Url) -> Result<reqwest::Response> {
@@ -754,7 +779,11 @@ impl SelectorSource {
             tokio::time::sleep(wait).await;
         }
 
-        let resp = self.client.get(url.clone()).send().await.map_err(|error| {
+        let mut request = self.client.get(url.clone());
+        if let Some(solver) = &self.solver {
+            request = request.headers(solver.headers(url));
+        }
+        let resp = request.send().await.map_err(|error| {
             // Reqwest's Display omits resolver/redirect policy failures.
             // Surface the root reason so an operator can distinguish a
             // blocked private target from an ordinary transport outage.
@@ -764,6 +793,17 @@ impl SelectorSource {
             }
             SourceError::Http(format!("{error}: {reason}"))
         })?;
+        // Cloudflare documents this header on challenge responses, including
+        // requests for images. Never parse the challenge as source content.
+        if resp
+            .headers()
+            .get("cf-mitigated")
+            .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"challenge"))
+        {
+            return Err(SourceError::BrowserChallenge {
+                host: resp.url().host_str().unwrap_or("The source").to_owned(),
+            });
+        }
         if !resp.status().is_success() {
             return Err(SourceError::Http(format!("{} on {url}", resp.status())));
         }
@@ -771,7 +811,18 @@ impl SelectorSource {
     }
 
     async fn get_html(&self, url: &Url) -> Result<String> {
-        let mut response = self.get(url).await?;
+        let generation = self.solver.as_ref().map(|s| s.generation()).unwrap_or(0);
+        let mut response = match self.get(url).await {
+            Ok(response) => response,
+            Err(SourceError::BrowserChallenge { .. }) if self.solver.is_some() => {
+                let solver = self.solver.as_ref().expect("solver configured");
+                if let Some(html) = solver.solve(url, &self.network, generation).await? {
+                    return Ok(html);
+                }
+                self.get(url).await?
+            }
+            Err(err) => return Err(err),
+        };
         let mut body = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -820,6 +871,13 @@ impl Source for SelectorSource {
 
     fn base_url(&self) -> &Url {
         &self.spec.base_url
+    }
+
+    fn icon_url(&self) -> Option<Url> {
+        self.spec
+            .base_url
+            .join(self.spec.icon_url.as_deref().unwrap_or("/favicon.ico"))
+            .ok()
     }
 
     async fn search(&self, query: &str) -> Result<Vec<MangaSummary>> {
@@ -871,7 +929,20 @@ impl Source for SelectorSource {
     }
 
     async fn image(&self, url: &Url) -> Result<ImageData> {
-        let mut resp = self.get(url).await?;
+        let generation = self.solver.as_ref().map(|s| s.generation()).unwrap_or(0);
+        let mut resp = match self.get(url).await {
+            Ok(response) => response,
+            Err(SourceError::BrowserChallenge { .. }) if self.solver.is_some() => {
+                let solver = self.solver.as_ref().expect("solver configured");
+                // Solver responses contain rendered HTML, not image bytes.
+                // Renew against a source page, then fetch the original image
+                // normally with the new cookie + exact browser user-agent.
+                let page = solver.page_url(&self.spec.base_url);
+                solver.solve(&page, &self.network, generation).await?;
+                self.get(url).await?
+            }
+            Err(err) => return Err(err),
+        };
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -1048,6 +1119,24 @@ mod tests {
         let error = source.get_html(&url).await.unwrap_err().to_string();
         assert!(error.contains("non-public"), "{error}");
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn challenge_headers_distinguish_browser_checks_from_other_refusals() {
+        for (header, expects_challenge) in [("cf-mitigated: challenge\r\n", true), ("", false)] {
+            let (source, url, task) = http_fixture(format!(
+                "HTTP/1.1 403 Forbidden\r\n{header}Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ).into_bytes()).await;
+            let err = source.manga(url.as_str()).await.unwrap_err();
+            if expects_challenge {
+                assert!(
+                    matches!(err, SourceError::BrowserChallenge { ref host } if host == "localhost")
+                );
+            } else {
+                assert!(matches!(err, SourceError::Http(ref error) if error.contains("403")));
+            }
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

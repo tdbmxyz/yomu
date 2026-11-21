@@ -1,0 +1,30 @@
+id = "solver-fixture"
+name = "Solver Fixture"
+base_url = "http://localhost:4811"
+min_delay_ms = 0
+allowed_private_hosts = ["localhost"]
+
+[flaresolverr]
+allowed_hosts = ["localhost"]
+
+[search]
+url = "{base}/solver/search?q={query}"
+item = ".manga-item"
+title = ".manga-link"
+link = ".manga-link@href"
+cover = "img@src"
+
+[browse.popular]
+url = "{base}/solver/catalog?page={page}"
+
+[manga]
+title = ".entry-title"
+description = ".summary"
+cover = ".cover img@src"
+chapter_item = ".chapter"
+chapter_title = "a"
+chapter_link = "a@href"
+chapter_date = "time@datetime"
+
+[pages]
+image = ".page@data-src"

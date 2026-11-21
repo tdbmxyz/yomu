@@ -20,6 +20,13 @@ impl Registry {
     /// the server — and every other source with it — down (a definition
     /// written for a newer engine once crashlooped the whole service).
     pub fn load(dir: &Path) -> Result<(Self, Vec<String>)> {
+        Self::load_with_flaresolverr(dir, None)
+    }
+
+    pub fn load_with_flaresolverr(
+        dir: &Path,
+        solver: Option<Arc<crate::flaresolverr::FlareSolverr>>,
+    ) -> Result<(Self, Vec<String>)> {
         let mut registry = Self::default();
         let mut broken = Vec::new();
         let entries = match std::fs::read_dir(dir) {
@@ -47,7 +54,11 @@ impl Registry {
                     .map_err(|e| SourceError::Definition(e.to_string()))?;
                 let spec: SelectorSpec =
                     toml::from_str(&raw).map_err(|e| SourceError::Definition(e.to_string()))?;
-                registry.insert(Arc::new(SelectorSource::new(spec)?))
+                let mut source = SelectorSource::new(spec)?;
+                if let Some(solver) = &solver {
+                    source = source.with_flaresolverr(solver.clone());
+                }
+                registry.insert(Arc::new(source))
             };
             if let Err(e) = load_one() {
                 broken.push(format!("{}: {e}", path.display()));

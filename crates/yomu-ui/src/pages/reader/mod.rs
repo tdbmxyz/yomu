@@ -17,6 +17,7 @@ use crate::use_client;
 
 mod chrome;
 mod gesture;
+mod image;
 mod publication;
 
 use chrome::{ReaderShell, ReaderTop};
@@ -430,7 +431,6 @@ fn ComicReader() -> impl IntoView {
     let request_view = request_turn.clone();
     let finish_view = finish_snap.clone();
     let report_scroll = report.clone();
-    let client_paged = use_client();
     let client_vertical = use_client();
 
     // Page count of the chapter under the reader (the routed chapter until
@@ -555,7 +555,6 @@ fn ComicReader() -> impl IntoView {
                     Some(Ok(meta)) => match mode.get() {
                         ReaderMode::Paged => paged_stage(
                             cx,
-                            client_paged.clone(),
                             request,
                             finish,
                             neighbour_ids,

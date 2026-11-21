@@ -247,7 +247,11 @@ fn MangaDetail(
     };
     // LocalFile publications: their content *is* the server copy, so no
     // server-download affordances make sense for them.
-    let is_local = matches!(publication.origin, yomu_domain::Origin::LocalFile { .. });
+    let source_key = match &publication.origin {
+        yomu_domain::Origin::Source { source_key, .. } => Some(source_key.clone()),
+        yomu_domain::Origin::LocalFile { .. } => None,
+    };
+    let is_local = source_key.is_none();
     let missing = publication.missing_since.is_some();
     // Volumes in the folder the scan could not read, e.g. "9 unreadable
     // files: cbr" — the honest explanation for a series with gaps, or with
@@ -408,6 +412,11 @@ fn MangaDetail(
                             yomu_domain::Origin::LocalFile { .. } => "local".to_string(),
                         }} " · " {detail.units.len()} " " {unit_noun}
                     </p>
+                    {(!is_local).then(|| view! {
+                        <p class="muted">"Last successful chapter check: "
+                            {publication.last_checked_at.map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_else(|| "Not yet checked".into())}
+                        </p>
+                    })}
                     <div class="manga-actions">
                         {continue_target
                             .map(|(chapter_id, query)| {
@@ -424,6 +433,7 @@ fn MangaDetail(
                             <a class="button" href=href download="">"Download original"</a>
                         })}
                         <button on:click=do_refresh>{format!("Check for new {unit_plural}")}</button>
+                        {source_key.map(|source_key| view! { <super::source_link::SourceLink source_key/> })}
                         {(!is_local)
                             .then(|| {
                                 view! {
@@ -1006,6 +1016,9 @@ fn ChapterItem(
             handle.clear();
         }
     };
+    // Navigation can unmount the row before pointerup (or a refresh can
+    // replace its parent callbacks). Never leave a long-press task behind.
+    on_cleanup(cancel);
     let on_target_button = |ev: &leptos::ev::PointerEvent| {
         use leptos::wasm_bindgen::JsCast;
         ev.target()
@@ -1021,9 +1034,13 @@ fn ChapterItem(
         cancel();
         let handle = set_timeout_with_handle(
             move || {
-                timer.set_value(None);
-                long_fired.set_value(true);
-                press.run(index);
+                if timer.try_update_value(|slot| *slot = None).is_none() {
+                    return;
+                }
+                long_fired.try_update_value(|fired| *fired = true);
+                // The parent list may already have been replaced by a
+                // refresh/navigation while this queued task was suspended.
+                press.try_run(index);
             },
             std::time::Duration::from_millis(500),
         )
@@ -1038,6 +1055,7 @@ fn ChapterItem(
         }
     };
     let click = move |ev: leptos::ev::MouseEvent| {
+        cancel();
         // The click that ends a long press must not navigate or re-toggle.
         if long_fired.try_update_value(std::mem::take) == Some(true) {
             ev.prevent_default();

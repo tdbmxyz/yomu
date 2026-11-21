@@ -81,24 +81,27 @@ impl Db {
             serde_json::from_str(&keys).map_err(|e| DbError::Corrupt(e.to_string()))?;
         let mut items = Vec::with_capacity(keys.len());
         for key in &keys {
-            let row = sqlx::query_as::<_, (String, Option<String>)>(
-                "SELECT title, cover_url FROM catalog_entries
-                 WHERE source_id = ? AND key = ?",
-            )
-            .bind(source_id)
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-            if let Some((title, cover_url)) = row {
-                items.push(MangaSummary {
-                    key: key.clone(),
-                    title,
-                    cover_url,
-                    in_library: None,
-                });
+            if let Some(item) = self.catalog_entry(source_id, key).await? {
+                items.push(item);
             }
         }
         Ok(Some((items, fetched_at)))
+    }
+
+    pub async fn catalog_entry(&self, source_id: &str, key: &str) -> Result<Option<MangaSummary>> {
+        let row = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT title, cover_url FROM catalog_entries WHERE source_id = ? AND key = ?",
+        )
+        .bind(source_id)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(title, cover_url)| MangaSummary {
+            key: key.into(),
+            title,
+            cover_url,
+            in_library: None,
+        }))
     }
 
     /// Which source a cover URL belongs to — gate for the cover proxy

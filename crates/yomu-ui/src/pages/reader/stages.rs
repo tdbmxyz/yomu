@@ -9,7 +9,7 @@ use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 
 use super::gesture::{Gesture, touch_distance, touch_xy};
-use super::page_source;
+use super::image::ReaderImage;
 use crate::offline::{self, ReaderDirection, ReaderFit};
 use crate::pager;
 
@@ -43,7 +43,6 @@ pub(super) struct ReaderCtx {
 /// `ReaderInner` because the chrome outside the stage reads them too.
 pub(super) fn paged_stage(
     cx: ReaderCtx,
-    client_paged: yomu_client::YomuClient,
     request: impl Fn(i64) + Clone + 'static,
     finish: impl Fn() + Clone + 'static,
     neighbour_ids: impl Fn() -> (Option<uuid::Uuid>, Option<uuid::Uuid>) + Copy + Send + 'static,
@@ -276,32 +275,26 @@ pub(super) fn paged_stage(
     // whenever they are visible (drags don't turn
     // while zoomed).
     let panel_view = {
-        let client = client_paged.clone();
         move |position: i64| {
             let (prev, next) = neighbour_ids();
             match pager::panel(position, page_count(), prev.is_some(), next.is_some()) {
-                pager::Panel::Page(n) => {
-                    let src = page_source(&client, chapter_id, n);
-                    view! {
-                        <img
-                            class="reader-page"
-                            src=src
-                            alt=""
-                            style:transform=move || {
-                                let z = zoom.get();
-                                let (x, y) = pan.get();
-                                if z > 1.0 {
-                                    format!(
-                                        "translate({x}px, {y}px) scale({z})"
-                                    )
-                                } else {
-                                    String::new()
-                                }
+                pager::Panel::Page(n) => view! {
+                    <ReaderImage
+                        chapter=chapter_id n=n
+                        transform=Signal::derive(move || {
+                            let z = zoom.get();
+                            let (x, y) = pan.get();
+                            if z > 1.0 {
+                                format!(
+                                    "translate({x}px, {y}px) scale({z})"
+                                )
+                            } else {
+                                String::new()
                             }
-                        />
-                    }
-                    .into_any()
+                        })
+                    />
                 }
+                .into_any(),
                 pager::Panel::TransitionNext => {
                     let next_title = next.map(title_of).unwrap_or_default();
                     view! {
@@ -342,8 +335,8 @@ pub(super) fn paged_stage(
             }
         }
     };
-    let pv_left = panel_view.clone();
-    let pv_center = panel_view.clone();
+    let pv_left = panel_view;
+    let pv_center = panel_view;
     let pv_right = panel_view;
     // DOM slots are physical (left / center /
     // right); RTL puts the next position on the left.
@@ -703,7 +696,7 @@ pub(super) fn vertical_strip(
                     );
                 if position.is_some() {
                     at = position;
-                    at_loaded = img.complete();
+                    at_loaded = img.complete() && img.natural_width() > 0;
                 }
             }
         }
@@ -857,7 +850,6 @@ pub(super) fn vertical_strip(
     let on_pointercancel = move |_ev: leptos::ev::PointerEvent| {
         drag_from.set_value(None);
     };
-    let client = client_vertical.clone();
     view! {
         <div
             class="reader-scroll"
@@ -928,6 +920,9 @@ pub(super) fn vertical_strip(
                         else {
                             return;
                         };
+                        if img.has_attribute("data-loaded") {
+                            return; // capability renewal reloaded an already measured page
+                        }
                         let viewport = window()
                             .inner_height()
                             .ok()
@@ -1032,26 +1027,8 @@ pub(super) fn vertical_strip(
                     };
                     let images = (0..count)
                         .map(|n| {
-                            let src = page_source(&client, chapter, n);
                             view! {
-                                <img
-                                    class="reader-strip-page"
-                                    src=src
-                                    data-chapter=chapter.to_string()
-                                    data-page=n.to_string()
-                                    // every segment's opening
-                                    // pages load eagerly, so a
-                                    // chapter crossing lands on
-                                    // real content instead of
-                                    // racing placeholders
-                                    loading=if n < 3 {
-                                        "eager"
-                                    } else {
-                                        "lazy"
-                                    }
-                                    on:load=on_load
-                                    alt=""
-                                />
+                                <ReaderImage chapter n strip=true on_load=Callback::new(on_load)/>
                             }
                         })
                         .collect_view();

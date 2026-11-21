@@ -16,23 +16,28 @@ use crate::use_client;
 pub fn Sources() -> impl IntoView {
     let client = use_client();
     let conn = crate::use_connectivity();
-    let sources = LocalResource::new(move || {
-        conn.track();
-        let client = client.clone();
-        async move {
-            offline::cached(conn, "sources", || client.sources())
-                .await
-                .map(|(value, _)| value)
-        }
-    });
+    let sources = crate::cache::keep_alive(
+        crate::cache::use_sources_cache(),
+        (),
+        RwSignal::new(0),
+        conn,
+        move || {
+            let client = client.clone();
+            async move {
+                offline::cached(conn, "sources", || client.sources())
+                    .await
+                    .map(|(value, _)| value)
+            }
+        },
+    );
 
     view! {
         <section class="sources">
             <h2>"Sources"</h2>
-            {move || match sources.get() {
+            {move || sources.error.get().map(|err| view! { <p class="error">{err}</p> })}
+            {move || match sources.value.get() {
                 None => view! { <p class="muted">"Loading sources…"</p> }.into_any(),
-                Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
-                Some(Ok(list)) if list.is_empty() => {
+                Some(list) if list.is_empty() => {
                     view! {
                         <p class="muted">
                             "No sources configured. Drop a *.toml definition in the server's "
@@ -42,7 +47,7 @@ pub fn Sources() -> impl IntoView {
                     }
                         .into_any()
                 }
-                Some(Ok(list)) => {
+                Some(list) => {
                     view! {
                         <div class="source-list">
                             {list.into_iter().map(source_card).collect_view()}
@@ -63,7 +68,19 @@ fn source_card(source: SourceInfo) -> impl IntoView {
         .map(|s| s.label())
         .collect::<Vec<_>>()
         .join(" · ");
+    let icon = use_client()
+        .source_icon_url(&source.id)
+        .map(|u| u.to_string());
+    let icon_failed = RwSignal::new(false);
+    let initial = source.name.chars().next().unwrap_or('?').to_string();
     let body = view! {
+        <span class="source-icon" aria-hidden="true">
+            {move || if !icon_failed.get() {
+                icon.clone().map(|src| view! { <img src=src alt="" loading="lazy" on:error=move |_| icon_failed.set(true)/> }.into_any())
+            } else {
+                Some(view! { <span>{initial.clone()}</span> }.into_any())
+            }}
+        </span>
         <span class="source-card-name">{source.name.clone()}</span>
         <span class="muted source-card-host">{host}</span>
         <span class="grow"></span>
@@ -96,19 +113,26 @@ pub fn SourceCatalog() -> impl IntoView {
         .unwrap_or_default();
 
     let client = use_client();
-    let sources = LocalResource::new(move || {
-        let client = client.clone();
-        async move { client.sources().await }
-    });
+    let conn = crate::use_connectivity();
+    let sources = crate::cache::keep_alive(
+        crate::cache::use_sources_cache(),
+        (),
+        RwSignal::new(0),
+        conn,
+        move || {
+            let client = client.clone();
+            async move { client.sources().await }
+        },
+    );
 
     view! {
         <section class="sources">
+            {move || sources.error.get().map(|err| view! { <p class="error">{err}</p> })}
             {move || {
                 let id = id.clone();
-                match sources.get() {
+                match sources.value.get() {
                     None => view! { <p class="muted">"Loading…"</p> }.into_any(),
-                    Some(Err(err)) => view! { <p class="error">{err.to_string()}</p> }.into_any(),
-                    Some(Ok(list)) => match list.into_iter().find(|s| s.id == id) {
+                    Some(list) => match list.into_iter().find(|s| s.id == id) {
                         Some(info) if !info.browse.is_empty() => {
                             view! { <Catalog info/> }.into_any()
                         }
@@ -143,6 +167,7 @@ fn Catalog(info: SourceInfo) -> impl IntoView {
     let next_page = StoredValue::new(1u32);
     let loading = RwSignal::new(false);
     let exhausted = RwSignal::new(false);
+    let generation = StoredValue::new(0u32);
 
     let load_more = {
         let client = use_client();
@@ -155,9 +180,14 @@ fn Catalog(info: SourceInfo) -> impl IntoView {
             let client = client.clone();
             let source = source_id.clone();
             let requested_sort = sort.get_untracked();
+            let requested_generation = generation.get_value();
             let page = next_page.get_value();
             spawn_local(async move {
-                match client.browse(&source, requested_sort, page).await {
+                let result = client.browse(&source, requested_sort, page).await;
+                if generation.try_with_value(|g| *g) != Some(requested_generation) {
+                    return;
+                }
+                match result {
                     Ok(batch) => {
                         // stale answer (sort switched meanwhile)?
                         if sort.get_untracked() == requested_sort {
@@ -165,7 +195,15 @@ fn Catalog(info: SourceInfo) -> impl IntoView {
                                 exhausted.set(true);
                             } else {
                                 next_page.set_value(page + 1);
-                                items.update(|all| all.extend(batch));
+                                items.update(|all| {
+                                    let mut keys: std::collections::HashSet<String> =
+                                        all.iter().map(|hit| hit.key.clone()).collect();
+                                    all.extend(
+                                        batch
+                                            .into_iter()
+                                            .filter(|hit| keys.insert(hit.key.clone())),
+                                    );
+                                });
                             }
                         }
                     }
@@ -181,6 +219,9 @@ fn Catalog(info: SourceInfo) -> impl IntoView {
         let load_more = load_more.clone();
         move |_| {
             sort.track();
+            generation.update_value(|g| *g = g.wrapping_add(1));
+            loading.set(false);
+            status.set(None);
             items.set(Vec::new());
             next_page.set_value(1);
             exhausted.set(false);
@@ -211,10 +252,7 @@ fn Catalog(info: SourceInfo) -> impl IntoView {
                 })
                 .collect_view()}
         </div>
-        {move || {
-            let list = items.get();
-            view! { <SummaryGrid items=list source=grid_source.clone() status/> }
-        }}
+        <SummaryGrid items source=grid_source status/>
         <p class="browse-more">
             {move || {
                 if exhausted.get() && items.get().is_empty() {

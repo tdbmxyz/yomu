@@ -1,8 +1,9 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use yomu_domain::{BrowseSort, MangaSummary, SourceInfo, SourceSearchResults};
+use yomu_domain::{BrowseSort, MangaSummary, SourceInfo, SourcePreview, SourceSearchResults};
 
 use super::ApiError;
 use crate::state::AppState;
@@ -88,6 +89,98 @@ pub async fn list(State(state): State<AppState>) -> Json<Vec<SourceInfo>> {
             })
             .collect(),
     )
+}
+
+#[derive(Deserialize)]
+pub struct PreviewQuery {
+    key: String,
+}
+
+pub async fn preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<PreviewQuery>,
+) -> Result<Response, ApiError> {
+    let source = state.sources.get(&id).ok_or(ApiError::NotFound)?;
+    // Only keys actually returned by this source may be scraped. This is
+    // deliberately not a generic URL-fetching endpoint.
+    let mut summary = state
+        .db
+        .catalog_entry(&id, &query.key)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    annotate_in_library(&state, &id, std::slice::from_mut(&mut summary)).await;
+    proxy_covers(std::slice::from_mut(&mut summary));
+    let mut preview = SourcePreview {
+        summary,
+        source_name: source.name().into(),
+        description: None,
+        genres: Vec::new(),
+        chapter_count: None,
+        latest_chapter_at: None,
+        live_unavailable: false,
+        browser_challenge: false,
+    };
+    match source.manga(&query.key).await {
+        Ok(details) => {
+            preview.description = details.description;
+            preview.genres = details.genres;
+            preview.chapter_count = Some(details.chapters.len());
+            preview.latest_chapter_at =
+                details.chapters.iter().filter_map(|c| c.published_at).max();
+        }
+        Err(err) => {
+            tracing::warn!(source = %id, %err, "live title preview unavailable");
+            preview.live_unavailable = true;
+            preview.browser_challenge =
+                matches!(err, yomu_source::SourceError::BrowserChallenge { .. });
+            if let Some(id) = preview.summary.in_library {
+                match state.db.get_publication(id).await {
+                    Ok(publication) => {
+                        let units = state.db.list_units(id).await?;
+                        preview.description = publication.description;
+                        preview.genres = publication.genres;
+                        preview.chapter_count = Some(units.len());
+                        preview.latest_chapter_at =
+                            units.iter().filter_map(|c| c.published_at).max();
+                    }
+                    Err(crate::db::DbError::NotFound) => preview.summary.in_library = None,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+    }
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)).into_response())
+}
+
+/// Fixed, source-owned favicon; never an arbitrary user-supplied URL.
+pub async fn icon(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    use sha2::{Digest, Sha256};
+    let source = state.sources.get(&id).ok_or(ApiError::NotFound)?;
+    let url = source.icon_url().ok_or(ApiError::NotFound)?;
+    let hash = format!("{:x}", Sha256::digest(url.as_str().as_bytes()));
+    let dir = state.config.data_dir.join("covers/icons");
+    for ext in ["ico", "png", "jpg", "gif", "webp", "avif"] {
+        let path = dir.join(format!("{hash}.{ext}"));
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            return Ok(super::library::cover_response(
+                bytes,
+                crate::downloader::content_type_for(&path),
+            ));
+        }
+    }
+    let image = source.image(&url).await?;
+    let ext = crate::downloader::extension_for(&image.content_type, &url);
+    let path = dir.join(format!("{hash}.{ext}"));
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let _ = tokio::fs::write(&path, &image.bytes).await;
+    Ok(super::library::cover_response(
+        image.bytes.to_vec(),
+        crate::downloader::content_type_for(&path),
+    ))
 }
 
 #[derive(Deserialize)]
