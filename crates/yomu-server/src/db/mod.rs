@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use uuid::Uuid;
+use yomu_domain::time as chrono;
 use yomu_domain::{
     Category, ChapterRef, DownloadState, Kind, Origin, ProgressEvent, Publication, ReadingUnit,
     User,
@@ -1081,6 +1082,41 @@ mod tests {
         assert!(matches!(failed_row.download, DownloadState::Pending));
     }
 
+    #[tokio::test]
+    async fn sqlite_runtime_and_legacy_timestamp_storage_are_compatible() {
+        let db = Db::in_memory().await.unwrap();
+        let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let mut parts = version.split('.').map(|part| part.parse::<u32>().unwrap());
+        assert!(
+            (parts.next().unwrap(), parts.next().unwrap()) >= (3, 54),
+            "SQLite {version} predates the WAL page-size fix"
+        );
+        for (legacy, canonical) in [
+            (
+                "2026-01-02T03:04:05.100+00:00",
+                "2026-01-02T03:04:05.100+00:00",
+            ),
+            ("2026-01-02T03:04:05+00:00", "2026-01-02T03:04:05+00:00"),
+            ("2026-01-02 03:04:05.1", "2026-01-02T03:04:05.100+00:00"),
+            ("2026-01-02 03:04:05", "2026-01-02T03:04:05+00:00"),
+        ] {
+            let timestamp: DateTime<Utc> = sqlx::query_scalar("SELECT ?")
+                .bind(legacy)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap_or_else(|err| panic!("could not decode {legacy}: {err}"));
+            let stored: String = sqlx::query_scalar("SELECT ?")
+                .bind(timestamp)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(stored, canonical, "writing timestamp decoded from {legacy}");
+        }
+    }
+
     /// Migration 0012 widens a CHECK, which SQLite can only do by rebuilding
     /// the table — and dropping `reading_units` fires the read marks' ON
     /// DELETE CASCADE. Run it over a populated pre-0012 database and confirm
@@ -1096,7 +1132,10 @@ mod tests {
                 break;
             }
             let mut tx = pool.begin().await.unwrap();
-            tx.execute(&*mig.sql).await.unwrap();
+            sqlx::raw_sql(mig.sql.clone())
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             tx.commit().await.unwrap();
         }
         pool.execute(
@@ -1109,7 +1148,10 @@ mod tests {
         .unwrap();
         let twelve = m.iter().find(|x| x.version == 12).unwrap();
         let mut tx = pool.begin().await.unwrap();
-        tx.execute(&*twelve.sql).await.unwrap();
+        sqlx::raw_sql(twelve.sql.clone())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         for (what, sql) in [
             ("units", "SELECT COUNT(*) FROM reading_units"),
@@ -2556,11 +2598,14 @@ mod tests {
 
         // 0011 runs inside one transaction under the real migrator; replicate
         // that here so defer_foreign_keys spans the publications rebuild.
-        let migration = include_str!("../../migrations/0011_publications.sql");
-        sqlx::raw_sql(&format!("BEGIN; {migration} COMMIT;"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(concat!(
+            "BEGIN; ",
+            include_str!("../../migrations/0011_publications.sql"),
+            " COMMIT;"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (kind, source_id, file_path): (String, Option<String>, Option<String>) =
             sqlx::query_as("SELECT kind, source_id, file_path FROM publications WHERE id = ?")

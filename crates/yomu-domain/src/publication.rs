@@ -1,7 +1,7 @@
 //! The library: publications the user tracks — scraped series and local
 //! files alike — and their reading units as known to the server.
 
-use chrono::{DateTime, Utc};
+use crate::time::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;

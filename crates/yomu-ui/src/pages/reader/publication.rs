@@ -1,9 +1,9 @@
 //! Readium-inspired format navigators. The host owns chrome and persistence;
 //! each navigator reports locations only after displaying the content.
-use chrono::Utc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
+use yomu_domain::time::Utc;
 use yomu_domain::{
     Locations, Locator, ProgressEvent, PublicationDetailResponse, SetLocatorRequest,
 };

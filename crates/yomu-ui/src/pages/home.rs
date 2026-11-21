@@ -257,7 +257,7 @@ fn fresh_shelf(
 #[cfg(test)]
 mod tests {
     use super::fresh_shelf;
-    use chrono::{TimeZone, Utc};
+    use yomu_domain::time::{TimeZone, Utc};
     use yomu_domain::{Kind, Origin, Publication, PublicationWithLocator};
 
     fn entry(title: &str, category: &str, unread: u32, day: u32) -> PublicationWithLocator {

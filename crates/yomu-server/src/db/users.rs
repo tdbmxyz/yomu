@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use yomu_domain::User;
+use yomu_domain::time as chrono;
 
 use super::*;
 

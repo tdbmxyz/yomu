@@ -1,6 +1,7 @@
 //! Human formatting helpers shared by pages.
 
 use chrono::{DateTime, Datelike, Utc};
+use yomu_domain::time as chrono;
 
 /// Chapter release date, compact: relative under a week ("5 h. ago"),
 /// short absolute beyond ("May 19", year appended when it isn't
@@ -20,11 +21,7 @@ pub fn published_label(published: DateTime<Utc>, now: DateTime<Utc>) -> String {
     if age.num_days() < 7 {
         return format!("{} d. ago", age.num_days());
     }
-    if published.year() == now.year() {
-        published.format("%b %-d").to_string()
-    } else {
-        published.format("%b %-d, %Y").to_string()
-    }
+    published.short_date_label(published.year() != now.year())
 }
 
 #[cfg(test)]

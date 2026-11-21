@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use yomu_domain::time as chrono;
 
 /// What the browse endpoint should do for one request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -27,6 +27,10 @@ db_path = "${resolve(state, 'yomu.db')}"
 data_dir = "${resolve(state, 'data')}"
 sources_dir = "${resolve(root, 'e2e/fixtures')}"
 
+[flaresolverr]
+url = "http://127.0.0.1:4811/"
+timeout_secs = 5
+
 [updater]
 enabled = false
 

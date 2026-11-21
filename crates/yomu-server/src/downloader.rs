@@ -169,12 +169,14 @@ pub async fn page_files(
 
 pub fn extension_for(content_type: &str, url: &url::Url) -> &'static str {
     match content_type {
+        t if t.contains("icon") => "ico",
         t if t.contains("png") => "png",
         t if t.contains("webp") => "webp",
         t if t.contains("gif") => "gif",
         t if t.contains("avif") => "avif",
         t if t.contains("jpeg") || t.contains("jpg") => "jpg",
         _ => match url.path().rsplit_once('.').map(|(_, e)| e) {
+            Some("ico") => "ico",
             Some("png") => "png",
             Some("webp") => "webp",
             Some("gif") => "gif",
@@ -187,6 +189,7 @@ pub fn extension_for(content_type: &str, url: &url::Url) -> &'static str {
 /// Content type for a stored page file (by extension).
 pub fn content_type_for(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
+        Some("ico") => "image/x-icon",
         Some("png") => "image/png",
         Some("webp") => "image/webp",
         Some("gif") => "image/gif",

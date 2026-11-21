@@ -7,6 +7,18 @@ db_path = "yomu.db"
 data_dir = "data"          # downloaded chapters + cover cache
 sources_dir = "sources.d"  # one *.toml per scan site
 
+# Optional fallback for Cloudflare browser challenges. Normal HTTP is tried
+# first; returned cookies/user-agent are kept in memory, never in backups.
+# This is a privileged browser service: use a trusted local/isolated instance,
+# restrict its network access (including metadata/private services), and never
+# expose it unauthenticated to the internet. Its browser follows redirects and
+# loads subresources itself; Yomu cannot enforce its DNS policy inside it.
+# Each source opts in with its own [flaresolverr].allowed_hosts in sources.d/;
+# there is no global/site-specific allowlist in the server configuration.
+# [flaresolverr]
+# url = "http://127.0.0.1:8191/" # service origin, without /v1
+# timeout_secs = 60 # 5–120 seconds per solve
+
 [updater]
 enabled = true
 interval_secs = 21600      # check every 6 hours (minimum 60)

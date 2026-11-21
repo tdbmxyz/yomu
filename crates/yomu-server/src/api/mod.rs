@@ -40,6 +40,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(sources::list))
         .route("/sources/{id}/search", get(sources::search))
         .route("/sources/{id}/browse", get(sources::browse))
+        .route("/sources/{id}/preview", get(sources::preview))
+        .route("/sources/{id}/icon", get(sources::icon))
         .route("/covers", get(sources::cover))
         .route("/search", get(sources::search_all))
         .route("/library", get(library::list).post(library::add))
@@ -330,6 +332,8 @@ mod tests {
             ("GET", "/api/v1/sources".into()),
             ("GET", "/api/v1/sources/x/search".into()),
             ("GET", "/api/v1/sources/x/browse".into()),
+            ("GET", "/api/v1/sources/x/icon".into()),
+            ("GET", "/api/v1/sources/x/preview?key=title".into()),
             ("GET", "/api/v1/search".into()),
             ("GET", "/api/v1/covers".into()),
             ("GET", "/api/v1/updates".into()),
@@ -362,6 +366,7 @@ mod tests {
         for query in ["mt=", "mt=nonsense", "mt=a.b.c"] {
             for path in [
                 format!("/api/v1/publications/{ID}/cover?{query}"),
+                format!("/api/v1/sources/x/icon?{query}"),
                 format!("/api/v1/covers?src=https%3A%2F%2Fsource.test%2Fc.jpg&{query}"),
             ] {
                 assert_eq!(

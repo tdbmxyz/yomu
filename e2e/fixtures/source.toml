@@ -14,12 +14,17 @@ cover = "img@src"
 [browse.popular]
 url = "{base}/catalog?page={page}"
 
+[browse.latest]
+url = "{base}/catalog?sort=latest&page={page}"
+
 [manga]
 title = ".entry-title"
 description = ".summary"
 cover = ".cover img@src"
 chapter_item = ".chapter"
 chapter_link = "a@href"
+chapter_title = "a"
+chapter_date = "time@datetime"
 chapter_order = "newest_first"
 
 [pages]
