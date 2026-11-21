@@ -2,7 +2,7 @@
 //! periodic updater: fetch the source listing, merge new units, queue
 //! downloads when the publication wants them.
 
-use chrono::Utc;
+use yomu_domain::time::Utc;
 use yomu_domain::{Origin, Publication, ReadingUnit};
 
 use crate::db::UnitFileOp;

@@ -2,7 +2,7 @@
   description = "yomu - manga/webtoon library, reader and downloader";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
@@ -124,6 +124,12 @@
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
       nativeBuildInputs = [pkgs.makeWrapper];
+      # Ship the patched SQLite pinned by Cargo.lock on every platform, even
+      # when a deployment follows an older nixpkgs with vulnerable SQLite.
+      # Override only the SQLite system-library hook, not other native libs.
+      preBuild = ''
+        unset LIBSQLITE3_SYS_USE_PKG_CONFIG
+      '';
       nativeCheckInputs = [pkgs.poppler-utils];
       postInstall = ''
         wrapProgram $out/bin/yomu-server --prefix PATH : ${lib.makeBinPath [pkgs.poppler-utils]}

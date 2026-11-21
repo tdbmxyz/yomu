@@ -7,6 +7,8 @@ mod more;
 mod offline_storage;
 mod reader;
 mod search;
+mod source_link;
+mod source_title;
 mod sources;
 mod updates;
 
@@ -19,6 +21,7 @@ pub(crate) use manga::save_locally;
 pub use more::More;
 pub use reader::Reader;
 pub use search::Search;
+pub use source_title::SourceTitle;
 pub use sources::{SourceCatalog, Sources};
 pub use updates::Updates;
 

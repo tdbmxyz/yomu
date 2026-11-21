@@ -1,7 +1,7 @@
 //! What a scan-site source exposes, before anything enters the library.
 //! Keys are source-scoped opaque identifiers (usually the page URL path).
 
-use chrono::{DateTime, Utc};
+use crate::time::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
@@ -57,6 +57,23 @@ pub struct MangaSummary {
     /// library manga id. Sources never fill it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_library: Option<Uuid>,
+}
+
+/// Details fetched on demand, without adding a title to the library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePreview {
+    pub summary: MangaSummary,
+    pub source_name: String,
+    pub description: Option<String>,
+    pub genres: Vec<String>,
+    /// Absent when the source lookup failed and no library copy exists.
+    pub chapter_count: Option<usize>,
+    pub latest_chapter_at: Option<DateTime<Utc>>,
+    /// The metadata, if present, is from the library rather than a live lookup.
+    pub live_unavailable: bool,
+    /// Live scraping received an interactive browser check from the source.
+    #[serde(default)]
+    pub browser_challenge: bool,
 }
 
 /// Full details as scraped from the source.

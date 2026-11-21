@@ -287,8 +287,10 @@ self.addEventListener('fetch', event => {
   if (url.pathname === '/pdf-reader.html'
       || /^\/api\/v1\/publications\/[^/]+\/resources\/[^/]+\/.+/.test(url.pathname)) return;
   if (url.pathname.startsWith('/api/')) {
-    // Identity and reachability are NEVER answered from a cached account.
-    if (url.pathname.startsWith('/api/v1/auth/') || /\/api\/v1\/(health|metrics)/.test(url.pathname)) return;
+    // Identity and reachability are never cached. Catalog title previews
+    // also fetch fresh data rather than replaying a stale source lookup.
+    if (url.pathname.startsWith('/api/v1/auth/') || /\/api\/v1\/(health|metrics)/.test(url.pathname)
+        || /^\/api\/v1\/sources\/[^/]+\/preview$/.test(url.pathname)) return;
     if (event.request.method !== 'GET') {
       event.respondWith((async () => {
         const active = await state();

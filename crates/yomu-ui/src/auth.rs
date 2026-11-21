@@ -46,6 +46,10 @@ pub(crate) fn media_token() -> Option<String> {
     storage_get(MEDIA_KEY)
 }
 
+pub(crate) fn store_media_token(token: &str) {
+    storage_set(MEDIA_KEY, Some(token));
+}
+
 pub(crate) fn clear_local() {
     storage_set(SESSION_KEY, None);
     storage_set(MEDIA_KEY, None);
@@ -104,10 +108,10 @@ pub(crate) async fn start_sign_in(
         .as_string()
         .ok_or("the shell returned no authorization URL")?;
     status.set(Some("waiting for the browser to come back".into()));
-    open_external(&url).await
+    open_external(&url)
 }
 
-async fn open_external(url: &str) -> Result<(), String> {
+pub(crate) fn open_external(url: &str) -> Result<(), String> {
     // Android's JS bridge launches an ACTION_VIEW intent. Tauri commands run
     // off the activity thread and are not a reliable system-browser opener.
     if let Some(window) = web_sys::window()

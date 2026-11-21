@@ -8,6 +8,7 @@ mod files;
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
+use yomu_domain::time as chrono;
 use yomu_domain::{Origin, Publication};
 
 pub use files::Streamer;

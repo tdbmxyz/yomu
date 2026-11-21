@@ -9,12 +9,20 @@
 id = "example-scans"
 name = "Example Scans"
 base_url = "https://example-scans.com"
+# icon_url = "/assets/icon.png" # optional; defaults to /favicon.ico
 min_delay_ms = 800            # politeness delay between requests
 # All resolved addresses must be public; checks also apply to redirects.
 # Only for operator-owned local sources: exact hostnames/IPs, never wildcards.
 # allowed_private_hosts = ["localhost", "127.0.0.1"]
 # Ambient HTTP(S)_PROXY variables are deliberately not used by selector fetches.
 # referer = "https://example-scans.com/"   # some sites require it for images
+
+# Optional browser-challenge fallback. The server must separately configure
+# the FlareSolverr service. Omitting this table disables fallback for this
+# source, even when the service exists. Include the base_url host and only
+# the exact site/API/CDN hosts that may receive its clearance credentials.
+# [flaresolverr]
+# allowed_hosts = ["example-scans.com", "cdn.example-scans.com"]
 
 [search]
 url = "{base}/?s={query}&post_type=wp-manga"

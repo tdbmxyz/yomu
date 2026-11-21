@@ -6,6 +6,7 @@ mod cache;
 mod chapter_actions;
 mod cover;
 mod format;
+mod media;
 mod notify;
 pub mod offline;
 mod pager;
@@ -214,6 +215,22 @@ pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(cache::LibraryCache::default());
     provide_context(cache::CategoriesCache::default());
     provide_context(cache::DetailCache::default());
+    provide_context(cache::SourcesCache::default());
+    let media = media::Media::new();
+    provide_context(media);
+    // Renew before the one-hour expiry; visibility handles suspended Android
+    // timers. Image errors also renew (e.g. after a server restart).
+    let media_client = client_for(&config);
+    if let Ok(handle) = set_interval_with_handle(
+        move || {
+            if auth::session_token().is_some() && !offline::document_hidden() {
+                media.refresh(media_client.clone());
+            }
+        },
+        std::time::Duration::from_secs(30 * 60),
+    ) {
+        on_cleanup(move || handle.clear());
+    }
     // Write-through: persist any change so the queue survives restarts.
     Effect::new(move |_| {
         pull_queue.with(|q| offline::save_pull_queue(q));
@@ -253,6 +270,9 @@ pub fn App(config: AppConfig) -> impl IntoView {
         let on_visible = leptos::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
             if offline::document_hidden() {
                 return;
+            }
+            if auth::session_token().is_some() {
+                media.refresh(resume_client.clone());
             }
             if offline::should_probe_on_resume(conn.get_untracked()) {
                 probe.spawn(resume_client.clone());
@@ -311,6 +331,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                         <Route path=path!("/search") view=pages::Search/>
                         <Route path=path!("/sources") view=pages::Sources/>
                         <Route path=path!("/sources/:source") view=pages::SourceCatalog/>
+                        <Route path=path!("/sources/:source/title") view=pages::SourceTitle/>
                         <Route path=path!("/downloads") view=pages::Downloads/>
                         <Route path=path!("/updates") view=pages::Updates/>
                         <Route path=path!("/more") view=pages::More/>
@@ -366,6 +387,7 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
     let conn = use_connectivity();
     let auth = use_context::<auth::AuthContext>().expect("auth context provided by App");
     let client = use_client();
+    let media = media::use_media();
     let base = client.base().to_string();
     // Same watchdog as `Probe`, for the same reason: a boot probe that never
     // lands must not leave the app on "Connecting…" with no way out but a
@@ -395,6 +417,7 @@ fn ServerGate(children: ChildrenFn) -> impl IntoView {
                 if offline::shell_available() && health.auth.is_some() {
                     let held_before = auth::session_token().is_some();
                     if auth::sync_status(auth.status, &base).await {
+                        media.token.set(auth::media_token());
                         // Clients and background drivers created during App
                         // setup captured the old token. A reload makes the
                         // newly mirrored session universal and avoids a mix

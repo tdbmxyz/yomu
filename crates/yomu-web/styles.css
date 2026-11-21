@@ -748,6 +748,95 @@ button.danger:hover {
   margin-bottom: 1.5rem;
 }
 
+.browse-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 22rem;
+}
+
+.browse-title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.manga-cover[hidden] {
+  display: none;
+}
+
+.source-title {
+  max-width: 52rem;
+  margin-inline: auto;
+  overflow-wrap: anywhere;
+}
+
+.source-title-header {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, 25%) minmax(0, 1fr);
+  align-items: start;
+  gap: clamp(0.75rem, 4vw, 1.5rem);
+  margin-block: 1rem 1.5rem;
+}
+
+.source-title-header .manga-cover.large {
+  width: 100%;
+}
+
+.source-title-heading h2 {
+  margin-top: 0;
+}
+
+.source-title-facts {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 0.35rem 0.6rem;
+  font-size: 0.875rem;
+}
+
+.source-title-facts dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.source-title .browse-actions {
+  flex-wrap: wrap;
+  width: fit-content;
+}
+
+.source-title .browse-actions button,
+.source-title-back {
+  min-height: 2.75rem;
+}
+
+.source-title-notice {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.source-title-notice p {
+  margin-block: 0 0.5rem;
+}
+
+.source-title-summary {
+  line-height: 1.65;
+}
+
+.reader-page.image-failed,
+.reader-strip-page.image-failed {
+  opacity: 0;
+}
+
+.reader-image-retry {
+  position: relative;
+  z-index: 1;
+  display: block;
+  margin: 0.5rem auto;
+  min-height: 2.75rem;
+}
+
 .browse-card .manga-title {
   font-size: 0.8rem;
   display: -webkit-box;
@@ -784,7 +873,7 @@ button.danger:hover {
   display: grid;
   /* name | host | spacer | listing labels — subgrid on the cards makes
      the columns line up across all of them */
-  grid-template-columns: max-content max-content 1fr max-content;
+  grid-template-columns: 2rem max-content max-content 1fr max-content;
   gap: 0.6rem;
 }
 
@@ -810,6 +899,23 @@ a.source-card:hover {
   font-weight: 600;
 }
 
+.source-icon {
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  align-self: center;
+  color: var(--accent);
+  background: var(--bg);
+  border-radius: 0.4rem;
+}
+
+.source-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .source-card-host,
 .source-card-sorts {
   font-size: 0.85rem;
@@ -829,15 +935,28 @@ a.source-card:hover {
    labels on the first line, the host wrapping underneath. */
 @media (max-width: 40rem) {
   .source-list {
-    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-columns: 2rem minmax(0, 1fr) max-content;
   }
 
   .source-card {
     row-gap: 0.15rem;
   }
 
+  .source-icon {
+    grid-row: 1 / 3;
+  }
+
+  .source-card .grow {
+    display: none;
+  }
+
+  .source-card-sorts {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
   .source-card-host {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     overflow-wrap: anywhere;
   }
 }

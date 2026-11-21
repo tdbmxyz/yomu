@@ -10,7 +10,7 @@
 //! server and clients never diverge. Fixed layouts use page indices;
 //! reflowable text uses resource-relative progression, not synthetic pages.
 
-use chrono::{DateTime, Utc};
+use crate::time::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

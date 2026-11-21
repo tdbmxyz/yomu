@@ -8,6 +8,7 @@
 //! disk are not a source: the server's streamer serves them directly.
 
 mod dates;
+pub mod flaresolverr;
 mod network;
 pub mod registry;
 pub mod selector;
@@ -20,6 +21,10 @@ use yomu_domain::{BrowseSort, MangaDetails, MangaSummary};
 pub enum SourceError {
     #[error("request failed: {0}")]
     Http(String),
+    /// The upstream explicitly required an interactive browser check. This
+    /// is not a parser error or evidence that a chapter was removed.
+    #[error("{host} requires a browser check. Open the series on the source site.")]
+    BrowserChallenge { host: String },
     #[error("unexpected page structure: {0}")]
     Parse(String),
     #[error("invalid source definition: {0}")]
@@ -44,6 +49,10 @@ pub trait Source: Send + Sync {
     fn id(&self) -> &str;
     fn name(&self) -> &str;
     fn base_url(&self) -> &Url;
+
+    fn icon_url(&self) -> Option<Url> {
+        self.base_url().join("/favicon.ico").ok()
+    }
 
     async fn search(&self, query: &str) -> Result<Vec<MangaSummary>>;
 

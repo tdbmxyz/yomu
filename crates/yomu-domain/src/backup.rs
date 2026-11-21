@@ -4,7 +4,7 @@
 //! sources. Downloaded page files are not included (they re-download); a
 //! restored chapter comes back with its download state reset.
 
-use chrono::{DateTime, Utc};
+use crate::time::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
