@@ -11,6 +11,7 @@ pub mod backup;
 pub mod progress;
 pub mod publication;
 pub mod source;
+pub mod time;
 
 pub use api::*;
 pub use auth::*;

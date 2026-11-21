@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
+use yomu_domain::time as chrono;
 use yomu_domain::{Locator, MangaDetails, Publication};
 
 use super::*;

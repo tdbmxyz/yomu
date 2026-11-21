@@ -140,6 +140,7 @@ fn view_of(views: &HashMap<Uuid, ServerView>, id: Uuid) -> ServerView {
 mod tests {
     use super::{ServerView, server_views, view_of};
     use uuid::Uuid;
+    use yomu_domain::time as chrono;
     use yomu_domain::{DownloadQueueEntry, DownloadState};
 
     fn entry(n: u128, state: DownloadState) -> DownloadQueueEntry {

@@ -1,5 +1,5 @@
-use chrono::Utc;
 use uuid::Uuid;
+use yomu_domain::time::Utc;
 use yomu_domain::{Origin, ReadingUnit};
 
 use super::*;

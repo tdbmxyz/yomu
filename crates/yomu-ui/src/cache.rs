@@ -302,6 +302,7 @@ pub fn remember_scroll(key: String, ready: impl Fn() -> bool + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yomu_domain::time as chrono;
 
     /// Nothing cached: a spinner is the honest answer.
     #[test]

@@ -77,7 +77,7 @@ fn TitleDetails(preview: SourcePreview, source: String, retry: RwSignal<u32>) ->
                     <dt>"Chapter count"</dt>
                     <dd>{preview.chapter_count.map(|n| n.to_string()).unwrap_or_else(|| "Unavailable".into())}</dd>
                     <dt>"Last chapter date"</dt>
-                    <dd>{preview.latest_chapter_at.map(|date| date.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "Unavailable".into())}</dd>
+                    <dd>{preview.latest_chapter_at.map(|date| date.date_label()).unwrap_or_else(|| "Unavailable".into())}</dd>
                 </dl>
                 <TrackResult source key=preview.summary.key.clone() in_library status/>
                 {move || status.get().map(|s| view! { <p class="status" role="status">{s}</p> })}

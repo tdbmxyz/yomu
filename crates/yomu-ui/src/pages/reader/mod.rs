@@ -3,11 +3,11 @@
 //! when the server is unreachable the event lands in the offline outbox and
 //! is merged back later (see `offline`).
 
-use chrono::Utc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::use_query_map;
+use yomu_domain::time::Utc;
 use yomu_domain::{ProgressEvent, SetLocatorRequest};
 
 use super::{NotFound, param_uuid};

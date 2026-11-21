@@ -8,6 +8,7 @@
 //! against fixture HTML.
 
 use std::time::Duration;
+use yomu_domain::time as chrono;
 
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};

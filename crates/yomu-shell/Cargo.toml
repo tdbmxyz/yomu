@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 
 # Keep Linux workspace builds free of Tauri's desktop webview stack.
 [target.'cfg(target_os = "android")'.dependencies]
+yomu-domain.workspace = true
 yomu-store.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-notification = "2"
@@ -28,7 +29,6 @@ url.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
 base64.workspace = true

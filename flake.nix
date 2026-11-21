@@ -123,9 +123,13 @@
       cargoLock.lockFile = ./Cargo.lock;
       cargoBuildFlags = ["-p" "yomu-server"];
       cargoTestFlags = ["-p" "yomu-server" "-p" "yomu-source"];
-      nativeBuildInputs = [pkgs.makeWrapper pkgs.pkg-config];
-      # nixpkgs' Cargo hook disables bundled SQLite; SQLx needs the system lib.
-      buildInputs = [pkgs.sqlite];
+      nativeBuildInputs = [pkgs.makeWrapper];
+      # Ship the patched SQLite pinned by Cargo.lock on every platform, even
+      # when a deployment follows an older nixpkgs with vulnerable SQLite.
+      # Override only the SQLite system-library hook, not other native libs.
+      preBuild = ''
+        unset LIBSQLITE3_SYS_USE_PKG_CONFIG
+      '';
       nativeCheckInputs = [pkgs.poppler-utils];
       postInstall = ''
         wrapProgram $out/bin/yomu-server --prefix PATH : ${lib.makeBinPath [pkgs.poppler-utils]}

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use uuid::Uuid;
+use yomu_domain::time as chrono;
 use yomu_domain::{
     Category, DownloadState, PublicationDetailResponse, ReadingUnit, UpdatePublicationRequest,
 };
@@ -414,7 +415,7 @@ fn MangaDetail(
                     </p>
                     {(!is_local).then(|| view! {
                         <p class="muted">"Last successful chapter check: "
-                            {publication.last_checked_at.map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_else(|| "Not yet checked".into())}
+                            {publication.last_checked_at.map(|at| at.checked_at_label()).unwrap_or_else(|| "Not yet checked".into())}
                         </p>
                     })}
                     <div class="manga-actions">

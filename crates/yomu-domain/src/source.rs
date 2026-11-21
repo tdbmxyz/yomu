@@ -1,7 +1,7 @@
 //! What a scan-site source exposes, before anything enters the library.
 //! Keys are source-scoped opaque identifiers (usually the page URL path).
 
-use chrono::{DateTime, Utc};
+use crate::time::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;

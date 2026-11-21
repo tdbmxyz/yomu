@@ -71,9 +71,9 @@ fn message(units: &[ReadingUnit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use uuid::Uuid;
     use yomu_domain::DownloadState;
+    use yomu_domain::time::Utc;
 
     fn chapter(title: &str) -> ReadingUnit {
         ReadingUnit {

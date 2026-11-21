@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use yomu_domain::MangaSummary;
+use yomu_domain::time as chrono;
 
 use super::*;
 

@@ -1,5 +1,5 @@
 use super::*;
-use chrono::{TimeZone, Utc};
+use yomu_domain::time::{TimeZone, Utc};
 use yomu_domain::{Locations, Locator};
 
 fn version(id: u128, filename: &str, units: u32, day: Option<u32>) -> PublicationWithLocator {
