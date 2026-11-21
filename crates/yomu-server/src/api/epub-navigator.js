@@ -27,18 +27,15 @@
     parent.postMessage('yomu-link:' + target.href, '*');
   });
   var fontSize = 100;
-  var layoutGeneration = 0;
   function reflow(change, at) {
     if (!document.body) return;
     if (at === undefined) at = progression();
-    var generation = ++layoutGeneration;
     change();
-    requestAnimationFrame(function () {
-      if (generation !== layoutGeneration) return;
-      var scroller = document.scrollingElement || root;
-      scroller.scrollTop = Math.max(0, scroller.scrollHeight - innerHeight) * at / 1000;
-      send();
-    });
+    // Reading scrollHeight flushes the new layout. Restore the position now
+    // so a queued animation frame can't overwrite a subsequent user scroll.
+    var scroller = document.scrollingElement || root;
+    scroller.scrollTop = Math.max(0, scroller.scrollHeight - innerHeight) * at / 1000;
+    send();
   }
   function setFontSize(value, at) {
     reflow(function () {
