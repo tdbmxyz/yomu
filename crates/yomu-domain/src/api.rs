@@ -1,6 +1,6 @@
 //! Request/response envelopes of the HTTP API (`/api/v1`).
 
-use chrono::{DateTime, Utc};
+use crate::time::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

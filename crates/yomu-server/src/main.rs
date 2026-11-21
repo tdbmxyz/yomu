@@ -27,9 +27,17 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load().context("loading configuration")?;
     let maintenance_command = std::env::args().nth(1);
 
-    let (sources, broken) = Registry::load(&config.sources_dir).map_err(|e| {
-        anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display())
-    })?;
+    let solver = config
+        .flaresolverr
+        .clone()
+        .map(yomu_source::flaresolverr::FlareSolverr::new)
+        .transpose()
+        .context("configuring [flaresolverr]")?
+        .map(std::sync::Arc::new);
+    let (sources, broken) =
+        Registry::load_with_flaresolverr(&config.sources_dir, solver).map_err(|e| {
+            anyhow::anyhow!("loading sources from {}: {e}", config.sources_dir.display())
+        })?;
     for definition in &broken {
         tracing::error!(%definition, "skipping invalid source definition");
     }

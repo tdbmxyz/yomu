@@ -2,7 +2,7 @@
 //! HTTP readiness and the background task exercise the same pool and options
 //! as normal application writes.
 
-use chrono::Utc;
+use yomu_domain::time::Utc;
 
 use super::{Db, Result};
 

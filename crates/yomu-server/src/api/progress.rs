@@ -1,8 +1,8 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
+use yomu_domain::time::Utc;
 use yomu_domain::{
     EventsResponse, Locator, ProgressEvent, PushEventsRequest, PushEventsResponse,
     SetLocatorRequest,

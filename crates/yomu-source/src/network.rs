@@ -41,6 +41,21 @@ impl NetworkPolicy {
         }
         Ok(())
     }
+    /// Browser requests resolve outside reqwest, so preflight their target
+    /// too. The trusted solver must additionally be network-isolated: page
+    /// scripts/subresources and redirects happen in its browser process.
+    pub async fn check_resolved_url(&self, url: &Url) -> Result<(), String> {
+        self.check_url(url)?;
+        if let Some(url::Host::Domain(host)) = url.host() {
+            let addresses =
+                tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(80)))
+                    .await
+                    .map_err(|_| "source hostname could not be resolved".to_string())?
+                    .collect::<Vec<_>>();
+            self.check_addresses(host, &addresses)?;
+        }
+        Ok(())
+    }
     fn check_addresses(
         &self,
         host: &str,

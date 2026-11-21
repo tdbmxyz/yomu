@@ -85,6 +85,7 @@ pub fn takes_media_token(path: &str) -> bool {
     }
     let mut segments = path.split('/').skip(1);
     match (segments.next(), segments.next(), segments.next()) {
+        (Some("sources"), Some(_), Some("icon")) => segments.next().is_none(),
         // /publications/{id}/cover
         (Some("publications"), Some(_), Some("cover")) => segments.next().is_none(),
         // /publications/{id}/resources/{token}/... — nested EPUB assets
@@ -293,6 +294,9 @@ mod tests {
     fn image_routes_take_a_media_token_but_are_not_public() {
         assert!(!is_public("/publications/0199-abc/cover"));
         assert!(takes_media_token("/covers"));
+        assert!(takes_media_token("/sources/fixture/icon"));
+        assert!(!takes_media_token("/sources/fixture/preview"));
+        assert!(!takes_media_token("/sources/fixture/icon/extra"));
         assert!(takes_media_token("/publications/0199-abc/cover"));
         assert!(takes_media_token("/units/0199-abc/pages/12"));
         // Matching stays exact; JSON and similarly named routes still need

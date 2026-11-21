@@ -19,6 +19,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Directory of source definitions (`*.toml`, see sources.d examples).
     pub sources_dir: PathBuf,
+    /// Optional trusted browser fallback for explicitly allowed sources.
+    pub flaresolverr: Option<yomu_source::flaresolverr::FlareSolverrConfig>,
     pub updater: UpdaterConfig,
     /// Accepts the legacy 1.x section name `[local]` too; see [`extract`].
     pub books: BooksConfig,
@@ -185,6 +187,7 @@ impl Default for Config {
             db_path: PathBuf::from("yomu.db"),
             data_dir: PathBuf::from("data"),
             sources_dir: PathBuf::from("sources.d"),
+            flaresolverr: None,
             updater: UpdaterConfig::default(),
             books: BooksConfig::default(),
             auth: AuthConfig::default(),
@@ -247,6 +250,22 @@ mod tests {
         assert_eq!(config.books.dir, PathBuf::from("/srv/media"));
         assert!(config.books.enabled);
         assert_eq!(config.books.scan_interval_secs, 3600);
+    }
+
+    #[test]
+    fn optional_flaresolverr_config() {
+        assert!(from_toml("").unwrap().flaresolverr.is_none());
+        let config = from_toml("[flaresolverr]\nurl = 'http://127.0.0.1:8191/'\n").unwrap();
+        let solver = config.flaresolverr.unwrap();
+        assert_eq!(solver.timeout_secs, 60);
+        assert_eq!(solver.url.as_str(), "http://127.0.0.1:8191/");
+        // Source policy must not accidentally remain in machine settings.
+        assert!(
+            from_toml(
+                "[flaresolverr]\nurl = 'http://127.0.0.1:8191/'\nallowed_hosts = ['site.test']\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

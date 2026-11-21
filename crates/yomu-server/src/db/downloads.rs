@@ -1,7 +1,7 @@
-use chrono::Utc;
 use sqlx::Row;
 use uuid::Uuid;
 use yomu_domain::ReadingUnit;
+use yomu_domain::time::Utc;
 
 use super::*;
 

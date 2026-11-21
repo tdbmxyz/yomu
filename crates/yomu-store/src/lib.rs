@@ -16,6 +16,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use uuid::Uuid;
 use yomu_domain::ProgressEvent;
+use yomu_domain::time as chrono;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

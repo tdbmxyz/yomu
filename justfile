@@ -11,9 +11,9 @@ server:
 web:
     cd crates/yomu-web && trunk serve
 
-# Build the production frontend bundle
+# Build the production frontend bundle with the same toolchain path remap as Nix.
 build-web:
-    cd crates/yomu-web && trunk build --release
+    cd crates/yomu-web && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$(rustc --print sysroot)=/rust-toolchain" trunk build --release
 
 # Full check: formatting, lints, native + wasm compilation.
 # The Android shell is compiled separately by `just apk` and CI.

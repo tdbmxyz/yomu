@@ -324,6 +324,7 @@ mod tests {
     use super::{device_rows, groups, ids};
     use crate::LocalDownload;
     use uuid::Uuid;
+    use yomu_domain::time as chrono;
     use yomu_domain::{DownloadQueueEntry, DownloadState};
 
     fn entry(n: u128, state: DownloadState) -> DownloadQueueEntry {

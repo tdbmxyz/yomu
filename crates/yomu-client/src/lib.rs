@@ -31,6 +31,9 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 const DATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 /// Deadline for the health probe (boot gate, offline-badge retry).
 const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Source operations may need two bounded browser solves (details + chapter
+/// fragment). Ordinary library, health and sync requests keep short deadlines.
+const SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 // NB: the wasm client deliberately keeps `fetch`'s default (same-origin)
 // credentials mode. Forcing `credentials: include` breaks every cross-origin
@@ -144,6 +147,7 @@ impl YomuClient {
         let req = self
             .http
             .get(self.url(&format!("api/v1/sources/{source_id}/search"))?)
+            .timeout(SOURCE_TIMEOUT)
             .query(&[("q", query)]);
         self.send(req).await
     }
@@ -153,6 +157,7 @@ impl YomuClient {
         let req = self
             .http
             .get(self.url("api/v1/search")?)
+            .timeout(SOURCE_TIMEOUT)
             .query(&[("q", query)]);
         self.send(req).await
     }
@@ -167,21 +172,50 @@ impl YomuClient {
         let req = self
             .http
             .get(self.url(&format!("api/v1/sources/{source_id}/browse"))?)
+            .timeout(SOURCE_TIMEOUT)
             .query(&[("sort", sort.key()), ("page", &page.to_string())]);
         self.send(req).await
+    }
+
+    pub async fn source_preview(
+        &self,
+        source_id: &str,
+        key: &str,
+    ) -> Result<yomu_domain::SourcePreview> {
+        let req = self
+            .http
+            .get(self.url(&format!("api/v1/sources/{source_id}/preview"))?)
+            .timeout(SOURCE_TIMEOUT)
+            .query(&[("key", key)]);
+        self.send(req).await
+    }
+
+    pub fn source_icon_url(&self, source_id: &str) -> Option<Url> {
+        self.signed_media_url(
+            self.base
+                .join(&format!("api/v1/sources/{source_id}/icon"))
+                .ok(),
+        )
     }
 
     /// Resolve a source result's server-relative cover-proxy URL and add the
     /// media credential needed when a native WebView loads it with `<img>`.
     pub fn source_cover_url(&self, path: &str) -> Option<Url> {
-        let path = path.strip_prefix('/')?;
-        self.signed_media_url(self.base.join(path).ok())
+        let (route, _) = path.split_once('?')?;
+        if route != "/api/v1/covers" {
+            return None;
+        }
+        self.signed_media_url(self.base.join(path.trim_start_matches('/')).ok())
     }
 
     // ---- library ----
 
     pub async fn add_publication(&self, req: &AddPublicationRequest) -> Result<Publication> {
-        let req = self.http.post(self.url("api/v1/library")?).json(req);
+        let req = self
+            .http
+            .post(self.url("api/v1/library")?)
+            .timeout(SOURCE_TIMEOUT)
+            .json(req);
         self.send(req).await
     }
 
@@ -215,7 +249,8 @@ impl YomuClient {
     pub async fn refresh_publication(&self, id: Uuid) -> Result<RefreshResponse> {
         let req = self
             .http
-            .post(self.url(&format!("api/v1/publications/{id}/refresh"))?);
+            .post(self.url(&format!("api/v1/publications/{id}/refresh"))?)
+            .timeout(SOURCE_TIMEOUT);
         self.send(req).await
     }
 
@@ -387,7 +422,12 @@ impl YomuClient {
     }
 
     pub async fn unit_pages(&self, id: Uuid) -> Result<PagesResponse> {
-        self.get(&format!("api/v1/units/{id}/pages")).await
+        self.send(
+            self.http
+                .get(self.url(&format!("api/v1/units/{id}/pages"))?)
+                .timeout(SOURCE_TIMEOUT),
+        )
+        .await
     }
 
     /// Image URL of one page (for `<img src>`); served from disk or proxied
@@ -406,7 +446,9 @@ impl YomuClient {
         let url = self
             .page_url(unit_id, page)
             .ok_or_else(|| ClientError::Transport("invalid page url".into()))?;
-        self.check_status(self.http.get(url)).await.map(|_| ())
+        self.check_status(self.http.get(url).timeout(SOURCE_TIMEOUT))
+            .await
+            .map(|_| ())
     }
 
     // ---- progress ----
@@ -523,6 +565,7 @@ mod tests {
         let plain = YomuClient::new(base());
         assert_eq!(plain.cover_url(id).unwrap().query(), None);
         assert_eq!(plain.page_url(id, 3).unwrap().query(), None);
+        assert_eq!(plain.source_icon_url("fixture").unwrap().query(), None);
         assert_eq!(
             plain.source_cover_url(source_cover).unwrap().query(),
             Some("src=https%3A%2F%2Fsource.test%2Fcover.jpg")
@@ -531,6 +574,10 @@ mod tests {
         let signed = YomuClient::new(base()).with_media_token(Some("mt-1".into()));
         assert_eq!(signed.cover_url(id).unwrap().query(), Some("mt=mt-1"));
         assert_eq!(signed.page_url(id, 3).unwrap().query(), Some("mt=mt-1"));
+        assert_eq!(
+            signed.source_icon_url("fixture").unwrap().query(),
+            Some("mt=mt-1")
+        );
         let source_url = signed.source_cover_url(source_cover).unwrap();
         assert_eq!(source_url.path(), "/api/v1/covers");
         assert!(

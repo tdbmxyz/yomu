@@ -3,7 +3,8 @@
 //! `<time datetime>` attribute), an absolute local convention like
 //! "2026/05/19", or English relative phrases like "2 days ago".
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
+use yomu_domain::time as chrono;
 
 /// `text` is whitespace-normalized selector output. `format` is the
 /// source's optional `chapter_date_format` (chrono syntax); date-only
@@ -19,19 +20,10 @@ pub(crate) fn parse_chapter_date(
     if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
         return Some(dt.with_timezone(&Utc));
     }
-    if let Some(fmt) = format {
-        if let Ok(dt) = DateTime::parse_from_str(text, fmt) {
-            return Some(dt.with_timezone(&Utc));
-        }
-        // A format carrying a time but no offset (e.g. "%Y-%m-%d %H:%M")
-        // parses as neither a zoned DateTime nor a bare NaiveDate; treat it
-        // as local-naive wall time at UTC, matching the date-only branch.
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, fmt) {
-            return Some(dt.and_utc());
-        }
-        if let Ok(date) = NaiveDate::parse_from_str(text, fmt) {
-            return date.and_hms_opt(0, 0, 0).map(|d| d.and_utc());
-        }
+    if let Some(fmt) = format
+        && let Some(at) = DateTime::parse_source_date(text, fmt)
+    {
+        return Some(at);
     }
     relative(text, now)
 }
@@ -66,7 +58,7 @@ fn relative(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         "year" => 365 * 86_400,
         _ => return None,
     };
-    Some(now - chrono::Duration::seconds(n * unit_seconds))
+    now.checked_sub(chrono::Duration::seconds(n.checked_mul(unit_seconds)?))
 }
 
 #[cfg(test)]

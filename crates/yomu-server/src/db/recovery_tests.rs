@@ -1,6 +1,6 @@
 //! Synthetic, file-backed upgrade and snapshot drills. Never opens operator data.
 use super::*;
-use sqlx::migrate::Migrator;
+use sqlx::{AssertSqlSafe, migrate::Migrator};
 use std::borrow::Cow;
 
 const PUBLICATION: &str = "00000000-0000-0000-0000-00000000000a";
@@ -63,9 +63,11 @@ async fn historical(path: &Path, version: i64, accounts: usize) {
             "read_units",
         )
     };
-    sqlx::query(&format!("INSERT INTO {publications} (id,source_id,source_key,title,added_at) VALUES (?, 'fixture','m1','Synthetic book','2026-01-01T00:00:00Z')"))
+    // Only hard-coded historical table/column names above are interpolated;
+    // every value remains bound. This helper never accepts operator SQL.
+    sqlx::query(AssertSqlSafe(format!("INSERT INTO {publications} (id,source_id,source_key,title,added_at) VALUES (?, 'fixture','m1','Synthetic book','2026-01-01T00:00:00Z')")))
         .bind(PUBLICATION).execute(&pool).await.unwrap();
-    sqlx::query(&format!("INSERT INTO {units} (id,{publication_id},source_key,title,source_order,fetched_at,download_state,downloaded_at,page_count) VALUES (?,?,'c1','One',0,'2026-01-01T00:00:00Z','downloaded','2026-01-02T00:00:00Z',12)"))
+    sqlx::query(AssertSqlSafe(format!("INSERT INTO {units} (id,{publication_id},source_key,title,source_order,fetched_at,download_state,downloaded_at,page_count) VALUES (?,?,'c1','One',0,'2026-01-01T00:00:00Z','downloaded','2026-01-02T00:00:00Z',12)")))
         .bind(UNIT).bind(PUBLICATION).execute(&pool).await.unwrap();
     for (id, subject, name) in [
         (ALICE, "oidc-alice", "alice"),
@@ -84,11 +86,11 @@ async fn historical(path: &Path, version: i64, accounts: usize) {
         .into_iter()
         .chain((accounts == 2).then_some(DUPLICATE))
     {
-        sqlx::query(&format!("INSERT INTO progress_events (id,user_id,{publication_id},{unit_id},page,device,at) VALUES (?,?,?,?,7,'fixture','2026-01-03T00:00:00Z')"))
+        sqlx::query(AssertSqlSafe(format!("INSERT INTO progress_events (id,user_id,{publication_id},{unit_id},page,device,at) VALUES (?,?,?,?,7,'fixture','2026-01-03T00:00:00Z')")))
             .bind(Uuid::new_v4().to_string()).bind(owner).bind(PUBLICATION).bind(UNIT).execute(&pool).await.unwrap();
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {marks} (user_id,{unit_id},at) VALUES (?,?,'2026-01-03T00:00:00Z')"
-        ))
+        )))
         .bind(owner)
         .bind(UNIT)
         .execute(&pool)

@@ -41,6 +41,40 @@ pub fn sweep_device_covers(
     });
 }
 
+/// Covers from search/catalog only use the authenticated Yomu proxy. A
+/// refused or undecodable image leaves the same-sized placeholder behind.
+#[component]
+pub fn SourceCover(path: Option<String>, #[prop(optional)] large: bool) -> impl IntoView {
+    let client = use_client();
+    let media = crate::media::use_media();
+    let class = if large {
+        "manga-cover large"
+    } else {
+        "manga-cover"
+    };
+    let empty = if large {
+        "manga-cover large cover-empty"
+    } else {
+        "manga-cover cover-empty"
+    };
+    view! {
+        {move || {
+            let client = client.clone().with_media_token(media.token.get());
+            match path.as_ref().and_then(|path| client.source_cover_url(path)) {
+                Some(src) => {
+                    let failed = RwSignal::new(false);
+                    view! {
+                        <img class=class src=src.to_string() alt="" loading=if large { "eager" } else { "lazy" }
+                            decoding="async" hidden=move || failed.get() on:error=move |_| failed.set(true)/>
+                        <span class=empty aria-hidden="true" hidden=move || !failed.get()></span>
+                    }.into_any()
+                }
+                None => view! { <span class=empty aria-hidden="true"></span> }.into_any(),
+            }
+        }}
+    }
+}
+
 #[component]
 pub fn Cover(manga_id: uuid::Uuid, #[prop(optional)] large: bool) -> impl IntoView {
     let conn = use_connectivity();

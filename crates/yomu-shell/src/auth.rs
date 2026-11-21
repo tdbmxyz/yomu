@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
+use yomu_domain::time as chrono;
 
 pub const REDIRECT_URI: &str = "xyz.tdbm.yomu://auth/callback";
 
